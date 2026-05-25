@@ -91,7 +91,7 @@ class SettingsPage(ft.Container):
                 ft.dropdown.Option("free", "免费数据源（akshare + yfinance）"),
                 ft.dropdown.Option("custom", "自定义 API"),
             ],
-            on_change=self._on_data_source_change,
+            on_select=self._on_data_source_change,
         )
 
         # 自定义 API 字段（仅在选择"自定义 API"时可见）
@@ -109,9 +109,16 @@ class SettingsPage(ft.Container):
             visible=custom_visible,
         )
 
+        # ========== 代理配置 ==========
+        self._proxy_input = ft.TextField(
+            label="HTTPS 代理地址",
+            value=settings.get("proxy", ""),
+            hint_text="如 http://127.0.0.1:7890，用于 yfinance 等外网访问",
+        )
+
         # ========== 保存按钮 ==========
-        save_btn = ft.ElevatedButton(
-            "保存设置",
+        save_btn = ft.Button(
+            content=ft.Text("保存设置"),
             icon=ft.Icons.SAVE,
             on_click=self._save_settings,
             style=ft.ButtonStyle(
@@ -121,7 +128,7 @@ class SettingsPage(ft.Container):
         )
 
         # ========== 页面布局 ==========
-        return ft.Column(
+        self.content = ft.Column(
             scroll=ft.ScrollMode.AUTO,
             spacing=16,
             controls=[
@@ -141,7 +148,8 @@ class SettingsPage(ft.Container):
                 self._llm_base_url,
                 self._llm_api_key,
                 self._llm_model,
-                ft.Text("使用 OpenAI 兼容 API 格式。可不配置大模型，系统将自动生成基础报告。",
+                ft.Text("使用 OpenAI 兼容 API 格式。\n"
+                        "本地 Ollama: URL=http://localhost:11434/v1, Key=ollama, Model=qwen2.5",
                         size=12, color=ft.Colors.GREY_600),
 
                 ft.Divider(),
@@ -154,6 +162,13 @@ class SettingsPage(ft.Container):
 
                 ft.Divider(),
 
+                ft.Text("代理配置", size=16, weight=ft.FontWeight.W_600),
+                self._proxy_input,
+                ft.Text("如果 yfinance 获取美股数据被限流，在此配置代理地址。仅影响数据获取，不影响 LLM API。",
+                        size=12, color=ft.Colors.GREY_600),
+
+                ft.Divider(),
+
                 ft.Row(
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     controls=[
@@ -163,18 +178,19 @@ class SettingsPage(ft.Container):
                 ),
             ],
         )
+        return self.content
 
     def _pick_work_dir(self, e):
         """打开系统文件夹选择器选择工作目录。"""
-        def handle_result(e: ft.FilePickerResultEvent):
-            if e.path:
-                self._work_dir_input.value = e.path
+        async def handle():
+            picker = ft.FilePicker()
+            self.page.overlay.append(picker)
+            self.page.update()
+            path = await picker.get_directory_path()
+            if path:
+                self._work_dir_input.value = path
                 self._work_dir_input.update()
-
-        picker = ft.FilePicker(on_result=handle_result)
-        self.page.overlay.append(picker)
-        self.page.update()
-        picker.get_directory_path()
+        self.page.run_task(handle)
 
     def _on_data_source_change(self, e):
         """数据源下拉切换 → 显示/隐藏自定义 API 字段。"""
@@ -194,13 +210,14 @@ class SettingsPage(ft.Container):
         settings.set("data_source", self._data_source_dd.value)
         settings.set("custom_api_endpoint", self._custom_api_endpoint.value)
         settings.set("custom_api_key", self._custom_api_key.value)
+        settings.set("proxy", self._proxy_input.value)
         settings.save()
 
         # 显示保存成功提示（2 秒后自动消失）
         self._status_text.value = "设置已保存！"
         self._status_text.color = ft.Colors.GREEN
         self._status_text.update()
-        self.page.run_task(lambda: self._reset_status())
+        self.page.run_task(self._reset_status)
 
         # 通知主应用（重新初始化日志和数据库路径）
         if self._on_save:

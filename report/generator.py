@@ -34,17 +34,62 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """你是一个专业的股票分析师。请基于下面提供的**真实数据**，生成一份客观、专业的中文股票分析报告。
 
 ## 重要规则
-1. **严禁编造数据** — 所有分析必须基于我提供的数据，不得添加未提及的数字或事实。
-2. **发现不可直接给出投资建议** — 报告中用「买入信号/卖出信号」「建议关注/观望」等表述，最后必须注明「以上分析仅供参考，不构成投资建议」。
-3. **报告格式** — 使用 Markdown 格式输出。
+1. **全部使用中文输出** — 报告内容必须全部是中文。如果原始数据中有英文内容（如公司简介、新闻标题），请翻译为中文后呈现。
+2. **严禁编造数据** — 所有分析必须基于我提供的数据，不得添加未提及的数字或事实。
+3. **发现不可直接给出投资建议** — 报告中用「买入信号/卖出信号」「建议关注/观望」等表述，最后必须注明「以上分析仅供参考，不构成投资建议」。
+4. **报告格式** — 使用 Markdown 格式输出。
 
 ## 报告结构
-1. **股票简介** — 公司名称、代码、所属行业、主营业务简介
+1. **股票简介** — 公司名称、代码、所属行业、主营业务简介（英文内容请翻译为中文）
 2. **近期 K 线走势** — 近两周价格走势描述（基于价格数据）
 3. **技术面分析** — 基于提供的技术指标数据做分析
-4. **新闻面分析** — 基于新闻情感分析结果，评估市场情绪
+4. **新闻面分析** — 基于新闻情感分析结果，评估市场情绪（英文新闻标题请翻译为中文概括）
 5. **回测结果** — 回测策略表现，包括收益率、最大回撤等
 6. **综合建议** — 结合以上分析，给出明确的短期操作建议（买入/卖出/观望）及理由
+"""
+
+# 回退模板（LLM 不可用时使用）
+_FALLBACK_TEMPLATE = """# {name}（{code}）分析报告
+
+> 生成时间：{now}
+> 市场：{market_name} | 行业：{industry}
+
+---
+
+## 一、股票简介
+
+{description}
+
+---
+
+## 二、技术面分析
+
+{technical_summary}
+
+---
+
+## 三、新闻面分析
+
+{news_text}
+
+重点新闻：
+{top_news}
+
+---
+
+## 四、回测结果
+
+{trade_summary}
+
+---
+
+## 五、综合建议
+
+**{recommendation}**
+
+---
+
+> ⚠️ **免责声明**：以上分析仅供参考，不构成任何投资建议。股市有风险，投资需谨慎。
 """
 
 
@@ -77,33 +122,25 @@ def generate_report(
     base_url = settings.get("llm_base_url", "https://api.openai.com/v1")
     model = settings.get("llm_model", "gpt-4o")
 
-    # 未配置 API Key → 直接使用回退模板
-    if not api_key:
+    # 本地模型（Ollama 等）允许空 API Key
+    if not api_key and "localhost" not in base_url and "127.0.0.1" not in base_url:
         return _generate_fallback_report(
             stock_info, technical_summary, news_aggregation, backtest_result
         )
 
-    # 尝试调用 LLM API
-    try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=api_key, base_url=base_url)
-
-        # 提取各模块数据
-        news_text = news_aggregation.get("summary", "")
-        top_news = news_aggregation.get("top_news", "")
-        trade_summary = backtest_result.get("trade_summary", "")
-        recommendation = backtest_result.get("recommendation", "")
-
-        # 构造用户提示词（包含所有分析数据）
-        user_prompt = f"""请根据以下数据分析 {stock_info.get('name', '')}({stock_info.get('code', '')})：
+    # 构建 LLM 提示词
+    news_text = news_aggregation.get("summary", "")
+    top_news = news_aggregation.get("top_news", "")
+    trade_summary = backtest_result.get("trade_summary", "")
+    recommendation = backtest_result.get("recommendation", "")
+    user_prompt = f"""请用中文分析以下股票 {stock_info.get('name', '')}({stock_info.get('code', '')})，所有内容必须用中文呈现：
 
 ## 股票基本信息
 - 名称：{stock_info.get('name', '')}
 - 代码：{stock_info.get('code', '')}
 - 市场：{stock_info.get('market', '')}
 - 行业：{stock_info.get('industry', '')}
-- 简介：{stock_info.get('description', '')}
+- 简介（英文原文，请翻译为中文）：{stock_info.get('description', '')}
 
 ## 技术面分析数据
 {technical_summary}
@@ -111,7 +148,7 @@ def generate_report(
 ## 新闻情感分析
 {news_text}
 
-重点新闻：
+重点新闻（英文标题请翻译为中文概括）：
 {top_news}
 
 ## 回测结果
@@ -119,19 +156,50 @@ def generate_report(
 
 回测建议：{recommendation}
 
-请按照要求的报告结构生成完整分析报告。"""
+请按照要求的报告结构生成完整中文分析报告。"""
 
-        # 调用 LLM
+    full_prompt = SYSTEM_PROMPT + "\n\n" + user_prompt
+
+    # 尝试调用 LLM API
+    try:
+        # Ollama 原生 API（localhost:11434 时使用，更可靠）
+        if "localhost:11434" in base_url or "127.0.0.1:11434" in base_url:
+            import requests
+            logger.info(f"Calling Ollama native API: model={model}")
+            resp = requests.post(
+                "http://localhost:11434/api/generate",
+                json={"model": model, "prompt": full_prompt, "stream": False},
+                timeout=600,
+            )
+            data = resp.json()
+            report = data.get("response", "")
+            if not report:
+                logger.warning(f"Ollama returned empty (done_reason={data.get('done_reason')})")
+                return _generate_fallback_report(stock_info, technical_summary, news_aggregation, backtest_result)
+            logger.info(f"LLM report generated: {len(report)} chars")
+            return report
+
+        # OpenAI 兼容 API（远程模型）
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=600.0)
+        logger.info(f"Calling OpenAI-compatible API: model={model}")
         response = client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.3,   # 低温度 → 更稳定、更基于事实的输出
-            max_tokens=4000,   # 足够容纳完整的分析报告
+            temperature=0.3,
+            max_tokens=4000,
         )
-        report = response.choices[0].message.content
+        choice = response.choices[0]
+        report = choice.message.content
+        logger.info(f"LLM response: finish_reason={choice.finish_reason}, content_len={len(report) if report else 0}")
+        if not report:
+            logger.warning(f"LLM returned empty response (finish_reason={choice.finish_reason}), falling back to template")
+            return _generate_fallback_report(
+                stock_info, technical_summary, news_aggregation, backtest_result
+            )
         logger.info("Report generated by LLM")
         return report
 

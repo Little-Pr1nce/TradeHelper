@@ -60,8 +60,9 @@ class HistoryPage(ft.Container):
         )
 
         self._detail_chart = ft.Image(
+            src="",
             visible=False,
-            fit=ft.ImageFit.CONTAIN,
+            fit="contain",
             width=600,
         )
 
@@ -72,18 +73,18 @@ class HistoryPage(ft.Container):
         )
         self._detail_rating.visible = False
 
-        self._export_btn = ft.ElevatedButton(
-            "导出 PDF",
+        self._export_btn = ft.Button(
+            content=ft.Text("导出 PDF"),
             icon=ft.Icons.PICTURE_AS_PDF,
             on_click=self._on_export_pdf,
             visible=False,
         )
-        self._delete_btn = ft.ElevatedButton(
-            "删除",
+        self._delete_btn = ft.Button(
+            content=ft.Text("删除", color=ft.Colors.RED),
             icon=ft.Icons.DELETE,
+            icon_color=ft.Colors.RED,
             on_click=self._on_delete_report,
             visible=False,
-            style=ft.ButtonStyle(color=ft.Colors.RED),
         )
 
         # --- 左侧面板：列表 ---
@@ -123,16 +124,16 @@ class HistoryPage(ft.Container):
         self._detail_panel = detail_panel
 
         # 左右分栏布局
-        return ft.Row(
+        self.content = ft.Row(
             expand=True,
             spacing=20,
             vertical_alignment=ft.CrossAxisAlignment.START,
             controls=[list_panel, detail_panel],
         )
+        return self.content
 
     def did_mount(self):
-        """页面挂载后自动加载报告列表。"""
-        self._load_reports()
+        pass
 
     # ======================== 数据加载 ========================
 
@@ -197,7 +198,7 @@ class HistoryPage(ft.Container):
         return ft.Container(
             bgcolor=ft.Colors.GREY_100,
             border_radius=8,
-            padding=ft.padding.all(12),
+            padding=12,
             on_click=lambda e, r=report: self._view_report(r),
             content=ft.Column(spacing=4, controls=[title, subtitle]),
         )

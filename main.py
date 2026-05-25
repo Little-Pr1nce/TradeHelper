@@ -56,11 +56,11 @@ def main(page: ft.Page):
     # ========== 窗口配置 ==========
     page.title = "TradeHelper - 股票分析助手"
     page.theme_mode = ft.ThemeMode.LIGHT     # 浅色主题
-    page.window.width = 1100                 # 默认宽度
-    page.window.height = 800                 # 默认高度
-    page.window.min_width = 900              # 最小宽度（避免布局挤压）
-    page.window.min_height = 600             # 最小高度
-    page.padding = ft.padding.all(20)        # 页面内边距
+    page.window.width = 1300
+    page.window.height = 850
+    page.window.min_width = 1000
+    page.window.min_height = 650
+    page.padding = 20        # 页面内边距
 
     # ========== 初始化全局服务 ==========
     # 配置文件路径: ~/.tradehelper/config.json
@@ -158,7 +158,7 @@ def main(page: ft.Page):
     # ========== 首次使用提示 ==========
     # 如果用户未配置 LLM API，延迟显示提示
     if not settings.is_configured():
-        page.run_task(lambda: _show_setup_hint(page))
+        page.run_task(_show_setup_hint, page)
 
 
 async def _show_setup_hint(page: ft.Page):
@@ -181,6 +181,4 @@ async def _show_setup_hint(page: ft.Page):
 
 # ======================== 程序入口 ========================
 if __name__ == "__main__":
-    # 启动 Flet 桌面应用
-    # ft.app(target=main) 默认会创建原生窗口（macOS/Windows/Linux）
-    ft.app(target=main)
+    ft.run(main)

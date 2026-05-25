@@ -106,12 +106,15 @@ def _fetch_news_us(code: str, limit: int = 15) -> list[NewsItem]:
         news_list = []
         for item in raw_news[:limit]:
             content = item.get("content", {})
+            pub_date = content.get("pubDate", 0)
+            # pubDate 可能是 Unix 时间戳（int）或字符串
+            if isinstance(pub_date, (int, float)):
+                date_str = datetime.fromtimestamp(pub_date).strftime("%Y-%m-%d")
+            else:
+                date_str = str(pub_date)[:10] if pub_date else date.today().isoformat()
             news_list.append(NewsItem(
                 code=code,
-                # Unix 时间戳转日期
-                date=datetime.fromtimestamp(
-                    content.get("pubDate", 0)
-                ).strftime("%Y-%m-%d") if content.get("pubDate") else date.today().isoformat(),
+                date=date_str,
                 title=content.get("title", ""),
                 source=content.get("provider", {}).get("displayName", ""),
             ))

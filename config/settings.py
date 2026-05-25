@@ -25,6 +25,7 @@ DEFAULT_CONFIG = {
     "data_source": "free",
     "custom_api_endpoint": "",
     "custom_api_key": "",
+    "proxy": "",
 }
 
 

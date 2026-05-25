@@ -24,12 +24,17 @@ K 线图生成模块
 
 import logging
 import os
+import warnings
 from datetime import datetime
 
 import pandas as pd
 import numpy as np
 
 from config.settings import Settings
+
+# 必须在 import matplotlib 之前屏蔽字体告警
+warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
+logging.getLogger("matplotlib.font_manager").setLevel(logging.ERROR)
 
 logger = logging.getLogger(__name__)
 
@@ -64,17 +69,27 @@ def generate_kline_chart(
 
     # 尝试导入 mplfinance（延迟导入，避免启动时的依赖检查）
     try:
-        import mplfinance as mpf
         import matplotlib
-        matplotlib.use("Agg")  # 非交互式后端（避免 GUI 线程冲突）
+        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+
+        # 设置中文字体（在 import mplfinance 之前）
+        from utils.helpers import get_chinese_font_path
+        font_path = get_chinese_font_path()
+        font_name = "sans-serif"
+        if font_path:
+            from matplotlib import font_manager
+            font_manager.fontManager.addfont(font_path)
+            font_prop = font_manager.FontProperties(fname=font_path)
+            font_name = font_prop.get_name()
+            plt.rcParams["font.sans-serif"] = [font_name]
+            plt.rcParams["font.family"] = "sans-serif"
+            plt.rcParams["axes.unicode_minus"] = False
+
+        import mplfinance as mpf
     except ImportError:
         logger.error("mplfinance not installed")
         return None
-
-    # 加载中文字体
-    from utils.helpers import get_chinese_font_path
-    font_path = get_chinese_font_path()
 
     # ---- 数据预处理 ----
     df = df.copy()
@@ -128,44 +143,37 @@ def generate_kline_chart(
         sell_mask = df["signal"] == "sell"
 
         if buy_mask.any():
-            # 在收盘价下方 3% 处标记买入三角
-            buy_vals = df.loc[buy_mask, "close"].values * 0.97
+            buy_series = pd.Series(float("nan"), index=df.index)
+            buy_series.loc[buy_mask] = df.loc[buy_mask, "close"] * 0.97
             apds.append(mpf.make_addplot(
-                pd.Series(buy_vals, index=df.index[buy_mask]),
-                type="scatter", markersize=80, marker="^", color="red"
-            ))
+                buy_series, type="scatter", markersize=80, marker="^", color="red"))
 
         if sell_mask.any():
-            # 在收盘价上方 3% 处标记卖出三角
-            sell_vals = df.loc[sell_mask, "close"].values * 1.03
+            sell_series = pd.Series(float("nan"), index=df.index)
+            sell_series.loc[sell_mask] = df.loc[sell_mask, "close"] * 1.03
             apds.append(mpf.make_addplot(
-                pd.Series(sell_vals, index=df.index[sell_mask]),
-                type="scatter", markersize=80, marker="v", color="green"
-            ))
-
-    # ---- 配置 matplotlib 中文字体 ----
-    if font_path:
-        try:
-            from matplotlib import font_manager
-            font_manager.fontManager.addfont(font_path)
-            font_prop = font_manager.FontProperties(fname=font_path)
-            plt.rcParams["font.family"] = font_prop.get_name()
-        except Exception:
-            pass  # 字体配置失败不影响图表生成，标题可能显示为方块
+                sell_series, type="scatter", markersize=80, marker="v", color="green"))
 
     # ---- 构建 mplfinance 样式参数 ----
     title = f"{name}({code}) K线图"
 
+    # 用自定义 style 覆盖字体
+    rc_overrides = {"axes.unicode_minus": False}
+    if font_path:
+        rc_overrides["font.sans-serif"] = [font_name]
+        rc_overrides["font.family"] = "sans-serif"
+    custom_style = mpf.make_mpf_style(base_mpf_style="charles", rc=rc_overrides)
+
     style_params = {
-        "type": "candle",       # 蜡烛图
-        "volume": True,         # 显示成交量副图
-        "addplot": apds,        # 叠加的均线和信号
+        "type": "candle",
+        "volume": True,
+        "addplot": apds if apds else [],
         "title": title,
         "ylabel": "Price",
         "ylabel_lower": "Volume",
-        "figratio": (14, 7),    # 图表宽高比
+        "figratio": (14, 7),
         "figscale": 1.0,
-        "style": "charles",     # mplfinance 内置配色主题
+        "style": custom_style,
     }
 
     # ---- 生成图片 ----

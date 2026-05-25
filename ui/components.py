@@ -52,8 +52,9 @@ class StarRating(ft.Container):
     def rating(self, value: int):
         """设置评分并刷新 UI。"""
         self._rating = value
-        self._update_stars()
-        self.update()
+        if self.stars:
+            self._update_stars()
+            self.update()
 
     def build(self):
         """构建一行星星按钮。"""
@@ -70,7 +71,8 @@ class StarRating(ft.Container):
             )
             self.stars.append(star)
             row.controls.append(star)
-        return row
+        self.content = row
+        return self.content
 
     def _on_star_click(self, e):
         """点击星星：更新评分并触发回调。"""
@@ -114,7 +116,7 @@ class ProgressOverlay(ft.Container):
     @visible.setter
     def visible(self, value: bool):
         self._visible = value
-        if hasattr(self, "content"):
+        if self.content is not None:
             self.content.visible = value
             self.content.update()
 
@@ -124,16 +126,11 @@ class ProgressOverlay(ft.Container):
         self._status_text.update()
 
     def build(self):
-        """
-        构建遮罩层：
-          - 半透明黑色背景覆盖全屏
-          - 居中显示旋转进度环 + 状态文字
-        """
         self.content = ft.Container(
             visible=self._visible,
-            bgcolor=ft.Colors.with_opacity(0.6, "black"),  # 半透明遮罩
-            expand=True,
-            alignment=ft.alignment.center,
+            bgcolor=ft.Colors.with_opacity(0.6, "black"),
+            left=0, top=0, right=0, bottom=0,
+            alignment=ft.Alignment.CENTER,
             content=ft.Column(
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                 spacing=20,
@@ -169,12 +166,17 @@ class InfoCard(ft.Container):
         self._color = color
 
     def build(self):
-        return ft.Container(
+        self.content = ft.Container(
             # 半透明主题色背景
             bgcolor=ft.Colors.with_opacity(0.08, self._color),
-            border=ft.border.all(1, ft.Colors.with_opacity(0.2, self._color)),
+            border=ft.Border(
+                top=ft.BorderSide(1, ft.Colors.with_opacity(0.2, self._color)),
+                right=ft.BorderSide(1, ft.Colors.with_opacity(0.2, self._color)),
+                bottom=ft.BorderSide(1, ft.Colors.with_opacity(0.2, self._color)),
+                left=ft.BorderSide(1, ft.Colors.with_opacity(0.2, self._color)),
+            ),
             border_radius=8,
-            padding=ft.padding.all(16),
+            padding=16,
             content=ft.Column(
                 spacing=8,
                 controls=[
@@ -185,3 +187,4 @@ class InfoCard(ft.Container):
                 ],
             ),
         )
+        return self.content
