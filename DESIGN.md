@@ -395,16 +395,77 @@ Pillow>=10.3.0
 
 ---
 
-### 11.1 交易策略扩展（analysis/strategy.py）
+### 11.1 交易策略（analysis/strategy.py）
 
 **文件位置**：`analysis/strategy.py`
 
-**如何添加新策略**：
+#### 策略与回测的协作关系
+
+策略和回测引擎通过一个简单约定解耦，**互不依赖**：
+
+```
+策略的职责：在 DataFrame 的 "signal" 列填 "buy" / "sell" / ""
+回测的职责：读 "signal" 列，逐日模拟资金变动，计算绩效指标
+```
+
+- **修改策略**：只需改 `strategy.py`，回测引擎无需任何改动
+- **增强回测**（如添加滑点、T+1 限制）：只需改 `backtest.py`，已有策略全部自动受益
+- **原因**：回测引擎的 `_simulate()` 方法只检查 `signal == "buy"` 或 `signal == "sell"`，不关心信号是如何生成的
+
+#### 代码中使用方式
+
+```python
+from analysis.strategy import get_strategy
+from analysis.backtest import BacktestEngine
+
+# 按名称创建策略实例
+strategy = get_strategy("ma_crossover")          # 默认参数
+strategy = get_strategy("rsi", period=14, oversold=30, overbought=70)  # 自定义参数
+
+# 生成信号
+df_with_signals = strategy.generate_signals(price_df)
+
+# 运行回测
+engine = BacktestEngine(initial_capital=100000)   # 初始资金 10 万
+result = engine.run(price_df, strategy)
+
+# 查看结果
+print(result["total_return"])     # 总收益率
+print(result["sharpe_ratio"])     # 夏普比率
+print(result["recommendation"])   # 操作建议
+```
+
+#### 现有策略一览
+
+| 短名 | 策略类 | 信号逻辑 | 适用场景 |
+|------|--------|---------|---------|
+| `ma_crossover` | MACrossoverStrategy | MA5 金叉/死叉 MA20 | 单边趋势市 |
+| `macd` | MACDStrategy | DIF 金叉/死叉 DEA | 趋势市（比均线更快响应） |
+| `rsi` | RSIStrategy | RSI < 30 回升→买入，> 70 回落→卖出 | 震荡市波段操作 |
+| `bollinger` | BollingerBandsStrategy | 跌破下轨→买入，突破上轨→卖出 | 均值回归行情 |
+| `buy_and_hold` | BuyAndHoldStrategy | 期初买入，期末卖出，中间不动 | **基准对照** |
+| `triple_ma` | TripleMACrossoverStrategy | 三均线多头/空头排列 | 强趋势确认 |
+
+> `buy_and_hold` 是基准策略：用它跑回测得到的收益率，衡量其他策略是否跑赢了"不动"。
+
+#### 策略参数说明
+
+| 策略 | 构造参数 | 默认值 |
+|------|---------|--------|
+| MACrossoverStrategy | `fast_period=5, slow_period=20` | 5 日 / 20 日 |
+| MACDStrategy | `fast=12, slow=26, signal=9` | 经典 MACD 参数 |
+| RSIStrategy | `period=14, oversold=30, overbought=70` | 14 日 / 30-70 |
+| BollingerBandsStrategy | `period=20, std_dev=2` | 20 日 / 2σ |
+| BuyAndHoldStrategy | 无参数 | — |
+| TripleMACrossoverStrategy | `fast=5, mid=10, slow=20` | 5/10/20 日 |
+
+#### 如何添加新策略
+
 1. 继承 `BaseStrategy` 抽象基类
 2. 实现 `generate_signals(df)` — 在 DataFrame 的 `signal` 列填入 `"buy"` / `"sell"` / `""`
 3. 实现 `name` 和 `description` 属性
 4. 在 `_STRATEGIES` 字典中注册（key = 策略短名，value = 类引用）
-5. （可选）在 UI 中添加策略选择下拉框引用新策略
+5. 在 UI 的下拉框中添加选项（`ui/main_page.py` 的 `_strategy_dd`）
 
 **示例 — RSI 超买超卖策略**：
 ```python
@@ -428,12 +489,6 @@ class RSIStrategy(BaseStrategy):
                 result.loc[result.index[i], "signal"] = "sell"
         return result
 ```
-
-**现有策略**：
-| 策略名 | 类名 | 信号逻辑 |
-|--------|------|---------|
-| `ma_crossover` | MACrossoverStrategy | MA5 金叉/死叉 MA20 |
-| `macd` | MACDStrategy | DIF 金叉/死叉 DEA |
 
 ---
 
@@ -533,11 +588,92 @@ class EastMoneyFetcher(BaseStockFetcher):
 
 ---
 
-### 11.6 回测引擎增强（analysis/backtest.py）
+### 11.6 回测引擎（analysis/backtest.py）
 
 **文件位置**：`analysis/backtest.py`
 
-**可增强的功能**：
+#### 回测引擎工作原理
+
+回测引擎模拟一个交易账户在历史数据上的表现：
+
+```
+初始状态：现金 100,000，持股 0
+
+逐日遍历 K 线：
+  if signal == "buy" and 有现金:
+      用 95% 资金买入 → 扣佣金 (0.03%) → 记录交易
+  elif signal == "sell" and 有股票:
+      全部卖出 → 扣佣金 → 回收现金
+  记录当日权益 = 现金 + 持股 × 收盘价
+
+计算指标：总收益率 → 年化收益率 → 最大回撤 → 夏普比率 → 胜率
+给出建议：强烈买入 / 谨慎买入 / 观望 / 卖出回避
+```
+
+#### 交易假设与限制
+
+| 假设 | 默认值 | 说明 |
+|------|--------|------|
+| 初始资金 | ¥100,000 | 可在 `BacktestEngine(capital)` 中修改 |
+| 仓位比例 | 95% | 每次用 95% 资金买入，留 5% 缓冲 |
+| 佣金费率 | 0.03%（万三） | 单边收取，买卖均扣 |
+| 卖出方式 | 全仓清空 | 简化处理，不支持分批止盈 |
+| 未考虑 | T+1、涨跌停、滑点 | 后续可扩展 |
+
+#### 代码中使用方式
+
+```python
+from analysis.backtest import BacktestEngine
+from analysis.strategy import get_strategy
+
+# 创建引擎
+engine = BacktestEngine(
+    initial_capital=100000.0,    # 初始资金
+    commission=0.0003,           # 万三佣金
+)
+
+# 运行回测
+strategy = get_strategy("ma_crossover")
+result = engine.run(price_df, strategy)
+
+# 返回的 result 字典包含
+print(result["total_return"])       # 0.1523  → 总收益 15.23%
+print(result["annual_return"])      # 0.0847  → 年化 8.47%
+print(result["max_drawdown"])       # 0.123   → 最大回撤 12.3%
+print(result["sharpe_ratio"])       # 1.25    → 夏普比率
+print(result["win_rate"])           # 0.60    → 胜率 60%
+print(result["total_trades"])       # 12      → 总交易次数
+print(result["trades"])             # [...]   → 最近 10 条交易明细
+print(result["recommendation"])     # "强烈买入" / "谨慎买入" / "观望" / "卖出回避"
+print(result["trade_summary"])      # 格式化的中文摘要文本
+```
+
+#### 绩效指标详解
+
+| 指标 | 计算公式 | 含义 |
+|------|---------|------|
+| 总收益率 | (最终权益 - 初始资金) / 初始资金 | 整个回测期的总盈亏比例 |
+| 年化收益率 | (1 + 总收益)^(252/交易日) - 1 | 折算为年化后的收益率 |
+| 最大回撤 | max((峰值 - 谷值) / 峰值) | 最坏情况下从最高点到最低点的亏损幅度 |
+| 夏普比率 | (日均收益 - 无风险日收益) / 日波动 × √252 | 每承担 1 单位风险换来的超额回报，> 1.0 良好 |
+| 胜率 | 卖出价 > 买入价的交易 / 总卖出次数 | 交易成功的比例 |
+
+#### 操作建议阈值
+
+```python
+# backtest.py:354-361
+# 当前阈值（可根据风险偏好调整）
+if total_return > 0.10 and sharpe > 1.0 and max_drawdown < 0.15:
+    → "强烈买入"
+elif total_return > 0 and sharpe > 0.5:
+    → "谨慎买入"
+elif total_return > -0.05:
+    → "观望"
+else:
+    → "卖出/回避"
+```
+
+#### 可增强的功能
 
 | 增强方向 | 实现位置 | 说明 |
 |---------|---------|------|
@@ -548,16 +684,6 @@ class EastMoneyFetcher(BaseStockFetcher):
 | 权益曲线可视化 | 返回 equity_curve 数据 | 供 UI 绘制权益走势图 |
 | T+1 限制 | `_simulate()` 方法 | 当日买入次日才能卖出 |
 | 涨跌停限制 | `_simulate()` 方法 | A 股 ±10% 涨跌停无法成交 |
-
-**操作建议阈值调整**（`_make_recommendation()` 方法）：
-```python
-# 保守型投资者阈值
-if total_return > 0.05 and sharpe > 0.8 and max_drawdown < 0.10:
-    return "买入"
-# 激进型投资者阈值
-if total_return > 0.15 and sharpe > 1.5:
-    return "买入"
-```
 
 ---
 
