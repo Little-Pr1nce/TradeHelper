@@ -22,6 +22,7 @@ SQLite 数据库操作层
 
 import sqlite3
 import logging
+import threading
 from datetime import datetime
 from typing import Optional
 
@@ -29,6 +30,15 @@ from data.models import StockInfo, PriceData, AnalysisReport, NewsItem
 from config.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: str, default: str = "''"):
+    """SQLite 兼容的"加列如果不存在"——遍历 PRAGMA 列名。"""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    existing = {row[1] for row in rows}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type} DEFAULT {default}")
+        logger.info(f"DB migrate: added column {table}.{column}")
 
 
 # ======================== 数据库建表 DDL ========================
@@ -69,6 +79,7 @@ CREATE TABLE IF NOT EXISTS reports (
     backtest_period TEXT NOT NULL,         -- 回测周期
     create_time TEXT NOT NULL,             -- 创建时间
     content TEXT NOT NULL,                  -- 报告正文（Markdown）
+    chart_path TEXT DEFAULT '',            -- K 线图 PNG 路径（生成报告时写入）
     pdf_path TEXT DEFAULT '',              -- PDF 导出路径
     rating INTEGER DEFAULT NULL,           -- 用户评分 1-5
     rated_at TEXT DEFAULT ''              -- 评分时间
@@ -113,6 +124,9 @@ class Database:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._conn = None
+            # 写操作锁：分析线程与 UI 线程共享同一连接时序列化写入，
+            # 防止 "database is locked" 错误（WAL 仅保护读读并发）。
+            cls._instance._write_lock = threading.Lock()
         return cls._instance
 
     @classmethod
@@ -132,34 +146,57 @@ class Database:
         instance._connect(db_path)
         return instance
 
-    def _connect(self, db_path: str):
+    def _open(self, db_path: str) -> sqlite3.Connection:
         """
-        建立 SQLite 连接并执行建表语句。
+        打开一个新的 SQLite 连接并应用全部 PRAGMA / 建表 / schema 迁移。
 
-        - WAL 模式：提高并发读写性能
-        - row_factory：查询结果以 Row 对象返回（支持字典转换）
+        所有连接入口（init / 懒加载重连）都走这里，避免重连时丢失 PRAGMA。
         """
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")    # Write-Ahead Logging
-        self._conn.execute("PRAGMA foreign_keys=ON")      # 启用外键约束
-        self._conn.executescript(CREATE_TABLES_SQL)       # 自动建表
-        self._conn.commit()
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")    # Write-Ahead Logging
+        conn.execute("PRAGMA foreign_keys=ON")      # 启用外键约束
+        conn.executescript(CREATE_TABLES_SQL)       # 自动建表
+        # 老版本数据库 schema 迁移（chart_path 是后期新增字段）
+        _ensure_column(conn, "reports", "chart_path", "TEXT", "''")
+        conn.commit()
+        return conn
+
+    def _connect(self, db_path: str):
+        """对外建立连接入口（首次 init 时调用）。"""
+        self._conn = self._open(db_path)
+        self._db_path = db_path
         logger.info(f"Database connected: {db_path}")
 
     @property
     def conn(self) -> sqlite3.Connection:
-        """获取数据库连接（懒加载：如已关闭则自动重连）。"""
+        """获取数据库连接（懒加载：如已关闭则自动重连，复用 _open 应用 PRAGMA）。"""
         if self._conn is None:
-            self._conn = sqlite3.connect(Settings().db_path)
+            db_path = getattr(self, "_db_path", None) or Settings().db_path
+            self._conn = self._open(db_path)
+            self._db_path = db_path
+            logger.info(f"Database reconnected: {db_path}")
         return self._conn
 
     def execute(self, sql: str, params=None):
-        """执行 SQL 语句的快捷方法。"""
+        """执行 SQL 语句的快捷方法（仅适用于读；写请走 _execute_write）。"""
         return self.conn.execute(sql, params or ())
 
+    def _execute_write(self, sql: str, params=None):
+        """串行化执行单条写 SQL，并在同一锁内提交。"""
+        with self._write_lock:
+            cursor = self.conn.execute(sql, params or ())
+            self.conn.commit()
+            return cursor
+
+    def _executemany_write(self, sql: str, seq_of_params):
+        """串行化执行批量写 SQL。"""
+        with self._write_lock:
+            self.conn.executemany(sql, seq_of_params)
+            self.conn.commit()
+
     def commit(self):
-        """提交事务。"""
+        """提交事务（保留以兼容外部调用，但内部写均已自动提交）。"""
         self.conn.commit()
 
     def close(self):
@@ -179,10 +216,9 @@ class Database:
         """
         sql = """INSERT OR REPLACE INTO stocks (code, name, market, industry, description, update_time)
                  VALUES (?, ?, ?, ?, ?, ?)"""
-        self.execute(sql, (stock.code, stock.name, stock.market,
-                           stock.industry, stock.description,
-                           stock.update_time))
-        self.commit()
+        self._execute_write(sql, (stock.code, stock.name, stock.market,
+                                  stock.industry, stock.description,
+                                  stock.update_time))
 
     def get_stock(self, code: str) -> Optional[StockInfo]:
         """
@@ -214,8 +250,7 @@ class Database:
                  VALUES (?, ?, ?, ?, ?, ?, ?)"""
         data = [(p.code, p.date, p.open, p.high, p.low, p.close, p.volume)
                 for p in prices]
-        self.conn.executemany(sql, data)
-        self.commit()
+        self._executemany_write(sql, data)
 
     def get_prices(self, code: str, start_date: str = "", end_date: str = "") -> list[PriceData]:
         """
@@ -288,14 +323,16 @@ class Database:
         Returns:
             新记录的 ID（数据库自增主键）
         """
-        sql = """INSERT INTO reports (code, name, market, backtest_period, create_time, content, pdf_path, rating, rated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"""
-        cursor = self.execute(sql, (
+        sql = """INSERT INTO reports
+                 (code, name, market, backtest_period, create_time, content,
+                  chart_path, pdf_path, rating, rated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        cursor = self._execute_write(sql, (
             report.code, report.name, report.market, report.backtest_period,
-            report.create_time, report.content, report.pdf_path or "",
+            report.create_time, report.content,
+            report.chart_path or "", report.pdf_path or "",
             report.rating, report.rated_at or ""
         ))
-        self.commit()
         return cursor.lastrowid
 
     def get_report(self, report_id: int) -> Optional[AnalysisReport]:
@@ -356,11 +393,10 @@ class Database:
             rating: 评分（1-5）
         """
         now = datetime.now().isoformat()
-        self.execute(
+        self._execute_write(
             "UPDATE reports SET rating = ?, rated_at = ? WHERE id = ?",
             (rating, now, report_id)
         )
-        self.commit()
 
     def update_report_pdf(self, report_id: int, pdf_path: str):
         """
@@ -370,11 +406,23 @@ class Database:
             report_id: 报告 ID
             pdf_path: PDF 文件的绝对路径
         """
-        self.execute(
+        self._execute_write(
             "UPDATE reports SET pdf_path = ? WHERE id = ?",
             (pdf_path, report_id)
         )
-        self.commit()
+
+    def update_report_chart(self, report_id: int, chart_path: str):
+        """
+        更新报告的 K 线图路径（生成 K 线后调用）。
+
+        Args:
+            report_id: 报告 ID
+            chart_path: PNG 文件的绝对路径
+        """
+        self._execute_write(
+            "UPDATE reports SET chart_path = ? WHERE id = ?",
+            (chart_path, report_id)
+        )
 
     def delete_report(self, report_id: int):
         """
@@ -383,8 +431,7 @@ class Database:
         Args:
             report_id: 报告 ID
         """
-        self.execute("DELETE FROM reports WHERE id = ?", (report_id,))
-        self.commit()
+        self._execute_write("DELETE FROM reports WHERE id = ?", (report_id,))
 
     # ======================== 新闻情感 ========================
 
@@ -401,8 +448,7 @@ class Database:
                  VALUES (?, ?, ?, ?, ?, ?)"""
         data = [(n.code, n.date, n.title, n.source, n.sentiment, n.confidence)
                 for n in news_list]
-        self.conn.executemany(sql, data)
-        self.commit()
+        self._executemany_write(sql, data)
 
     def get_news(self, code: str, limit: int = 20) -> list[NewsItem]:
         """
@@ -418,5 +464,31 @@ class Database:
         rows = self.execute(
             "SELECT * FROM news_sentiment WHERE code = ? ORDER BY date DESC LIMIT ?",
             (code, limit)
+        ).fetchall()
+        return [NewsItem.from_dict(dict(r)) for r in rows]
+
+    def get_recent_news_with_sentiment(
+        self, code: str, hours: int = 24, limit: int = 50
+    ) -> list[NewsItem]:
+        """
+        获取指定时间窗口内、且已经完成情感分析（sentiment 非空）的新闻。
+
+        用于新闻 24 小时复用：避免每次分析都重新拉取并跑 FinBERT。
+
+        Args:
+            code: 股票代码
+            hours: 时间窗口（小时），默认 24h
+            limit: 最大返回条数
+
+        Returns:
+            NewsItem 列表（按日期倒序）；窗口内无缓存时返回空列表
+        """
+        from datetime import datetime, timedelta
+        cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d")
+        rows = self.execute(
+            """SELECT * FROM news_sentiment
+               WHERE code = ? AND date >= ? AND sentiment != ''
+               ORDER BY date DESC LIMIT ?""",
+            (code, cutoff, limit)
         ).fetchall()
         return [NewsItem.from_dict(dict(r)) for r in rows]

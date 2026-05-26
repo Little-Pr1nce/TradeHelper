@@ -1,0 +1,10 @@
+{
+  "work_dir": "/Users/heyifan/TradeHelperData",
+  "llm_base_url": "https://api.openai.com/v1",
+  "llm_api_key": "",
+  "llm_model": "gpt-4o",
+  "data_source": "free",
+  "custom_api_endpoint": "",
+  "custom_api_key": "",
+  "proxy": ""
+}

@@ -185,7 +185,52 @@ def generate_kline_chart(
         mpf.plot(df, savefig=filepath, **style_params)
         plt.close("all")  # 清理 matplotlib 资源，避免内存泄漏
         logger.info(f"Chart saved: {filepath}")
+        # 目录清理（按 code 保留 N 份 + 全局总数兜底）
+        try:
+            _prune_charts(chart_dir, code)
+        except Exception as e:
+            logger.warning(f"Chart prune failed: {e}")
         return filepath
     except Exception as e:
         logger.error(f"Failed to generate chart: {e}")
         return None
+
+
+def _prune_charts(chart_dir: str, code: str) -> None:
+    """
+    清理 charts/ 目录，避免无限增长。
+
+    策略：
+      1. 同一 code 下保留最近 MAX_CHARTS_PER_CODE 份，淘汰更早的；
+      2. 整个目录如果仍超过 MAX_CHARTS_TOTAL，再按修改时间淘汰最早的。
+    """
+    from analysis.constants import MAX_CHARTS_PER_CODE, MAX_CHARTS_TOTAL
+    if not os.path.isdir(chart_dir):
+        return
+
+    all_pngs = [
+        os.path.join(chart_dir, f) for f in os.listdir(chart_dir)
+        if f.endswith(".png") and os.path.isfile(os.path.join(chart_dir, f))
+    ]
+
+    # 1) 同 code：按修改时间排序，仅保留最近 N 份
+    code_pngs = [p for p in all_pngs if os.path.basename(p).startswith(f"{code}_")]
+    code_pngs.sort(key=os.path.getmtime, reverse=True)
+    for old_path in code_pngs[MAX_CHARTS_PER_CODE:]:
+        try:
+            os.remove(old_path)
+        except OSError:
+            pass
+
+    # 2) 全局兜底：超过总数上限时淘汰最早的
+    remaining = [
+        os.path.join(chart_dir, f) for f in os.listdir(chart_dir)
+        if f.endswith(".png") and os.path.isfile(os.path.join(chart_dir, f))
+    ]
+    if len(remaining) > MAX_CHARTS_TOTAL:
+        remaining.sort(key=os.path.getmtime)  # 最早在前
+        for old_path in remaining[: len(remaining) - MAX_CHARTS_TOTAL]:
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass

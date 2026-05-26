@@ -4,31 +4,22 @@
 采用策略模式 (Strategy Pattern) 组织交易策略：
 
   BaseStrategy (抽象基类)
-  ├── MACrossoverStrategy   双均线交叉策略（默认演示策略）
-  │   规则：MA5 上穿 MA20 → 买入，下穿 → 卖出
-  └── MACDStrategy          MACD 金叉死叉策略（备用演示策略）
-      规则：DIF 上穿 DEA → 买入，下穿 → 卖出
+  ├── MACrossoverStrategy        双均线交叉
+  ├── MACDStrategy               MACD 金叉死叉
+  ├── RSIStrategy                RSI 超买超卖
+  ├── BollingerBandsStrategy     布林带均值回归
+  ├── BuyAndHoldStrategy         买入持有（基准）
+  ├── TripleMACrossoverStrategy  三均线排列
+  └── PrecomputedSignalsStrategy 透传已生成的 signal 列（用于避免重复计算）
 
-策略注册机制：
-  通过 _STRATEGIES 字典注册所有可用策略，
-  使用 get_strategy(name) 工厂函数按名称创建实例。
+策略只负责"在 DataFrame 中填 signal 列"，不再重复计算指标——
+若 DataFrame 中已包含 dif/dea/rsi/bb_* 等列（由 analysis.technical 计算），
+策略会直接复用；否则按需补算。
 
-【扩展点】添加新的交易策略：
-  1. 继承 BaseStrategy，实现 generate_signals() 方法
-     规则：在 DataFrame 的 "signal" 列填入 "buy" 或 "sell"
-  2. 实现 name 和 description 属性
-  3. 在 _STRATEGIES 字典中注册（key 为策略短名，value 为类引用）
-  4. 可选：在 UI 中添加策略选择下拉框
-
-示例新增策略（RSI 策略）：
-  class RSIStrategy(BaseStrategy):
-      def generate_signals(self, df):
-          result = df.copy()
-          result["signal"] = ""
-          result["rsi"] = calc_rsi(result)["rsi"]
-          # RSI < 30 买入，RSI > 70 卖出
-          ...
-          return result
+【扩展点】添加新策略：
+  1. 继承 BaseStrategy，实现 generate_signals() / name / description
+  2. 在 _STRATEGIES 字典中注册
+  3. 可选：在 UI 中添加策略选择项
 """
 
 from abc import ABC, abstractmethod
@@ -37,65 +28,94 @@ import pandas as pd
 import numpy as np
 
 
+# ======================== 通用工具 ========================
+
+def _crossover_signal(fast: pd.Series, slow: pd.Series) -> pd.Series:
+    """
+    向量化检测两条线的金叉/死叉。
+
+    返回与输入等长的字符串 Series：
+      "buy"  — fast 上穿 slow（前一刻 <=，当前 >）
+      "sell" — fast 下穿 slow（前一刻 >=，当前 <）
+      ""     — 无穿越或数据缺失
+
+    比 Python for-loop 快 ~50x，所有交叉类策略共用。
+    """
+    prev_fast = fast.shift(1)
+    prev_slow = slow.shift(1)
+    cross_up = (fast > slow) & (prev_fast <= prev_slow)
+    cross_dn = (fast < slow) & (prev_fast >= prev_slow)
+    return pd.Series(
+        np.where(cross_up, "buy", np.where(cross_dn, "sell", "")),
+        index=fast.index,
+    )
+
+
+def _ensure_macd(df: pd.DataFrame, fast: int, slow: int, signal: int) -> None:
+    """如果 df 已有 dif/dea 列就什么都不做，否则就地补算。"""
+    if "dif" in df.columns and "dea" in df.columns:
+        return
+    ema_fast = df["close"].ewm(span=fast, adjust=False).mean()
+    ema_slow = df["close"].ewm(span=slow, adjust=False).mean()
+    df["dif"] = ema_fast - ema_slow
+    df["dea"] = df["dif"].ewm(span=signal, adjust=False).mean()
+
+
+def _ensure_rsi(df: pd.DataFrame, period: int) -> None:
+    """如果 df 已有 rsi 列就跳过，否则补算。"""
+    if "rsi" in df.columns:
+        return
+    delta = df["close"].diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    df["rsi"] = 100 - (100 / (1 + rs))
+
+
+def _ensure_bollinger(df: pd.DataFrame, period: int, std_dev: int) -> None:
+    """如果 df 已有 bb_upper/bb_lower 列就跳过，否则补算。"""
+    if "bb_upper" in df.columns and "bb_lower" in df.columns:
+        return
+    mid = df["close"].rolling(window=period).mean()
+    std = df["close"].rolling(window=period).std()
+    df["bb_mid"] = mid
+    df["bb_upper"] = mid + std_dev * std
+    df["bb_lower"] = mid - std_dev * std
+
+
+def _ensure_ma(df: pd.DataFrame, period: int) -> None:
+    """如果 df 已有对应 ma 列就跳过，否则补算（命名风格与 calc_ma 一致）。"""
+    col = f"ma_{period}"
+    if col not in df.columns:
+        df[col] = df["close"].rolling(window=period).mean()
+
+
+# ======================== 抽象基类 ========================
+
 class BaseStrategy(ABC):
-    """
-    交易策略抽象基类。
-
-    所有策略必须实现以下三个接口：
-      - generate_signals(df):  输入股价 DataFrame，输出带 signal 列的 DataFrame
-      - name:                   策略名称（用于报告展示）
-      - description:           策略描述（解释买卖信号逻辑）
-
-    signal 列约定：
-      - "buy":  买入信号
-      - "sell": 卖出信号
-      - "":     无信号（持有/观望）
-    """
+    """交易策略抽象基类（在 DataFrame 的 signal 列填入 'buy' / 'sell' / ''）。"""
 
     @abstractmethod
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        根据策略规则生成买卖信号。
-
-        Args:
-            df: 包含至少 close 列的股价 DataFrame
-
-        Returns:
-            添加了 signal 列的 DataFrame
-        """
         pass
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """策略名称，用于报告标题和日志。"""
         pass
 
     @property
     @abstractmethod
     def description(self) -> str:
-        """策略描述，解释信号生成逻辑。"""
         pass
 
 
+# ======================== 具体策略 ========================
+
 class MACrossoverStrategy(BaseStrategy):
-    """
-    双均线交叉策略（默认演示策略）。
-
-    信号逻辑：
-      - 金叉：短期均线从下方上穿长期均线 → 买入信号
-      - 死叉：短期均线从上方下穿长期均线 → 卖出信号
-
-    参数：
-      - fast_period: 短期均线周期（默认 5 日，代表周线）
-      - slow_period: 长期均线周期（默认 20 日，代表月线）
-
-    优缺点：
-      优点：简单直观，在趋势市场中表现良好
-      缺点：震荡市场中容易频繁产生假信号（"来回被抽"）
-
-    适用场景：趋势明显的单边市场行情。
-    """
+    """双均线交叉：MA{fast} 上穿 MA{slow} 买入，下穿卖出。"""
 
     def __init__(self, fast_period: int = 5, slow_period: int = 20):
         self.fast_period = fast_period
@@ -115,47 +135,19 @@ class MACrossoverStrategy(BaseStrategy):
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         result = df.copy()
         result["signal"] = ""
-
         if len(result) < self.slow_period:
-            return result  # 数据不足，无法生成信号
-
-        # 计算快慢均线
-        result["ma_fast"] = result["close"].rolling(window=self.fast_period).mean()
-        result["ma_slow"] = result["close"].rolling(window=self.slow_period).mean()
-
-        # 检测穿越信号
-        for i in range(self.slow_period, len(result)):
-            # 金叉：前一刻快线 <= 慢线，当前快线 > 慢线
-            if (result["ma_fast"].iloc[i] > result["ma_slow"].iloc[i] and
-                    result["ma_fast"].iloc[i-1] <= result["ma_slow"].iloc[i-1]):
-                if pd.notna(result["ma_fast"].iloc[i-1]):
-                    result.loc[result.index[i], "signal"] = "buy"
-            # 死叉：前一刻快线 >= 慢线，当前快线 < 慢线
-            elif (result["ma_fast"].iloc[i] < result["ma_slow"].iloc[i] and
-                  result["ma_fast"].iloc[i-1] >= result["ma_slow"].iloc[i-1]):
-                if pd.notna(result["ma_fast"].iloc[i-1]):
-                    result.loc[result.index[i], "signal"] = "sell"
-
+            return result
+        _ensure_ma(result, self.fast_period)
+        _ensure_ma(result, self.slow_period)
+        result["signal"] = _crossover_signal(
+            result[f"ma_{self.fast_period}"],
+            result[f"ma_{self.slow_period}"],
+        )
         return result
 
 
 class MACDStrategy(BaseStrategy):
-    """
-    MACD 金叉死叉策略。
-
-    信号逻辑：
-      - 金叉：DIF 从下方上穿 DEA → 买入信号
-      - 死叉：DIF 从上方下穿 DEA → 卖出信号
-
-    参数：
-      - fast:  快线周期（默认 12）
-      - slow:  慢线周期（默认 26）
-      - signal_period: 信号线周期（默认 9）
-
-    与双均线策略的区别：
-      MACD 使用 EMA 而非 SMA，对近期价格更敏感；
-      通过 DEA 信号线过滤了部分噪声，假信号相对较少。
-    """
+    """MACD 金叉死叉：DIF 上穿 DEA 买入，下穿卖出。"""
 
     def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9):
         self.fast = fast
@@ -173,45 +165,15 @@ class MACDStrategy(BaseStrategy):
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         result = df.copy()
         result["signal"] = ""
-
         if len(result) < self.slow + self.signal_period:
-            return result  # 数据不足
-
-        # 计算 MACD
-        result["ema_fast"] = result["close"].ewm(span=self.fast, adjust=False).mean()
-        result["ema_slow"] = result["close"].ewm(span=self.slow, adjust=False).mean()
-        result["dif"] = result["ema_fast"] - result["ema_slow"]
-        result["dea"] = result["dif"].ewm(span=self.signal_period, adjust=False).mean()
-
-        # 检测 DIF/DEA 穿越信号
-        for i in range(1, len(result)):
-            if pd.isna(result["dif"].iloc[i]) or pd.isna(result["dea"].iloc[i]):
-                continue
-            if (result["dif"].iloc[i] > result["dea"].iloc[i] and
-                    result["dif"].iloc[i-1] <= result["dea"].iloc[i-1]):
-                result.loc[result.index[i], "signal"] = "buy"
-            elif (result["dif"].iloc[i] < result["dea"].iloc[i] and
-                  result["dif"].iloc[i-1] >= result["dea"].iloc[i-1]):
-                result.loc[result.index[i], "signal"] = "sell"
-
+            return result
+        _ensure_macd(result, self.fast, self.slow, self.signal_period)
+        result["signal"] = _crossover_signal(result["dif"], result["dea"])
         return result
 
 
 class RSIStrategy(BaseStrategy):
-    """
-    RSI 超买超卖策略。
-
-    信号逻辑：
-      - RSI 从超卖区域回升 → 买入信号
-      - RSI 从超买区域回落 → 卖出信号
-
-    参数：
-      - period: RSI 计算周期（默认 14 日）
-      - oversold: 超卖阈值（默认 30）
-      - overbought: 超买阈值（默认 70）
-
-    适用场景：震荡市场中的波段操作。
-    """
+    """RSI 超买超卖：从超卖区上穿阈值买入，从超买区下穿阈值卖出。"""
 
     def __init__(self, period: int = 14, oversold: int = 30, overbought: int = 70):
         self.period = period
@@ -232,45 +194,19 @@ class RSIStrategy(BaseStrategy):
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         result = df.copy()
         result["signal"] = ""
-
         if len(result) < self.period + 1:
             return result
-
-        delta = result["close"].diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = (-delta).where(delta < 0, 0.0)
-        avg_gain = gain.ewm(alpha=1 / self.period, adjust=False).mean()
-        avg_loss = loss.ewm(alpha=1 / self.period, adjust=False).mean()
-        rs = avg_gain / avg_loss.replace(0, np.nan)
-        result["rsi"] = 100 - (100 / (1 + rs))
-
-        for i in range(1, len(result)):
-            rsi_prev = result["rsi"].iloc[i - 1]
-            rsi_curr = result["rsi"].iloc[i]
-            if pd.isna(rsi_prev) or pd.isna(rsi_curr):
-                continue
-            if rsi_prev <= self.oversold < rsi_curr:
-                result.loc[result.index[i], "signal"] = "buy"
-            elif rsi_prev >= self.overbought > rsi_curr:
-                result.loc[result.index[i], "signal"] = "sell"
-
+        _ensure_rsi(result, self.period)
+        rsi = result["rsi"]
+        prev = rsi.shift(1)
+        buy = (prev <= self.oversold) & (rsi > self.oversold)
+        sell = (prev >= self.overbought) & (rsi < self.overbought)
+        result["signal"] = np.where(buy, "buy", np.where(sell, "sell", ""))
         return result
 
 
 class BollingerBandsStrategy(BaseStrategy):
-    """
-    布林带均值回归策略。
-
-    信号逻辑：
-      - 收盘价跌破下轨 → 超卖，产生买入信号
-      - 收盘价突破上轨 → 超买，产生卖出信号
-
-    参数：
-      - period: 均值和标准差计算周期（默认 20 日）
-      - std_dev: 标准差倍数（默认 2）
-
-    适用场景：震荡市场中价格有回归中轨倾向时有效。
-    """
+    """布林带均值回归：跌破下轨买入，突破上轨卖出。"""
 
     def __init__(self, period: int = 20, std_dev: int = 2):
         self.period = period
@@ -291,48 +227,25 @@ class BollingerBandsStrategy(BaseStrategy):
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         result = df.copy()
         result["signal"] = ""
-
         if len(result) < self.period:
             return result
-
-        result["bb_mid"] = result["close"].rolling(window=self.period).mean()
-        result["bb_std"] = result["close"].rolling(window=self.period).std()
-        result["bb_upper"] = result["bb_mid"] + self.std_dev * result["bb_std"]
-        result["bb_lower"] = result["bb_mid"] - self.std_dev * result["bb_std"]
-
-        for i in range(self.period, len(result)):
-            close_prev = result["close"].iloc[i - 1]
-            close_curr = result["close"].iloc[i]
-            lower_prev = result["bb_lower"].iloc[i - 1]
-            lower_curr = result["bb_lower"].iloc[i]
-            upper_prev = result["bb_upper"].iloc[i - 1]
-            upper_curr = result["bb_upper"].iloc[i]
-
-            if pd.isna(lower_prev) or pd.isna(upper_prev):
-                continue
-
-            if close_prev >= lower_prev and close_curr < lower_curr:
-                result.loc[result.index[i], "signal"] = "buy"
-            elif close_prev <= upper_prev and close_curr > upper_curr:
-                result.loc[result.index[i], "signal"] = "sell"
-
+        _ensure_bollinger(result, self.period, self.std_dev)
+        close = result["close"]
+        prev_close = close.shift(1)
+        lower = result["bb_lower"]
+        prev_lower = lower.shift(1)
+        upper = result["bb_upper"]
+        prev_upper = upper.shift(1)
+        # 跌破下轨：前一日 close >= lower，今日 close < lower
+        buy = (prev_close >= prev_lower) & (close < lower)
+        # 突破上轨：前一日 close <= upper，今日 close > upper
+        sell = (prev_close <= prev_upper) & (close > upper)
+        result["signal"] = np.where(buy, "buy", np.where(sell, "sell", ""))
         return result
 
 
 class BuyAndHoldStrategy(BaseStrategy):
-    """
-    买入持有策略（基准对照策略）。
-
-    信号逻辑：
-      - 第一天买入
-      - 最后一天卖出
-      - 中间不产生任何信号
-
-    用途：作为其他策略的对比基准（benchmark），
-    衡量主动策略是否跑赢了简单持有不动。
-
-    参数：无（策略参数固定）。
-    """
+    """买入持有：第一天买入，最后一天卖出。"""
 
     @property
     def name(self) -> str:
@@ -345,33 +258,15 @@ class BuyAndHoldStrategy(BaseStrategy):
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         result = df.copy()
         result["signal"] = ""
-
         if len(result) < 2:
             return result
-
         result.loc[result.index[0], "signal"] = "buy"
         result.loc[result.index[-1], "signal"] = "sell"
-
         return result
 
 
 class TripleMACrossoverStrategy(BaseStrategy):
-    """
-    三均线排列策略。
-
-    信号逻辑：
-      - MA5 > MA10 > MA20 且三者多头排列 → 买入信号
-      - MA5 < MA10 < MA20 且三者空头排列 → 卖出信号
-
-    与双均线交叉的区别：
-      三均线要求三条线严格排列，过滤掉震荡行情中的假信号，
-      信号更少但可靠性更高。
-
-    参数：
-      - fast: 快线周期（默认 5）
-      - mid:  中线周期（默认 10）
-      - slow: 慢线周期（默认 20）
-    """
+    """三均线排列：多头排列出现时买入，空头排列出现时卖出（首次状态切换）。"""
 
     def __init__(self, fast: int = 5, mid: int = 10, slow: int = 20):
         self.fast = fast
@@ -393,33 +288,51 @@ class TripleMACrossoverStrategy(BaseStrategy):
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         result = df.copy()
         result["signal"] = ""
-
         if len(result) < self.slow:
             return result
-
-        result["ma_fast"] = result["close"].rolling(window=self.fast).mean()
-        result["ma_mid"] = result["close"].rolling(window=self.mid).mean()
-        result["ma_slow"] = result["close"].rolling(window=self.slow).mean()
-
-        prev_signal = ""
-        for i in range(self.slow, len(result)):
-            if pd.isna(result["ma_fast"].iloc[i]):
-                continue
-
-            fast = result["ma_fast"].iloc[i]
-            mid = result["ma_mid"].iloc[i]
-            slow = result["ma_slow"].iloc[i]
-
-            if fast > mid > slow:
-                if prev_signal != "buy":
-                    result.loc[result.index[i], "signal"] = "buy"
-                    prev_signal = "buy"
-            elif fast < mid < slow:
-                if prev_signal != "sell":
-                    result.loc[result.index[i], "signal"] = "sell"
-                    prev_signal = "sell"
-
+        _ensure_ma(result, self.fast)
+        _ensure_ma(result, self.mid)
+        _ensure_ma(result, self.slow)
+        f, m, s = result[f"ma_{self.fast}"], result[f"ma_{self.mid}"], result[f"ma_{self.slow}"]
+        bull = (f > m) & (m > s)
+        bear = (f < m) & (m < s)
+        # 状态首次切换才发信号（避免每天连续 buy）
+        prev_bull = bull.shift(1, fill_value=False)
+        prev_bear = bear.shift(1, fill_value=False)
+        buy = bull & (~prev_bull)
+        sell = bear & (~prev_bear)
+        result["signal"] = np.where(buy, "buy", np.where(sell, "sell", ""))
         return result
+
+
+class PrecomputedSignalsStrategy(BaseStrategy):
+    """
+    透传策略：把 DataFrame 中已有的 signal 列原样保留。
+
+    用法：
+        bt_df = strategy.generate_signals(df)        # 真正生成信号
+        result = engine.run(bt_df, PrecomputedSignalsStrategy(strategy))
+
+    这样 BacktestEngine.run() 内部对 strategy.generate_signals 的调用是 no-op，
+    避免对相同输入做两次相同的指标 + 信号计算。
+    """
+
+    def __init__(self, wrapped: "BaseStrategy"):
+        self._wrapped = wrapped
+
+    @property
+    def name(self) -> str:
+        return self._wrapped.name
+
+    @property
+    def description(self) -> str:
+        return self._wrapped.description
+
+    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        # 期望调用方已经把 signal 列填好了；如果没有就退化为底层策略
+        if "signal" in df.columns:
+            return df
+        return self._wrapped.generate_signals(df)
 
 
 # ======================== 策略注册表 ========================
@@ -437,30 +350,10 @@ _STRATEGIES = {
 }
 
 
-# ======================== 工厂函数 ========================
-
 def get_strategy(name: str = "ma_crossover", **kwargs) -> BaseStrategy:
-    """
-    根据策略名称创建策略实例。
-
-    Args:
-        name: 策略短名（如 "ma_crossover", "macd"）
-        **kwargs: 传递给策略构造函数的参数
-
-    Returns:
-        策略实例，未找到时默认返回 MACrossoverStrategy
-    """
     strategy_cls = _STRATEGIES.get(name, MACrossoverStrategy)
     return strategy_cls(**kwargs)
 
 
 def get_available_strategies() -> dict:
-    """
-    获取所有已注册策略的字典。
-
-    可用于 UI 策略选择下拉框的选项填充。
-
-    Returns:
-        {策略短名: 策略类} 的字典
-    """
     return dict(_STRATEGIES)

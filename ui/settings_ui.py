@@ -113,7 +113,7 @@ class SettingsPage(ft.Container):
         self._proxy_input = ft.TextField(
             label="HTTPS 代理地址",
             value=settings.get("proxy", ""),
-            hint_text="如 http://127.0.0.1:7890，用于 yfinance 等外网访问",
+            hint_text="如 http://127.0.0.1:8118（MonoProxy）或 7890（Clash）；留空则自动读系统代理",
         )
 
         # ========== 保存按钮 ==========
@@ -164,7 +164,8 @@ class SettingsPage(ft.Container):
 
                 ft.Text("代理配置", size=16, weight=ft.FontWeight.W_600),
                 self._proxy_input,
-                ft.Text("如果 yfinance 获取美股数据被限流，在此配置代理地址。仅影响数据获取，不影响 LLM API。",
+                ft.Text("用于 yfinance 访问 Yahoo Finance（美股数据/新闻）。\n"
+                        "若已开启 MonoProxy 等系统代理，可留空自动检测；否则填本地 HTTP 代理地址。",
                         size=12, color=ft.Colors.GREY_600),
 
                 ft.Divider(),

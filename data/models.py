@@ -106,6 +106,7 @@ class AnalysisReport:
     backtest_period: str = ""
     create_time: str = ""
     content: str = ""
+    chart_path: str = ""
     pdf_path: str = ""
     rating: Optional[int] = None
     rated_at: str = ""
@@ -115,7 +116,12 @@ class AnalysisReport:
 
     @classmethod
     def from_dict(cls, d: dict) -> "AnalysisReport":
-        return cls(**{k: d.get(k, None) for k in cls.__dataclass_fields__})
+        # 缺失字段使用 dataclass 自身的默认值，避免字符串字段被回填成 None
+        result = {}
+        for name, field in cls.__dataclass_fields__.items():
+            value = d.get(name)
+            result[name] = value if value is not None else field.default
+        return cls(**result)
 
 
 @dataclass
@@ -143,6 +149,9 @@ class NewsItem:
 
     @classmethod
     def from_dict(cls, d: dict) -> "NewsItem":
-        # confidence 字段需要特殊处理（浮点数 vs 数据库默认值）
-        return cls(**{k: d.get(k, "") if k != "confidence" else d.get(k, 0.0)
-                      for k in cls.__dataclass_fields__})
+        # 缺失字段统一使用 dataclass 自身的默认值
+        result = {}
+        for name, field in cls.__dataclass_fields__.items():
+            value = d.get(name)
+            result[name] = value if value is not None else field.default
+        return cls(**result)

@@ -15,32 +15,6 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def is_valid_stock_code(code: str) -> tuple[bool, str]:
-    """
-    校验股票代码格式是否合法，并自动识别所属市场。
-
-    规则：
-      - A 股：6 位纯数字，如 "600519"（贵州茅台）、"000001"（平安银行）
-      - 美股：1-6 位大写字母，如 "AAPL"、"TSLA"、"GOOGL"
-
-    Args:
-        code: 用户输入的股票代码字符串（支持大小写、前后空格）
-
-    Returns:
-        (是否合法, 市场标识) — 市场标识为 "A"、"US" 或空字符串 ""
-    """
-    if not code or not isinstance(code, str):
-        return False, ""
-    code = code.strip().upper()
-    # A 股：6 位纯数字
-    if re.match(r"^\d{6}$", code):
-        return True, "A"
-    # 美股：1-6 位纯字母
-    if re.match(r"^[A-Z]{1,6}$", code):
-        return True, "US"
-    return False, ""
-
-
 def detect_market(code: str) -> str:
     """
     仅识别股票所属市场，不做合法性校验。
@@ -59,21 +33,8 @@ def detect_market(code: str) -> str:
     return ""
 
 
-def format_date(d: date | datetime | str) -> str:
-    """
-    将各种日期类型统一格式化为 "YYYY-MM-DD" 字符串。
-
-    支持输入类型：
-      - str: 直接截取前 10 位
-      - datetime: 调用 strftime
-      - date: 调用 isoformat
-
-    Args:
-        d: 待格式化的日期对象
-
-    Returns:
-        "YYYY-MM-DD" 格式的日期字符串
-    """
+def _format_date(d: date | datetime | str) -> str:
+    """将各种日期类型统一格式化为 'YYYY-MM-DD'（仅本模块内部使用）。"""
     if isinstance(d, str):
         return d[:10]
     if isinstance(d, datetime):
@@ -154,11 +115,10 @@ def get_backtest_dates(period: str) -> tuple[str, str]:
         "3y": 1095,
     }
     days = periods.get(period, 90)
-    # 对于 >=1 年的周期使用年份减法（更自然），短周期用 timedelta
-    start = today.replace(year=today.year - max(1, days // 365))
-    if days < 365:
-        start = today - timedelta(days=days)
-    return format_date(start), format_date(today)
+    # 统一用 timedelta 做日期减法，避免 today.replace(year=...)
+    # 在 2 月 29 日（闰年）回到非闰年时抛 ValueError。
+    start = today - timedelta(days=days)
+    return _format_date(start), _format_date(today)
 
 
 def setup_logging(work_dir: str):
@@ -189,8 +149,10 @@ def setup_logging(work_dir: str):
 def _search_a_stock(keyword: str) -> list[dict]:
     """通过 akshare 在线搜索 A 股。"""
     try:
+        from data.stock_fetcher import _without_system_proxy
         import akshare as ak
-        df = ak.stock_info_a_code_name()
+        with _without_system_proxy():
+            df = ak.stock_info_a_code_name()
         if df is not None and not df.empty:
             mask = df["name"].str.contains(keyword, na=False)
             return [
@@ -255,7 +217,9 @@ def _search_a_stock_fallback(keyword: str) -> list[dict]:
 
 def _search_us_stock_online(keyword: str) -> list[dict]:
     """通过 Yahoo Finance 在线搜索美股。"""
+    from data.stock_fetcher import _apply_proxy, _without_system_proxy
     results = []
+    _apply_proxy()
     try:
         import yfinance as yf
         search = yf.Search(keyword)
@@ -268,12 +232,19 @@ def _search_us_stock_online(keyword: str) -> list[dict]:
     except Exception:
         try:
             import requests
-            resp = requests.get(
-                "https://query1.finance.yahoo.com/v1/finance/search",
-                params={"q": keyword, "lang": "en-US", "quotesCount": 10},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=10,
-            )
+            with _without_system_proxy():
+                session = requests.Session()
+                session.trust_env = False
+                from data.stock_fetcher import _resolve_proxy_url
+                proxy = _resolve_proxy_url()
+                if proxy:
+                    session.proxies = {"http": proxy, "https": proxy}
+                resp = session.get(
+                    "https://query1.finance.yahoo.com/v1/finance/search",
+                    params={"q": keyword, "lang": "en-US", "quotesCount": 10},
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=10,
+                )
             for quote in resp.json().get("quotes", []):
                 symbol = quote.get("symbol", "")
                 if not symbol or "." in symbol:

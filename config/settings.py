@@ -11,9 +11,14 @@
 """
 
 import json
+import logging
 import os
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 # 默认配置模板，首次运行时使用
@@ -70,18 +75,39 @@ class Settings:
             Settings 单例实例
         """
         cls._config_path = Path(config_path)
+        instance = cls()
+        # 重置为默认值，防止单例被复用时残留旧配置
+        instance._data = dict(DEFAULT_CONFIG)
+
         if cls._config_path.exists():
             try:
                 with open(cls._config_path, "r", encoding="utf-8") as f:
                     saved = json.load(f)
-                instance = cls()
+                if not isinstance(saved, dict):
+                    raise ValueError("config root is not a JSON object")
                 # 合并已保存配置（已保存的值覆盖默认值）
                 instance._data.update(saved)
-            except (json.JSONDecodeError, IOError):
-                # 配置文件损坏，使用默认配置
-                instance = cls()
+            except (json.JSONDecodeError, IOError, ValueError) as e:
+                # 配置文件损坏：备份原文件 → 回退默认配置 → 重新落盘
+                backup = cls._config_path.with_name(
+                    f"{cls._config_path.name}.broken-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                )
+                try:
+                    shutil.copy2(cls._config_path, backup)
+                    logger.warning(
+                        f"Config file is corrupted ({e}); backed up to {backup} "
+                        f"and restored defaults"
+                    )
+                except Exception as copy_err:
+                    logger.warning(
+                        f"Config file is corrupted ({e}); failed to back up: {copy_err}"
+                    )
+                instance._data = dict(DEFAULT_CONFIG)
+                try:
+                    instance.save()
+                except Exception:
+                    pass
         else:
-            instance = cls()
             instance.save()  # 首次运行时创建默认配置文件
         return instance
 

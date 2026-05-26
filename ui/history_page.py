@@ -217,17 +217,16 @@ class HistoryPage(ft.Container):
         self._detail_content.visible = True
         self._detail_content.update()
 
-        # 尝试加载关联的 K 线图
-        if report.pdf_path:
-            chart_path = report.pdf_path.replace(".pdf", ".png")
-            import os
-            if os.path.exists(chart_path):
-                self._detail_chart.src = chart_path
-                self._detail_chart.visible = True
-                self._detail_chart.update()
-            else:
-                self._detail_chart.visible = False
-                self._detail_chart.update()
+        # 加载关联的 K 线图：优先使用 chart_path 字段（生成报告时即写入），
+        # 老报告若无该字段则隐藏图表
+        import os
+        chart_path = report.chart_path or ""
+        if chart_path and os.path.exists(chart_path):
+            self._detail_chart.src = chart_path
+            self._detail_chart.visible = True
+        else:
+            self._detail_chart.visible = False
+        self._detail_chart.update()
 
         self._detail_rating.rating = report.rating or 0
         self._detail_rating.visible = True
@@ -274,10 +273,19 @@ class HistoryPage(ft.Container):
             self.page.update()
 
     def _on_delete_report(self, e):
-        """删除选中的报告。"""
+        """删除选中的报告，同时清理磁盘上的 chart 和 PDF。"""
+        import os
         if not self._selected_report or not self._selected_report.id:
             return
-        Database().delete_report(self._selected_report.id)
+        report = self._selected_report
+        # 先删除关联的磁盘文件（缺失或失败都不影响数据库删除）
+        for path in (report.chart_path, report.pdf_path):
+            if path and os.path.isfile(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+        Database().delete_report(report.id)
         self._selected_report = None
         self._detail_panel.visible = False
         self._detail_panel.update()
