@@ -20,6 +20,7 @@ from datetime import datetime, date
 
 from data.models import NewsItem
 from data.database import Database
+from data.stock_fetcher import _apply_proxy, _without_system_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,8 @@ def _fetch_news_a(code: str, limit: int = 15) -> list[NewsItem]:
     """
     try:
         import akshare as ak
-        df = ak.stock_news_em(symbol=code)
+        with _without_system_proxy():
+            df = ak.stock_news_em(symbol=code)
         if df is None or df.empty:
             logger.warning(f"No news found for A-stock {code}")
             return []
@@ -96,6 +98,7 @@ def _fetch_news_us(code: str, limit: int = 15) -> list[NewsItem]:
       - 部分新闻可能缺少日期，回退到当天日期。
     """
     try:
+        _apply_proxy()
         import yfinance as yf
         ticker = yf.Ticker(code)
         raw_news = ticker.news

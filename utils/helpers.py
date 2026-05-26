@@ -149,8 +149,10 @@ def setup_logging(work_dir: str):
 def _search_a_stock(keyword: str) -> list[dict]:
     """通过 akshare 在线搜索 A 股。"""
     try:
+        from data.stock_fetcher import _without_system_proxy
         import akshare as ak
-        df = ak.stock_info_a_code_name()
+        with _without_system_proxy():
+            df = ak.stock_info_a_code_name()
         if df is not None and not df.empty:
             mask = df["name"].str.contains(keyword, na=False)
             return [
@@ -215,7 +217,9 @@ def _search_a_stock_fallback(keyword: str) -> list[dict]:
 
 def _search_us_stock_online(keyword: str) -> list[dict]:
     """通过 Yahoo Finance 在线搜索美股。"""
+    from data.stock_fetcher import _apply_proxy, _without_system_proxy
     results = []
+    _apply_proxy()
     try:
         import yfinance as yf
         search = yf.Search(keyword)
@@ -228,12 +232,19 @@ def _search_us_stock_online(keyword: str) -> list[dict]:
     except Exception:
         try:
             import requests
-            resp = requests.get(
-                "https://query1.finance.yahoo.com/v1/finance/search",
-                params={"q": keyword, "lang": "en-US", "quotesCount": 10},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=10,
-            )
+            with _without_system_proxy():
+                session = requests.Session()
+                session.trust_env = False
+                from config.settings import Settings
+                proxy = Settings().get("proxy", "") or ""
+                if proxy:
+                    session.proxies = {"http": proxy, "https": proxy}
+                resp = session.get(
+                    "https://query1.finance.yahoo.com/v1/finance/search",
+                    params={"q": keyword, "lang": "en-US", "quotesCount": 10},
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=10,
+                )
             for quote in resp.json().get("quotes", []):
                 symbol = quote.get("symbol", "")
                 if not symbol or "." in symbol:
