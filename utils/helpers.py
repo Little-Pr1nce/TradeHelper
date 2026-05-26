@@ -235,8 +235,8 @@ def _search_us_stock_online(keyword: str) -> list[dict]:
             with _without_system_proxy():
                 session = requests.Session()
                 session.trust_env = False
-                from config.settings import Settings
-                proxy = Settings().get("proxy", "") or ""
+                from data.stock_fetcher import _resolve_proxy_url
+                proxy = _resolve_proxy_url()
                 if proxy:
                     session.proxies = {"http": proxy, "https": proxy}
                 resp = session.get(

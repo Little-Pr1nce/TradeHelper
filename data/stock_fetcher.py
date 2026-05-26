@@ -10,6 +10,8 @@
 
 import logging
 import os
+import re
+import subprocess
 import time
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -61,23 +63,58 @@ def _without_system_proxy():
         os.environ.update(saved)
 
 
+def _detect_macos_http_proxy() -> str:
+    """读取 macOS 系统 HTTP 代理（MonoProxy/Surge 等开启「系统代理」时可用）。"""
+    try:
+        out = subprocess.check_output(["scutil", "--proxy"], text=True, timeout=3)
+        if "HTTPEnable : 1" not in out and "HTTPSEnable : 1" not in out:
+            return ""
+        host_m = re.search(r"HTTPProxy : (\S+)", out)
+        port_m = re.search(r"HTTPPort : (\d+)", out)
+        if host_m and port_m:
+            return f"http://{host_m.group(1)}:{port_m.group(1)}"
+    except Exception:
+        pass
+    return ""
+
+
+def _resolve_proxy_url() -> str:
+    """优先 Settings，否则回退 macOS 系统 HTTP 代理。"""
+    from config.settings import Settings
+    configured = (Settings().get("proxy", "") or "").strip()
+    if configured:
+        return configured
+    detected = _detect_macos_http_proxy()
+    if detected:
+        logger.debug(f"Using macOS system HTTP proxy: {detected}")
+    return detected
+
+
+def _yfinance_proxy(proxy_url: str):
+    """
+    yfinance >= 1.4（curl_cffi）要求 proxy 为 dict，不能传字符串。
+    """
+    if not proxy_url:
+        return None
+    return {"http": proxy_url, "https": proxy_url}
+
+
 def _apply_proxy():
     """
-    将 Settings 中的代理应用到 yfinance（海外服务）。
+    将代理应用到 yfinance（海外服务）。
 
-    yfinance >= 1.4 使用 yf.config.network.proxy，不再支持 session= 参数。
+    来源：Settings.proxy → macOS 系统 HTTP 代理（8118 等）。
     """
-    from config.settings import Settings
-    proxy = Settings().get("proxy", "") or ""
-    if _PROXY_STATE["applied"] == proxy:
+    proxy_url = _resolve_proxy_url()
+    if _PROXY_STATE["applied"] == proxy_url:
         return
 
     try:
         import yfinance as yf
-        yf.config.network.proxy = proxy or None
-        _PROXY_STATE["applied"] = proxy
-        if proxy:
-            logger.debug(f"yfinance proxy set to {proxy}")
+        yf.config.network.proxy = _yfinance_proxy(proxy_url)
+        _PROXY_STATE["applied"] = proxy_url
+        if proxy_url:
+            logger.info(f"yfinance proxy: {proxy_url}")
     except Exception as e:
         logger.warning(f"Failed to configure yfinance proxy: {e}")
 
