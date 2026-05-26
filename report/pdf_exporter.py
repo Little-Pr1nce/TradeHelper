@@ -21,6 +21,7 @@ PDF 输出路径：{work_dir}/reports/report_{code}_{timestamp}.pdf
 
 import logging
 import os
+import re
 from datetime import datetime
 
 # ---- reportlab 导入 ----
@@ -121,6 +122,15 @@ def _get_styles() -> dict:
             spaceBefore=14,
             spaceAfter=6,
             textColor=HexColor("#34495e"),
+        ),
+        "ChineseH3": ParagraphStyle(
+            name="ChineseH3",
+            fontName=font_name,
+            fontSize=12,
+            leading=18,
+            spaceBefore=10,
+            spaceAfter=4,
+            textColor=HexColor("#41607a"),
         ),
         "ChineseBody": ParagraphStyle(
             name="ChineseBody",
@@ -231,33 +241,39 @@ def export_report_to_pdf(
         for title, content in sections:
             # 标题
             if title:
-                elements.append(Paragraph(title, styles["ChineseH2"]))
+                elements.append(Paragraph(_inline_md_to_html(title), styles["ChineseH2"]))
 
             # 正文逐行处理
             lines = content.strip().split("\n")
+            in_code_block = False
             for line in lines:
-                line = line.strip()
-                if not line:
+                stripped = line.strip()
+                if not stripped:
                     elements.append(Spacer(1, 2*mm))  # 空行
                     continue
 
-                if line.startswith("- "):
-                    # 列表项
-                    elements.append(Paragraph(
-                        f"&bull; {line[2:]}", styles["ChineseBody"]
-                    ))
-                elif line.startswith("**") and line.endswith("**"):
-                    # 粗体行（作为小标题处理）
-                    elements.append(Paragraph(line, styles["ChineseH2"]))
-                elif line.startswith("> "):
-                    # 引用块（作为注释处理）
-                    elements.append(Paragraph(line, styles["ChineseSmall"]))
-                elif line.startswith("```"):
-                    # 代码块标记，跳过
+                # 代码块开关（``` 成对出现）
+                if stripped.startswith("```"):
+                    in_code_block = not in_code_block
                     continue
+                if in_code_block:
+                    elements.append(Paragraph(_escape_html(stripped), styles["ChineseCode"]))
+                    continue
+
+                if stripped.startswith("### "):
+                    elements.append(Paragraph(_inline_md_to_html(stripped[4:]), styles["ChineseH3"]))
+                elif stripped.startswith("## "):
+                    elements.append(Paragraph(_inline_md_to_html(stripped[3:]), styles["ChineseH2"]))
+                elif stripped.startswith("# "):
+                    elements.append(Paragraph(_inline_md_to_html(stripped[2:]), styles["ChineseH1"]))
+                elif stripped.startswith("- "):
+                    elements.append(Paragraph(
+                        f"&bull; {_inline_md_to_html(stripped[2:])}", styles["ChineseBody"]
+                    ))
+                elif stripped.startswith("> "):
+                    elements.append(Paragraph(_inline_md_to_html(stripped[2:]), styles["ChineseSmall"]))
                 else:
-                    # 普通段落
-                    elements.append(Paragraph(line, styles["ChineseBody"]))
+                    elements.append(Paragraph(_inline_md_to_html(stripped), styles["ChineseBody"]))
 
         # ---- 免责声明 ----
         elements.append(Spacer(1, 1*cm))
@@ -274,6 +290,33 @@ def export_report_to_pdf(
     except Exception as e:
         logger.error(f"PDF export failed: {e}")
         return None
+
+
+def _escape_html(text: str) -> str:
+    """转义 reportlab Paragraph 会解释的 HTML 字符。"""
+    return (text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;"))
+
+
+def _inline_md_to_html(text: str) -> str:
+    """
+    把内联 Markdown 转成 reportlab Paragraph 支持的 HTML 子集。
+
+    支持：
+      - 行内粗体  **xxx** → <b>xxx</b>
+      - 行内斜体  *xxx*   → <i>xxx</i>（避免吞掉 **）
+      - 行内代码  `xxx`   → <font face="Courier">xxx</font>
+    其他字符做 HTML 转义，避免 reportlab 解析错误。
+    """
+    escaped = _escape_html(text)
+    # 粗体：**xx** （非贪婪），先于斜体
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+    # 斜体：*xx*
+    escaped = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", escaped)
+    # 行内代码：`xx`
+    escaped = re.sub(r"`([^`]+)`", r'<font face="Courier">\1</font>', escaped)
+    return escaped
 
 
 def _parse_markdown_sections(content: str) -> list[tuple[str, str]]:

@@ -34,24 +34,36 @@ class BaseStockFetcher(ABC):
         pass
 
 
+# 代理状态缓存：当代理配置发生变化时才重新创建 yfinance session，
+# 避免每次调用都创建新 session（旧 session 不会被清理）。
+_PROXY_STATE: dict = {"applied": None}
+
+
 def _apply_proxy():
     """
-    仅将代理应用到 yfinance（海外服务）。
-    akshare 是东方财富国内接口，不走代理直连。
-    不清除也不设置全局环境变量，避免影响其他库。
+    仅将代理应用到 yfinance（海外服务）。akshare 是国内接口，不走代理。
+
+    设计：
+      - 只有当 proxy 配置发生变化时才重新创建 session；
+      - 切换为空代理时显式重置 yf 全局 session 为 None。
     """
     from config.settings import Settings
-    proxy = Settings().get("proxy", "")
-    if proxy:
-        try:
-            import yfinance as yf
+    proxy = Settings().get("proxy", "") or ""
+    if _PROXY_STATE["applied"] == proxy:
+        return  # 已应用同样的代理，无需重复设置
+
+    try:
+        import yfinance as yf
+        if not proxy:
+            yf.set_config(session=None)
+        else:
             import requests
-            # 用 session 隔离代理，不影响全局
             session = requests.Session()
             session.proxies = {"http": proxy, "https": proxy}
             yf.set_config(session=session)
-        except Exception:
-            pass
+        _PROXY_STATE["applied"] = proxy
+    except Exception:
+        pass
 
 
 def _retry(func, max_retries=3, label=""):

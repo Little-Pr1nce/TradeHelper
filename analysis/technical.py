@@ -234,44 +234,6 @@ def calc_all_indicators(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-# ======================== 买卖信号生成 ========================
-
-def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    基于双均线交叉生成买卖信号。
-
-    规则：
-      - 金叉（MA5 上穿 MA20）→ "buy"
-      - 死叉（MA5 下穿 MA20）→ "sell"
-
-    注意：
-      - 需要 df 中已包含 ma_5 和 ma_20 列（先调用 calc_ma）
-      - 判断的是"穿越"而非"持续状态"，避免连续产生同类型信号
-
-    Args:
-        df: 包含 ma_5 和 ma_20 列的 DataFrame
-
-    Returns:
-        添加了 signal 列的 DataFrame（值为 "buy" / "sell" / ""）
-    """
-    result = df.copy()
-    result["signal"] = ""
-
-    if "ma_5" in result.columns and "ma_20" in result.columns:
-        # 遍历每行，检测穿越点
-        for i in range(1, len(result)):
-            # 金叉：前一时刻 MA5 <= MA20，当前时刻 MA5 > MA20
-            if (result["ma_5"].iloc[i] > result["ma_20"].iloc[i] and
-                    result["ma_5"].iloc[i-1] <= result["ma_20"].iloc[i-1]):
-                result.loc[result.index[i], "signal"] = "buy"
-            # 死叉：前一时刻 MA5 >= MA20，当前时刻 MA5 < MA20
-            elif (result["ma_5"].iloc[i] < result["ma_20"].iloc[i] and
-                  result["ma_5"].iloc[i-1] >= result["ma_20"].iloc[i-1]):
-                result.loc[result.index[i], "signal"] = "sell"
-
-    return result
-
-
 # ======================== 分析摘要生成 ========================
 
 def summarize(df: pd.DataFrame, name: str = "") -> str:
@@ -299,35 +261,31 @@ def summarize(df: pd.DataFrame, name: str = "") -> str:
     last = df.iloc[-1]  # 最新一行数据
     lines = [f"## {name}技术面分析\n"]
 
-    # 可选：使用 ta 库计算 ADX（趋势强度）和 ATR（波动率）
-    # ta 库不是必须依赖，安装失败不影响主流程
+    # 可选：使用 ta 库计算 ADX（趋势强度）和 ATR（波动率），
+    # 取最新值用于"趋势 / 震荡"判断（ta 不是必需依赖）。
+    adx_last = atr_last = None
     try:
         import ta
-
-        if "close" in df.columns:
-            df_ta = df.copy()
-            df_ta["close"] = df_ta["close"].astype(float)
-            df_ta["high"] = df_ta["high"].astype(float)
-            df_ta["low"] = df_ta["low"].astype(float)
-            df_ta["volume"] = df_ta["volume"].astype(float)
-
-            # ADX: 趋势强度指标（>25 趋势明显，<20 震荡）
-            try:
-                adx = ta.trend.ADXIndicator(
-                    high=df_ta["high"], low=df_ta["low"], close=df_ta["close"]
-                ).adx()
-                df_ta["adx"] = adx
-            except Exception:
-                pass
-
-            # ATR: 平均真实波幅（衡量波动性）
-            try:
-                atr = ta.volatility.AverageTrueRange(
-                    high=df_ta["high"], low=df_ta["low"], close=df_ta["close"]
-                ).average_true_range()
-                df_ta["atr"] = atr
-            except Exception:
-                pass
+        try:
+            adx_series = ta.trend.ADXIndicator(
+                high=df["high"].astype(float),
+                low=df["low"].astype(float),
+                close=df["close"].astype(float),
+            ).adx()
+            if not adx_series.empty and pd.notna(adx_series.iloc[-1]):
+                adx_last = float(adx_series.iloc[-1])
+        except Exception:
+            pass
+        try:
+            atr_series = ta.volatility.AverageTrueRange(
+                high=df["high"].astype(float),
+                low=df["low"].astype(float),
+                close=df["close"].astype(float),
+            ).average_true_range()
+            if not atr_series.empty and pd.notna(atr_series.iloc[-1]):
+                atr_last = float(atr_series.iloc[-1])
+        except Exception:
+            pass
     except ImportError:
         pass
 
@@ -393,6 +351,21 @@ def summarize(df: pd.DataFrame, name: str = "") -> str:
         lines.append(f"- K: {k_val:.2f}")
         lines.append(f"- D: {d_val:.2f}")
         lines.append(f"- J: {j_val:.2f}")
+
+    # ---- 趋势强度 / 波动率（ADX / ATR） ----
+    if adx_last is not None or atr_last is not None:
+        lines.append("\n### 趋势强度 / 波动率")
+        if adx_last is not None:
+            if adx_last > 25:
+                trend_label = "趋势明显"
+            elif adx_last < 20:
+                trend_label = "震荡为主"
+            else:
+                trend_label = "趋势中性"
+            lines.append(f"- ADX: {adx_last:.1f}（{trend_label}）")
+        if atr_last is not None:
+            close_price = float(last.get("close", 0)) or 1
+            lines.append(f"- ATR: {atr_last:.2f}（约占当前价 {atr_last / close_price * 100:.2f}%）")
 
     # ---- 近期涨跌幅 ----
     lines.append(f"\n### 近5日涨跌幅")

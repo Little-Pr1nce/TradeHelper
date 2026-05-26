@@ -22,7 +22,7 @@ from data.news_fetcher import fetch_news
 from data.models import StockInfo, AnalysisReport
 from analysis.technical import calc_all_indicators, summarize
 from analysis.sentiment import analyze, aggregate
-from analysis.strategy import get_strategy
+from analysis.strategy import get_strategy, PrecomputedSignalsStrategy
 from analysis.backtest import BacktestEngine
 from report.chart import generate_kline_chart
 from report.generator import generate_report
@@ -324,125 +324,40 @@ class MainPage(ft.Container):
             return
         self._run_analysis(code, market, period, strategy_name)
 
+    # ---- 主流程：拆为多个职责单一的私有方法，便于阅读和取消 ----
+
     def _run_analysis(self, code: str, market: str, period: str, strategy_name: str):
+        ctx = {"code": code}  # 简单的日志上下文（多任务并发时可定位）
         try:
-            # 1. 股票信息
-            logger.info(f"[1/9] 获取股票信息: {code}")
-            self._update_progress("正在获取股票信息...")
-            fetcher = get_stock_fetcher()
-            info = fetcher.fetch_stock_info(code)
-            if info:
-                Database().upsert_stock(info)
-                logger.info(f"[1/9] 股票信息: {info.name} ({info.industry})")
-            else:
-                logger.warning(f"[1/9] 未获取到股票信息，使用默认名")
-                info = StockInfo(code=code, name=code, market=market)
+            t0 = datetime.now()
 
+            info = self._fetch_stock_info(code, market, ctx)
             if self._stop_flag: return
 
-            # 2. 股价数据（优先从数据库读取缓存，缺失部分才联网获取）
-            logger.info(f"[2/9] 获取股价数据...")
-            self._update_progress("正在获取股价数据...")
-            start, end = get_backtest_dates(period)
-            prices = Database().get_prices(code, start, end)
-            logger.info(f"[2/9] 缓存数据: {len(prices)} 条")
-            need_fetch = len(prices) < 5
-            if not need_fetch and prices:
-                from datetime import date, timedelta
-                if prices[-1].date < (date.today() - timedelta(days=7)).isoformat():
-                    need_fetch = True
-            if need_fetch:
-                logger.info(f"[2/9] 缓存不足，联网获取 ({start} ~ {end})...")
-                self._update_progress("正在联网获取最新股价数据...")
-                new_prices = fetcher.fetch_price_history(code, start, end)
-                if new_prices:
-                    Database().insert_prices(new_prices)
-                    prices = Database().get_prices(code, start, end)
-                    logger.info(f"[2/9] 联网获取: {len(new_prices)} 条，总计 {len(prices)} 条")
-            else:
-                logger.info(f"[2/9] 使用缓存数据 ({len(prices)} 条，最新 {prices[-1].date})")
-
-            if not prices:
-                self._show_result_error(f"无法获取 {code} 的股价数据，请检查代码或网络")
-                return
-
+            prices = self._fetch_prices(code, period, ctx)
+            if prices is None:
+                return  # 错误已通过 _show_result_error 通知 UI
             if self._stop_flag: return
 
-            # 3. DataFrame
-            import pandas as pd
-            df = pd.DataFrame([p.to_dict() for p in prices])
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.sort_values("date")
-            logger.info(f"[3/9] 数据预处理: {len(df)} 行, {df['date'].iloc[0].strftime('%Y-%m-%d')} ~ {df['date'].iloc[-1].strftime('%Y-%m-%d')}")
-
-            # 4. 技术指标
-            logger.info(f"[4/9] 计算技术指标...")
-            self._update_progress("正在计算技术指标...")
-            df = calc_all_indicators(df)
-            logger.info(f"[4/9] 技术指标计算完成 (MA/MACD/RSI/布林带/KDJ)")
-
+            df = self._compute_indicators(prices, ctx)
             if self._stop_flag: return
 
-            # 5. 新闻
-            logger.info(f"[5/9] 获取新闻...")
-            news_list = []
-            try:
-                self._update_progress("正在获取新闻...")
-                news_list = fetch_news(code, market)
-            except Exception as e:
-                logger.warning(f"News fetch failed: {e}")
-            logger.info(f"[5/9] 新闻: {len(news_list)} 条")
-
-            logger.info(f"[5/9] 新闻情感分析...")
-            self._update_progress("正在进行新闻情感分析...")
-            news_list = analyze(news_list)
-            news_agg = aggregate(news_list)
-            logger.info(f"[5/9] 情感分析: {news_agg['sentiment_score']:.2f} ({news_agg['summary'][:50]}...)")
-
+            news_agg = self._fetch_and_analyze_news(code, market, ctx)
             if self._stop_flag: return
 
-            # 6. 回测
-            logger.info(f"[6/9] 运行回测: {strategy_name}...")
-            self._update_progress("正在运行回测...")
-            strategy = get_strategy(strategy_name)
-            bt_df = df.copy()
-            bt_df = strategy.generate_signals(bt_df)
-            engine = BacktestEngine()
-            bt_result = engine.run(bt_df, strategy)
-            logger.info(f"[6/9] 回测: 总收益={bt_result['total_return']:.2%}, 夏普={bt_result['sharpe_ratio']:.2f}, 回撤={bt_result['max_drawdown']:.2%}")
-
+            bt_df, bt_result = self._run_backtest(df, strategy_name, ctx)
             if self._stop_flag: return
 
-            # 7. K 线图
-            logger.info(f"[7/9] 生成 K 线图...")
-            self._update_progress("正在生成 K 线图...")
-            chart_df = df.copy()
-            chart_df["signal"] = bt_df.get("signal", "")
-            self._chart_path = generate_kline_chart(chart_df, code, info.name)
-            logger.info(f"[7/9] K 线图: {self._chart_path or '生成失败'}")
+            self._chart_path = self._generate_chart(df, bt_df, code, info.name, ctx)
 
-            # 8. 报告
-            logger.info(f"[8/9] 生成分析报告 (LLM: {Settings().get('llm_model')})...")
-            self._update_progress("正在生成分析报告...")
             tech = summarize(df, info.name)
-            self._report_content = generate_report(info.to_dict(), tech, news_agg, bt_result)
-            if self._report_content:
-                logger.info(f"[8/9] 报告生成完成: {len(self._report_content)} 字符")
-            else:
-                logger.error("[8/9] 报告生成失败！使用默认文本")
-                self._report_content = "报告生成失败，请稍后重试。"
+            self._report_content = self._generate_report_content(info, tech, news_agg, bt_result, ctx)
 
-            # 9. 保存
-            logger.info(f"[9/9] 保存报告到数据库...")
-            self._update_progress("正在保存报告...")
-            report = AnalysisReport(
-                code=code, name=info.name, market=market,
-                backtest_period=period,
-                create_time=datetime.now().isoformat(),
-                content=self._report_content,
-            )
-            self._current_report_id = Database().insert_report(report)
+            self._persist_report(info, market, period, ctx)
             self._analysis_result = {"stock": info.to_dict(), "backtest": bt_result}
+
+            elapsed = (datetime.now() - t0).total_seconds()
+            logger.info(f"[done] {code} 分析完成，总耗时 {elapsed:.1f}s")
             self._show_results()
 
         except Exception as ex:
@@ -454,6 +369,177 @@ class MainPage(ft.Container):
             except Exception:
                 pass
 
+    # ---- 1) 股票信息 ----
+    def _fetch_stock_info(self, code: str, market: str, ctx: dict) -> StockInfo:
+        logger.info(f"[1/9] [{code}] 获取股票信息")
+        self._update_progress("正在获取股票信息...")
+        fetcher = get_stock_fetcher()
+        info = fetcher.fetch_stock_info(code)
+        if info:
+            Database().upsert_stock(info)
+            logger.info(f"[1/9] [{code}] 股票信息: {info.name} ({info.industry})")
+            return info
+        logger.warning(f"[1/9] [{code}] 未获取到股票信息，使用默认名")
+        return StockInfo(code=code, name=code, market=market)
+
+    # ---- 2) 股价数据（含缓存覆盖度校验，修复 P1-4） ----
+    def _fetch_prices(self, code: str, period: str, ctx: dict):
+        logger.info(f"[2/9] [{code}] 获取股价数据")
+        self._update_progress("正在获取股价数据...")
+        start, end = get_backtest_dates(period)
+        prices = Database().get_prices(code, start, end)
+        logger.info(f"[2/9] [{code}] 缓存数据: {len(prices)} 条 (期望区间 {start}~{end})")
+
+        need_fetch = self._cache_needs_refresh(prices, start, end)
+        if need_fetch:
+            logger.info(f"[2/9] [{code}] 缓存不足/过旧，联网拉取 {start}~{end}")
+            self._update_progress("正在联网获取最新股价数据...")
+            fetcher = get_stock_fetcher()
+            new_prices = fetcher.fetch_price_history(code, start, end)
+            if new_prices:
+                Database().insert_prices(new_prices)
+                prices = Database().get_prices(code, start, end)
+                logger.info(f"[2/9] [{code}] 联网获取 {len(new_prices)} 条，合计 {len(prices)} 条")
+        else:
+            logger.info(f"[2/9] [{code}] 使用缓存（覆盖完整，最新 {prices[-1].date}）")
+
+        if not prices:
+            self._show_result_error(f"无法获取 {code} 的股价数据，请检查代码或网络")
+            return None
+        return prices
+
+    @staticmethod
+    def _cache_needs_refresh(prices, start: str, end: str) -> bool:
+        """
+        判断本地缓存是否需要联网刷新。
+
+        触发条件（任一即刷新）：
+          - 数据少于 5 条
+          - 缓存最早一条晚于期望开始日 + 7 天（说明早期数据缺失，常见于"周期变长"）
+          - 缓存最新一条早于今天 - 7 天（说明近端数据过旧）
+        """
+        from datetime import date, timedelta
+        if len(prices) < 5:
+            return True
+        first_date = prices[0].date
+        last_date = prices[-1].date
+        # 期望区间起点 vs 实际起点：差 > 7 天就不算覆盖
+        # （直接比较 ISO 字符串能正确排序）
+        expected_start = start
+        if first_date and expected_start and first_date > expected_start:
+            # 转 date 比较天数差
+            try:
+                d_first = date.fromisoformat(first_date)
+                d_start = date.fromisoformat(expected_start)
+                if (d_first - d_start).days > 7:
+                    return True
+            except ValueError:
+                pass
+        # 末端过期
+        if last_date < (date.today() - timedelta(days=7)).isoformat():
+            return True
+        return False
+
+    # ---- 3) 技术指标 ----
+    def _compute_indicators(self, prices, ctx: dict):
+        import pandas as pd
+        df = pd.DataFrame([p.to_dict() for p in prices])
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").reset_index(drop=True)
+        logger.info(
+            f"[3/9] [{ctx['code']}] 数据预处理: {len(df)} 行, "
+            f"{df['date'].iloc[0].strftime('%Y-%m-%d')} ~ "
+            f"{df['date'].iloc[-1].strftime('%Y-%m-%d')}"
+        )
+        logger.info(f"[4/9] [{ctx['code']}] 计算技术指标")
+        self._update_progress("正在计算技术指标...")
+        return calc_all_indicators(df)
+
+    # ---- 4) 新闻：24h 缓存复用 + 拉取 + 情感分析 + 持久化 ----
+    def _fetch_and_analyze_news(self, code: str, market: str, ctx: dict) -> dict:
+        from analysis.constants import NEWS_CACHE_HOURS, NEWS_FETCH_LIMIT
+
+        logger.info(f"[5/9] [{code}] 检查新闻缓存（{NEWS_CACHE_HOURS}h）")
+        self._update_progress("正在加载新闻...")
+        cached = Database().get_recent_news_with_sentiment(code, hours=NEWS_CACHE_HOURS, limit=NEWS_FETCH_LIMIT)
+        if cached:
+            logger.info(f"[5/9] [{code}] 命中新闻缓存 {len(cached)} 条，跳过抓取/分析")
+            return aggregate(cached)
+
+        news_list = []
+        try:
+            self._update_progress("正在获取新闻...")
+            news_list = fetch_news(code, market, limit=NEWS_FETCH_LIMIT)
+        except Exception as e:
+            logger.warning(f"[5/9] [{code}] 新闻抓取失败: {e}")
+        logger.info(f"[5/9] [{code}] 新闻: {len(news_list)} 条")
+
+        if news_list:
+            self._update_progress("正在进行新闻情感分析...")
+            news_list = analyze(news_list)
+            try:
+                Database().insert_news(news_list)
+            except Exception as e:
+                logger.warning(f"[5/9] [{code}] 新闻持久化失败: {e}")
+
+        news_agg = aggregate(news_list)
+        logger.info(
+            f"[5/9] [{code}] 情感分析: {news_agg['sentiment_score']:.2f} "
+            f"({news_agg['summary'][:50]}...)"
+        )
+        return news_agg
+
+    # ---- 5) 回测 ----
+    def _run_backtest(self, df, strategy_name: str, ctx: dict):
+        logger.info(f"[6/9] [{ctx['code']}] 运行回测: {strategy_name}")
+        self._update_progress("正在运行回测...")
+        strategy = get_strategy(strategy_name)
+        # 仅生成一次信号（避免在策略类和 BacktestEngine 内部各算一次）
+        bt_df = strategy.generate_signals(df.copy())
+        engine = BacktestEngine()
+        # 信号已生成，封装成 PrecomputedSignalsStrategy 以避免重复计算
+        bt_result = engine.run(bt_df, PrecomputedSignalsStrategy(strategy))
+        logger.info(
+            f"[6/9] [{ctx['code']}] 回测完成: 总收益={bt_result['total_return']:.2%}, "
+            f"夏普={bt_result['sharpe_ratio']:.2f}, 回撤={bt_result['max_drawdown']:.2%}"
+        )
+        return bt_df, bt_result
+
+    # ---- 6) K 线图 ----
+    def _generate_chart(self, df, bt_df, code: str, name: str, ctx: dict):
+        logger.info(f"[7/9] [{code}] 生成 K 线图")
+        self._update_progress("正在生成 K 线图...")
+        chart_df = df.copy()
+        if "signal" in bt_df.columns:
+            chart_df["signal"] = bt_df["signal"].values
+        path = generate_kline_chart(chart_df, code, name)
+        logger.info(f"[7/9] [{code}] K 线图: {path or '生成失败'}")
+        return path
+
+    # ---- 7) 报告生成 ----
+    def _generate_report_content(self, info, tech, news_agg, bt_result, ctx: dict) -> str:
+        logger.info(f"[8/9] [{ctx['code']}] 生成分析报告 (LLM: {Settings().get('llm_model')})")
+        self._update_progress("正在生成分析报告...")
+        content = generate_report(info.to_dict(), tech, news_agg, bt_result)
+        if content:
+            logger.info(f"[8/9] [{ctx['code']}] 报告生成完成: {len(content)} 字符")
+            return content
+        logger.error(f"[8/9] [{ctx['code']}] 报告生成失败，使用默认文本")
+        return "报告生成失败，请稍后重试。"
+
+    # ---- 8) 持久化 ----
+    def _persist_report(self, info, market: str, period: str, ctx: dict):
+        logger.info(f"[9/9] [{ctx['code']}] 保存报告到数据库")
+        self._update_progress("正在保存报告...")
+        report = AnalysisReport(
+            code=info.code, name=info.name, market=market,
+            backtest_period=period,
+            create_time=datetime.now().isoformat(),
+            content=self._report_content,
+            chart_path=self._chart_path or "",
+        )
+        self._current_report_id = Database().insert_report(report)
+
     # ======================== 线程安全 UI 更新 ========================
 
     def _update_progress(self, text: str):
@@ -463,23 +549,11 @@ class MainPage(ft.Container):
             pass
 
     def _show_result_error(self, msg: str):
-        try:
-            self.page.run_task(self._show_result_error_async, msg)
-        except Exception:
-            pass
-
-    def _show_results(self):
-        try:
-            self.page.run_task(self._show_results_async)
-        except Exception:
-            pass
-
-    def _show_result_error(self, msg: str):
-        print(f"[ERROR] {msg}")
+        logger.error(msg)
         try:
             self.page.run_task(self._show_result_error_async, msg)
         except Exception as e:
-            print(f"[ERROR] Failed to show error via run_task: {e}")
+            logger.error(f"Failed to show error via run_task: {e}")
 
     def _show_results(self):
         try:

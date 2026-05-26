@@ -10,7 +10,6 @@
 """
 
 import logging
-import os
 from typing import Optional
 
 from data.models import NewsItem
@@ -18,25 +17,53 @@ from data.models import NewsItem
 logger = logging.getLogger(__name__)
 
 _sentiment_pipeline: Optional[object] = None
+_FINBERT_MODEL = "mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis"
+
+
+def _is_model_cached(model_name: str) -> bool:
+    """检查 HuggingFace 缓存目录中是否已存在该模型文件。"""
+    try:
+        from huggingface_hub import try_to_load_from_cache
+        # 任何关键文件命中都说明模型已被下载过
+        for fname in ("config.json", "pytorch_model.bin", "model.safetensors"):
+            path = try_to_load_from_cache(repo_id=model_name, filename=fname)
+            if path is not None and not isinstance(path, str) is False:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def _get_pipeline():
-    """加载 FinBERT 模型，失败则降级关键词方案。"""
+    """
+    加载 FinBERT 模型；首次会从 HuggingFace 下载（约 300 MB）。
+
+    日志区分三种状态：
+      - 缓存命中：直接加载本地权重
+      - 首次下载：联网拉取后加载
+      - 兜底方案：网络/权限失败 → 关键词匹配（_SimpleFallbackAnalyzer）
+    """
     global _sentiment_pipeline
-    if _sentiment_pipeline is None:
-        try:
-            from transformers import pipeline
-            model_name = "mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis"
-            logger.info(f"Loading FinBERT: {model_name}")
-            _sentiment_pipeline = pipeline(
-                "sentiment-analysis", model=model_name,
-                tokenizer=model_name, max_length=512, truncation=True,
-                local_files_only=True,
-            )
-            logger.info("FinBERT loaded successfully")
-        except Exception as e:
-            logger.warning(f"FinBERT failed ({e}), using keyword fallback")
-            _sentiment_pipeline = _SimpleFallbackAnalyzer()
+    if _sentiment_pipeline is not None:
+        return _sentiment_pipeline
+
+    try:
+        from transformers import pipeline
+        if _is_model_cached(_FINBERT_MODEL):
+            logger.info(f"Loading FinBERT from local cache: {_FINBERT_MODEL}")
+        else:
+            logger.info(f"FinBERT not cached, downloading from HuggingFace: {_FINBERT_MODEL}")
+        _sentiment_pipeline = pipeline(
+            "sentiment-analysis",
+            model=_FINBERT_MODEL,
+            tokenizer=_FINBERT_MODEL,
+            max_length=512,
+            truncation=True,
+        )
+        logger.info("FinBERT loaded successfully")
+    except Exception as e:
+        logger.warning(f"FinBERT load failed ({e}); falling back to keyword analyzer")
+        _sentiment_pipeline = _SimpleFallbackAnalyzer()
     return _sentiment_pipeline
 
 
@@ -64,11 +91,17 @@ def analyze(news_list: list[NewsItem]) -> list[NewsItem]:
     if not news_list:
         return []
 
+    from analysis.constants import SENTIMENT_BATCH_SIZE
+
     pipeline = _get_pipeline()
     texts = [n.title for n in news_list]
 
+    # 拆批推理，避免一次性传入过多文本卡死 UI 线程
+    raw_results: list[dict] = []
     try:
-        raw_results = pipeline(texts)
+        for i in range(0, len(texts), SENTIMENT_BATCH_SIZE):
+            batch = texts[i : i + SENTIMENT_BATCH_SIZE]
+            raw_results.extend(pipeline(batch))
     except Exception as e:
         logger.error(f"Sentiment analysis failed: {e}")
         return news_list

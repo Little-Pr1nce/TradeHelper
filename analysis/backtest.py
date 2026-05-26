@@ -35,6 +35,7 @@ import pandas as pd
 import numpy as np
 
 from analysis.strategy import BaseStrategy
+from analysis.constants import BUY_RATIO, COMMISSION, TRADING_DAYS, RISK_FREE_RATE
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class BacktestEngine:
     result 字典包含完整的回测指标和交易记录。
     """
 
-    def __init__(self, initial_capital: float = 100000.0, commission: float = 0.0003):
+    def __init__(self, initial_capital: float = 100000.0, commission: float = COMMISSION):
         """
         初始化回测引擎。
 
@@ -121,8 +122,9 @@ class BacktestEngine:
             date_str = str(df["date"].iloc[i])[:10] if "date" in df.columns else str(i)
 
             # ---- 处理买入信号 ----
-            if signal == "buy" and cash > 0:
-                buy_amount = cash * 0.95  # 用 95% 现金买入
+            # 仅在空仓（shares == 0）时建仓，避免连续 buy 信号反复加仓
+            if signal == "buy" and shares == 0 and cash > 0:
+                buy_amount = cash * BUY_RATIO  # 用 95% 现金买入
                 buy_shares = buy_amount / price
                 cost = buy_amount * self.commission  # 佣金
                 cash -= buy_amount + cost
@@ -138,7 +140,8 @@ class BacktestEngine:
 
             # ---- 处理卖出信号 ----
             elif signal == "sell" and shares > 0:
-                sell_amount = shares * price
+                sold_shares = shares  # 先保存实际卖出数量，再清仓
+                sell_amount = sold_shares * price
                 cost = sell_amount * self.commission  # 佣金
                 cash += sell_amount - cost
                 shares = 0.0  # 清仓
@@ -147,7 +150,7 @@ class BacktestEngine:
                     "date": date_str,
                     "action": "sell",
                     "price": round(price, 2),
-                    "shares": round(shares, 2),
+                    "shares": round(sold_shares, 2),
                     "value": round(sell_amount, 2),
                 })
 
@@ -168,10 +171,10 @@ class BacktestEngine:
         # 总收益率
         total_return = (final_equity - self.initial_capital) / self.initial_capital
 
-        # 年化收益率（按 252 个交易日折算）
+        # 年化收益率（按 TRADING_DAYS=252 个交易日折算）
         trading_days = len(df)
         if trading_days > 0 and total_return > -1:
-            annual_return = (1 + total_return) ** (252 / trading_days) - 1
+            annual_return = (1 + total_return) ** (TRADING_DAYS / trading_days) - 1
         else:
             annual_return = 0.0
 
@@ -266,7 +269,7 @@ class BacktestEngine:
         return max_dd
 
     @staticmethod
-    def _calc_sharpe(equity_curve: list[float], risk_free: float = 0.025) -> float:
+    def _calc_sharpe(equity_curve: list[float], risk_free: float = RISK_FREE_RATE) -> float:
         """
         计算年化夏普比率。
 
@@ -297,8 +300,8 @@ class BacktestEngine:
             return 0.0
         avg_return = np.mean(returns)
         std_return = np.std(returns, ddof=1)  # 样本标准差
-        # 年化: (日均超额收益 / 日波动) × sqrt(252)
-        return (avg_return - risk_free / 252) / std_return * np.sqrt(252)
+        # 年化: (日均超额收益 / 日波动) × sqrt(TRADING_DAYS)
+        return (avg_return - risk_free / TRADING_DAYS) / std_return * np.sqrt(TRADING_DAYS)
 
     @staticmethod
     def _calc_win_rate(trades: list[dict]) -> float:
