@@ -72,9 +72,8 @@ class MainPage(ft.Container):
             on_submit=self._on_start,
         )
         self._period_dd = ft.Dropdown(
-            label="回测周期", width=140, value="3m",
+            label="回测周期", width=140, value="1y",
             options=[
-                ft.dropdown.Option("3m", "3 个月"),
                 ft.dropdown.Option("6m", "6 个月"),
                 ft.dropdown.Option("1y", "1 年"),
                 ft.dropdown.Option("3y", "3 年"),
