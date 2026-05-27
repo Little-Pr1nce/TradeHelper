@@ -89,39 +89,66 @@ def _fetch_news_us(code: str, limit: int = 15) -> list[NewsItem]:
 
     数据来源：Yahoo Finance 聚合新闻
     接口：yfinance.Ticker.news
-    返回字段：pubDate (Unix 时间戳), title, provider.displayName
 
-    注意：
-      - yfinance .news 返回的是列表嵌套字典结构，需逐层提取。
-      - pubDate 为 Unix 时间戳（秒），需转换为日期字符串。
-      - 部分新闻可能缺少日期，回退到当天日期。
+    反爬策略：
+      - 请求前先等待 2~5 秒随机延迟，模拟人工操作
+      - 遇到限流（429 / Rate limited）时指数退避重试最多 3 次
+      - 重试间隔：5s → 10s → 20s
     """
-    try:
-        _apply_proxy()
-        import yfinance as yf
-        ticker = yf.Ticker(code)
-        raw_news = ticker.news
-        if not raw_news:
-            logger.warning(f"No news found for US stock {code}")
-            return []
+    import time as _time
+    import random as _random
 
-        news_list = []
-        for item in raw_news[:limit]:
-            content = item.get("content", {})
-            pub_date = content.get("pubDate", 0)
-            # pubDate 可能是 Unix 时间戳（int）或字符串
-            if isinstance(pub_date, (int, float)):
-                date_str = datetime.fromtimestamp(pub_date).strftime("%Y-%m-%d")
-            else:
-                date_str = str(pub_date)[:10] if pub_date else date.today().isoformat()
-            news_list.append(NewsItem(
-                code=code,
-                date=date_str,
-                title=content.get("title", ""),
-                source=content.get("provider", {}).get("displayName", ""),
-            ))
-        logger.info(f"Fetched {len(news_list)} news for US stock {code}")
-        return news_list
-    except Exception as e:
-        logger.error(f"Failed to fetch news for US stock {code}: {e}")
-        return []
+    # 随机延迟 2~5 秒，降低被限流概率
+    delay = _random.uniform(2.0, 5.0)
+    logger.info(f"等待 {delay:.1f}s 后获取美股新闻（防限流）...")
+    _time.sleep(delay)
+
+    last_error = None
+    for attempt in range(3):
+        try:
+            _apply_proxy()
+            import yfinance as yf
+            ticker = yf.Ticker(code)
+            raw_news = ticker.news
+            if not raw_news:
+                logger.warning(f"No news found for US stock {code}")
+                return []
+
+            news_list = []
+            for item in raw_news[:limit]:
+                content = item.get("content", {})
+                pub_date = content.get("pubDate", 0)
+                if isinstance(pub_date, (int, float)):
+                    date_str = datetime.fromtimestamp(pub_date).strftime("%Y-%m-%d")
+                else:
+                    date_str = str(pub_date)[:10] if pub_date else date.today().isoformat()
+                news_list.append(NewsItem(
+                    code=code,
+                    date=date_str,
+                    title=content.get("title", ""),
+                    source=content.get("provider", {}).get("displayName", ""),
+                ))
+            logger.info(f"Fetched {len(news_list)} news for US stock {code}")
+            return news_list
+
+        except Exception as e:
+            last_error = e
+            msg = str(e)
+            is_rate_limited = any(kw in msg for kw in [
+                "Rate limited", "Too Many Requests", "rate limited", "429",
+            ])
+            if is_rate_limited and attempt < 2:
+                wait = 5 * (2 ** attempt) + _random.uniform(0, 2)
+                logger.warning(
+                    f"美股新闻被限流，{wait:.0f}s 后重试 ({attempt+2}/3)..."
+                )
+                _time.sleep(wait)
+                continue
+            # 非限流错误或最后一次重试，不等待直接跳出
+            if attempt < 2 and not is_rate_limited:
+                _time.sleep(2)
+                continue
+            break
+
+    logger.warning(f"Failed to fetch news for US stock {code} after retries: {last_error}")
+    return []

@@ -25,25 +25,6 @@ from ui.components import StarRating
 logger = logging.getLogger(__name__)
 
 
-_BTN_START_STYLE = ft.ButtonStyle(
-    bgcolor={"": ft.Colors.BLUE_700, "disabled": ft.Colors.GREY_400},
-    color={"": ft.Colors.WHITE, "disabled": ft.Colors.WHITE},
-    elevation={"": 2, "hovered": 4},
-    animation_duration=200,
-    padding={"": ft.Padding(left=24, top=14, right=24, bottom=14)},
-    shape=ft.RoundedRectangleBorder(radius=8),
-)
-
-_BTN_STOP_STYLE = ft.ButtonStyle(
-    bgcolor={"": ft.Colors.RED_400, "disabled": ft.Colors.GREY_400},
-    color={"": ft.Colors.WHITE, "disabled": ft.Colors.WHITE},
-    elevation={"": 2, "hovered": 4},
-    animation_duration=200,
-    padding={"": ft.Padding(left=24, top=14, right=24, bottom=14)},
-    shape=ft.RoundedRectangleBorder(radius=8),
-)
-
-
 class MainPage(ft.Container):
 
     def __init__(self):
@@ -55,58 +36,153 @@ class MainPage(ft.Container):
         self._stock_info = None
         self._backtest_results = None
 
+    # ======================== 按钮样式 ========================
+
+    _PANEL_STYLE = {
+        "bgcolor": ft.Colors.WHITE,
+        "border_radius": 12,
+        "padding": ft.Padding(28, 24, 28, 24),
+        "shadow": ft.BoxShadow(
+            spread_radius=0, blur_radius=12,
+            color=ft.Colors.with_opacity(0.08, ft.Colors.BLACK),
+            offset=ft.Offset(0, 2),
+        ),
+    }
+
+    _SECTION_TITLE_STYLE = {
+        "size": 13,
+        "color": ft.Colors.GREY_600,
+        "weight": ft.FontWeight.W_500,
+    }
+
     # ======================== 构建 UI ========================
 
     def build(self):
+        # ── 市场选择 ──
         self._market_dd = ft.Dropdown(
-            label="市场", width=100, value="US",
+            label="市场", width=110, value="US",
             options=[
                 ft.dropdown.Option("US", "美股"),
                 ft.dropdown.Option("A", "A 股"),
             ],
+            border_radius=8,
         )
+
+        # ── 股票代码（核心输入，最宽） ──
         self._code_input = ft.TextField(
-            label="股票代码",
-            hint_text="输入代码或公司名称（如 600519、茅台、AAPL、英伟达）",
-            width=280,
+            label="股票代码或名称",
+            hint_text="如 600519、茅台、AAPL、英伟达",
+            width=340,
+            border_radius=8,
             on_submit=self._on_start,
+            prefix_icon=ft.Icons.SEARCH,
         )
+
+        # ── 回测周期 ──
         self._period_dd = ft.Dropdown(
-            label="回测周期", width=140, value="1y",
+            label="回测周期", width=130, value="1y",
             options=[
                 ft.dropdown.Option("6m", "6 个月"),
                 ft.dropdown.Option("1y", "1 年"),
                 ft.dropdown.Option("3y", "3 年"),
             ],
+            border_radius=8,
         )
+
+        # ── 数据源 ──
         self._source_dd = ft.Dropdown(
-            label="数据源", width=120, value="free",
+            label="数据源", width=130, value="free",
             options=[
                 ft.dropdown.Option("free", "免费数据"),
                 ft.dropdown.Option("custom", "付费数据"),
             ],
+            border_radius=8,
         )
-        self._start_btn = ft.Button(
-            content=ft.Text("开始分析", color=ft.Colors.WHITE),
-            icon=ft.Icons.PLAY_ARROW, icon_color=ft.Colors.WHITE,
-            style=_BTN_START_STYLE, on_click=self._on_start,
+
+        # ── 按钮 ──
+        self._start_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=8, controls=[
+                ft.Icon(ft.Icons.PLAY_ARROW, size=18, color=ft.Colors.WHITE),
+                ft.Text("开始分析", size=15, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
+            ]),
+            style=ft.ButtonStyle(
+                bgcolor={"": ft.Colors.BLUE_700, "hovered": ft.Colors.BLUE_900, "disabled": ft.Colors.GREY_400},
+                color={"": ft.Colors.WHITE, "hovered": ft.Colors.WHITE, "disabled": ft.Colors.WHITE},
+                elevation={"": 3, "hovered": 6, "disabled": 0},
+                animation_duration=200,
+                shape=ft.RoundedRectangleBorder(radius=10),
+                padding=ft.Padding(28, 16, 28, 16),
+            ),
+            on_click=self._on_start,
         )
-        self._stop_btn = ft.Button(
-            content=ft.Text("停止", color=ft.Colors.WHITE),
-            icon=ft.Icons.STOP, icon_color=ft.Colors.WHITE,
-            style=_BTN_STOP_STYLE, disabled=True, on_click=self._on_stop,
+        self._stop_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=8, controls=[
+                ft.Icon(ft.Icons.STOP, size=18, color=ft.Colors.WHITE),
+                ft.Text("停止分析", size=15, color=ft.Colors.WHITE, weight=ft.FontWeight.W_600),
+            ]),
+            style=ft.ButtonStyle(
+                bgcolor={"": ft.Colors.RED_500, "hovered": ft.Colors.RED_700, "disabled": ft.Colors.GREY_400},
+                color={"": ft.Colors.WHITE, "hovered": ft.Colors.WHITE, "disabled": ft.Colors.WHITE},
+                elevation={"": 3, "hovered": 6, "disabled": 0},
+                animation_duration=200,
+                shape=ft.RoundedRectangleBorder(radius=10),
+                padding=ft.Padding(28, 16, 28, 16),
+            ),
+            disabled=True,
+            on_click=self._on_stop,
         )
+
+        # ── 进度 ──
         self._progress_row = ft.Row(
             visible=False, alignment=ft.MainAxisAlignment.CENTER, spacing=12,
             controls=[
-                ft.ProgressRing(width=20, height=20, stroke_width=3, color=ft.Colors.BLUE_700),
-                ft.Text("", size=14, color=ft.Colors.BLUE_700),
+                ft.ProgressRing(width=18, height=18, stroke_width=3, color=ft.Colors.BLUE_700),
+                ft.Text("", size=13, color=ft.Colors.BLUE_700),
             ],
         )
         self._progress_text = self._progress_row.controls[1]
-        self._error_text = ft.Text("", color=ft.Colors.RED, size=14)
-        self._export_btn = ft.Button(
-            content=ft.Text("导出 PDF"), icon=ft.Icons.PICTURE_AS_PDF,
+        self._error_text = ft.Text("", color=ft.Colors.RED, size=13)
+
+        # ── 控制面板（白色卡片） ──
+        control_panel = ft.Container(
+            **self._PANEL_STYLE,
+            content=ft.Column(spacing=16, controls=[
+                # 标题行
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    controls=[
+                        ft.Text("分析设置", size=18, weight=ft.FontWeight.BOLD),
+                        ft.Row(spacing=8, controls=[self._start_btn, self._stop_btn]),
+                    ],
+                ),
+                ft.Divider(height=1, color=ft.Colors.GREY_200),
+
+                # 第一行：市场 + 数据源 + 周期（dropdown 自带 label，无需外层标题）
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    spacing=16,
+                    controls=[
+                        self._market_dd,
+                        self._source_dd,
+                        self._period_dd,
+                    ],
+                ),
+
+                # 第二行：搜索框（独占全宽）
+                self._code_input,
+            ]),
+        )
+
+        # ── 报告区控件（必须在 report_container 之前创建） ──
+        self._export_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=6, controls=[
+                ft.Icon(ft.Icons.PICTURE_AS_PDF, size=16),
+                ft.Text("导出 PDF"),
+            ]),
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding(16, 10, 16, 10),
+            ),
             on_click=self._on_export_pdf, visible=False,
         )
         self._star_rating = StarRating(
@@ -118,10 +194,13 @@ class MainPage(ft.Container):
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
             code_theme="monokai-sublime", visible=False,
         )
-        self._chart_image = ft.Image(src="", visible=False, fit="contain", width=700)
 
+        # ── K 线图 + 报告容器 ──
+        self._chart_image = ft.Image(src="", visible=False, fit="contain", width=700)
         chart_container = ft.Container(
             visible=False,
+            margin=ft.Margin(0, 16, 0, 0),
+            **self._PANEL_STYLE,
             content=ft.Column([
                 ft.Text("K 线图", size=16, weight=ft.FontWeight.BOLD),
                 self._chart_image,
@@ -129,17 +208,20 @@ class MainPage(ft.Container):
         )
         report_container = ft.Container(
             visible=False,
+            margin=ft.Margin(0, 16, 0, 0),
+            **self._PANEL_STYLE,
             content=ft.Column([
-                ft.Divider(),
                 ft.Text("分析报告", size=16, weight=ft.FontWeight.BOLD),
+                ft.Divider(height=1, color=ft.Colors.GREY_200),
                 self._report_view,
-                ft.Divider(),
+                ft.Divider(height=1, color=ft.Colors.GREY_200),
                 ft.Row(
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     controls=[
-                        ft.Row(spacing=16, controls=[
-                            self._export_btn, self._star_rating,
-                            ft.Text("报告评分", size=13, color=ft.Colors.GREY_600),
+                        self._export_btn,
+                        ft.Row(spacing=8, controls=[
+                            self._star_rating,
+                            ft.Text("评分", size=13, color=ft.Colors.GREY_600),
                         ]),
                     ],
                 ),
@@ -148,27 +230,16 @@ class MainPage(ft.Container):
         self._chart_container = chart_container
         self._report_container = report_container
 
+        # ── 整体布局 ──
         self.content = ft.Column(
             scroll=ft.ScrollMode.AUTO, expand=True,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=0,
             controls=[
-                ft.Container(
-                    margin=ft.Margin(top=20, right=0, bottom=0, left=0),
-                    content=ft.ResponsiveRow(
-                        alignment=ft.MainAxisAlignment.CENTER, spacing=16,
-                        controls=[
-                            ft.Column(col={"sm": 6, "md": 2}, controls=[self._market_dd]),
-                            ft.Column(col={"sm": 6, "md": 3}, controls=[self._code_input]),
-                            ft.Column(col={"sm": 6, "md": 2}, controls=[self._period_dd]),
-                            ft.Column(col={"sm": 6, "md": 2}, controls=[self._source_dd]),
-                            ft.Column(col={"sm": 12, "md": 3}, controls=[
-                                ft.Row(spacing=8, controls=[self._start_btn, self._stop_btn]),
-                            ]),
-                        ],
-                    ),
-                ),
-                self._progress_row, self._error_text,
-                chart_container, report_container,
+                control_panel,
+                self._progress_row,
+                self._error_text,
+                chart_container,
+                report_container,
             ],
         )
         return self.content
