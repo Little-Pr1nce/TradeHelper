@@ -37,7 +37,7 @@ from data.database import Database
 from ui.main_page import MainPage
 from ui.history_page import HistoryPage
 from ui.settings_ui import SettingsPage
-from utils.helpers import setup_logging
+from utils.logging import setup_logging
 
 
 def main(page: ft.Page):

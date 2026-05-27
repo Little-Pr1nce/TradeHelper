@@ -74,7 +74,7 @@ def generate_kline_chart(
         import matplotlib.pyplot as plt
 
         # 设置中文字体（在 import mplfinance 之前）
-        from utils.helpers import get_chinese_font_path
+        from utils.fonts import get_chinese_font_path
         font_path = get_chinese_font_path()
         font_name = "sans-serif"
         if font_path:
@@ -204,7 +204,7 @@ def _prune_charts(chart_dir: str, code: str) -> None:
       1. 同一 code 下保留最近 MAX_CHARTS_PER_CODE 份，淘汰更早的；
       2. 整个目录如果仍超过 MAX_CHARTS_TOTAL，再按修改时间淘汰最早的。
     """
-    from analysis.constants import MAX_CHARTS_PER_CODE, MAX_CHARTS_TOTAL
+    from indicators.constants import MAX_CHARTS_PER_CODE, MAX_CHARTS_TOTAL
     if not os.path.isdir(chart_dir):
         return
 

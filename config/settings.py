@@ -30,6 +30,7 @@ DEFAULT_CONFIG = {
     "data_source": "free",
     "custom_api_endpoint": "",
     "custom_api_key": "",
+    "paid_api_token": "",        # 付费数据源 token（如 itick）
     "proxy": "",
 }
 

@@ -62,7 +62,7 @@ def _register_chinese_font() -> str:
     if _chinese_font_registered:
         return "ChineseFont"
 
-    from utils.helpers import get_chinese_font_path
+    from utils.fonts import get_chinese_font_path
     font_path = get_chinese_font_path()
     if font_path:
         try:

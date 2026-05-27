@@ -108,6 +108,13 @@ class SettingsPage(ft.Container):
             can_reveal_password=True,
             visible=custom_visible,
         )
+        self._paid_api_token = ft.TextField(
+            label="付费数据源 Token（如 itick）",
+            value=settings.get("paid_api_token", ""),
+            password=True,
+            can_reveal_password=True,
+            hint_text="输入付费数据源的 API Token",
+        )
 
         # ========== 代理配置 ==========
         self._proxy_input = ft.TextField(
@@ -159,6 +166,10 @@ class SettingsPage(ft.Container):
                 self._data_source_dd,
                 self._custom_api_endpoint,
                 self._custom_api_key,
+                self._paid_api_token,
+                ft.Text("付费数据源 token 用于 itick 等专业金融数据 API。\n"
+                        "选择「免费数据源」时无需填写。",
+                        size=12, color=ft.Colors.GREY_600),
 
                 ft.Divider(),
 
@@ -211,6 +222,7 @@ class SettingsPage(ft.Container):
         settings.set("data_source", self._data_source_dd.value)
         settings.set("custom_api_endpoint", self._custom_api_endpoint.value)
         settings.set("custom_api_key", self._custom_api_key.value)
+        settings.set("paid_api_token", self._paid_api_token.value)
         settings.set("proxy", self._proxy_input.value)
         settings.save()
 

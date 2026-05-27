@@ -195,15 +195,6 @@ class Database:
             self.conn.executemany(sql, seq_of_params)
             self.conn.commit()
 
-    def commit(self):
-        """提交事务（保留以兼容外部调用，但内部写均已自动提交）。"""
-        self.conn.commit()
-
-    def close(self):
-        """关闭数据库连接。"""
-        if self._conn:
-            self._conn.close()
-            self._conn = None
 
     # ======================== 股票信息 ========================
 
@@ -220,20 +211,6 @@ class Database:
                                   stock.industry, stock.description,
                                   stock.update_time))
 
-    def get_stock(self, code: str) -> Optional[StockInfo]:
-        """
-        按代码查询股票信息。
-
-        Args:
-            code: 股票代码
-
-        Returns:
-            StockInfo 实例，不存在则返回 None
-        """
-        row = self.execute("SELECT * FROM stocks WHERE code = ?", (code,)).fetchone()
-        if row:
-            return StockInfo.from_dict(dict(row))
-        return None
 
     # ======================== 股价历史 ========================
 
@@ -276,40 +253,6 @@ class Database:
         rows = self.execute(sql, params).fetchall()
         return [PriceData.from_dict(dict(r)) for r in rows]
 
-    def get_latest_price_date(self, code: str) -> str:
-        """
-        获取某股票在数据库中的最新数据日期。
-
-        用于判断是否需要从 API 增量拉取新数据。
-
-        Args:
-            code: 股票代码
-
-        Returns:
-            最新日期字符串，无数据则返回空字符串
-        """
-        row = self.execute(
-            "SELECT MAX(date) FROM price_history WHERE code = ?", (code,)
-        ).fetchone()
-        return row[0] or ""
-
-    def get_recent_prices(self, code: str, days: int = 30) -> list[PriceData]:
-        """
-        获取最近 N 天的股价数据（按时间升序返回）。
-
-        Args:
-            code: 股票代码
-            days: 天数
-
-        Returns:
-            PriceData 列表（升序）
-        """
-        sql = """SELECT * FROM price_history WHERE code = ?
-                 ORDER BY date DESC LIMIT ?"""
-        rows = self.execute(sql, (code, days)).fetchall()
-        prices = [PriceData.from_dict(dict(r)) for r in rows]
-        prices.reverse()  # 降序 → 升序
-        return prices
 
     # ======================== 分析报告 ========================
 
@@ -335,20 +278,6 @@ class Database:
         ))
         return cursor.lastrowid
 
-    def get_report(self, report_id: int) -> Optional[AnalysisReport]:
-        """
-        按 ID 获取单条报告。
-
-        Args:
-            report_id: 报告 ID
-
-        Returns:
-            AnalysisReport 实例或 None
-        """
-        row = self.execute("SELECT * FROM reports WHERE id = ?", (report_id,)).fetchone()
-        if row:
-            return AnalysisReport.from_dict(dict(row))
-        return None
 
     def get_all_reports(self, limit: int = 50) -> list[AnalysisReport]:
         """
@@ -411,18 +340,6 @@ class Database:
             (pdf_path, report_id)
         )
 
-    def update_report_chart(self, report_id: int, chart_path: str):
-        """
-        更新报告的 K 线图路径（生成 K 线后调用）。
-
-        Args:
-            report_id: 报告 ID
-            chart_path: PNG 文件的绝对路径
-        """
-        self._execute_write(
-            "UPDATE reports SET chart_path = ? WHERE id = ?",
-            (chart_path, report_id)
-        )
 
     def delete_report(self, report_id: int):
         """

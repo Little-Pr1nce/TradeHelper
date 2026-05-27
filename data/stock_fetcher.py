@@ -153,7 +153,7 @@ def _xq_symbol(code: str) -> str:
 
 
 def _normalize_kline_df(df: pd.DataFrame) -> pd.DataFrame:
-    """将各源 K 线统一为 date/open/high/low/close/volume 列。"""
+    """将各源 K 线统一为 date/open/high/low/close/volume 列，并处理缺失值。"""
     col_map = {
         "日期": "date", "开盘": "open", "最高": "high",
         "最低": "low", "收盘": "close", "成交量": "volume",
@@ -164,7 +164,9 @@ def _normalize_kline_df(df: pd.DataFrame) -> pd.DataFrame:
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
     for c in ("open", "high", "low", "close", "volume"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df[["date", "open", "high", "low", "close", "volume"]].dropna(subset=["close"])
+    # 关键字段任一为 NaN 则丢弃该行（确保技术指标和回测计算不出错）
+    required_cols = ["date", "open", "high", "low", "close"]
+    return df[required_cols + ["volume"]].dropna(subset=required_cols)
 
 
 def _stock_info_from_xq(df: pd.DataFrame, code: str, market: str) -> StockInfo:
@@ -200,7 +202,7 @@ class FreeStockFetcher(BaseStockFetcher):
     """免费数据源：A 股新浪/雪球/东财多源降级；美股 akshare + yfinance。"""
 
     def fetch_stock_info(self, code: str) -> Optional[StockInfo]:
-        from utils.helpers import detect_market
+        from utils.market import detect_market
         market = detect_market(code)
         try:
             if market == "A":
@@ -283,7 +285,7 @@ class FreeStockFetcher(BaseStockFetcher):
         return None
 
     def fetch_price_history(self, code: str, start_date: str, end_date: str) -> list[PriceData]:
-        from utils.helpers import detect_market
+        from utils.market import detect_market
         market = detect_market(code)
         df = None
         try:
@@ -414,13 +416,189 @@ class CustomStockFetcher(BaseStockFetcher):
         return []
 
 
-def get_stock_fetcher() -> BaseStockFetcher:
-    """根据配置返回数据源实例。"""
+class ItickStockFetcher(BaseStockFetcher):
+    """
+    itick 付费数据源。
+
+    API 文档: https://docs.itick.org
+
+    接口:
+      - GET /stock/info    → 股票基本信息
+      - GET /stock/kline   → 历史 K 线（日线 kType=8）
+    """
+
+    BASE_URL = "https://api0.itick.org"
+
+    # A 股代码前缀 → itick region 映射
+    _A_SHARE_PREFIX = {
+        "6": "SH",   # 600xxx/601xxx/603xxx/605xxx → 上海
+        "0": "SZ",   # 000xxx/001xxx/002xxx → 深圳
+        "3": "SZ",   # 300xxx → 深圳创业板
+    }
+
+    def __init__(self, token: str):
+        self.token = token
+        self._session = None
+
+    def _get_session(self):
+        """延迟创建 requests Session（避免 import 时加载）。"""
+        if self._session is None:
+            import requests
+            self._session = requests.Session()
+            self._session.trust_env = False  # 不走系统代理，itick 直连
+            self._session.headers.update({
+                "accept": "application/json",
+                "token": self.token,
+            })
+        return self._session
+
+    @staticmethod
+    def _a_stock_region(code: str) -> str:
+        """A 股代码 → itick region（SH/SZ）。"""
+        if code.isdigit() and len(code) == 6:
+            prefix = code[0]
+            return ItickStockFetcher._A_SHARE_PREFIX.get(prefix, "SH")
+        return "SH"
+
+    def _get(self, path: str, params: dict, max_retries: int = 3) -> dict:
+        """带重试的 GET 请求。"""
+        import time as _time
+        session = self._get_session()
+        url = f"{self.BASE_URL}{path}"
+        delay = 1
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                resp = session.get(url, params=params, timeout=30)
+                # 非 200 时打印完整响应体帮助诊断
+                if not resp.ok:
+                    body = resp.text[:500]
+                    logger.error(f"itick HTTP {resp.status_code}: {body}")
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("code") != 0:
+                    raise RuntimeError(f"itick API 错误: code={data.get('code')}, msg={data.get('msg')}")
+                return data
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    logger.warning(f"itick 请求重试 {attempt+1}/{max_retries} in {delay}s: {e}")
+                    _time.sleep(delay)
+                    delay = min(delay * 2, 10)
+        raise last_error  # type: ignore
+
+    # ── fetch_stock_info ──
+
+    def fetch_stock_info(self, code: str) -> Optional[StockInfo]:
+        """通过 itick /stock/info 获取股票基本信息。"""
+        from utils.market import detect_market
+        market = detect_market(code)
+        region = self._a_stock_region(code) if market == "A" else "US"
+
+        try:
+            data = self._get("/stock/info", {"type": "stock", "region": region, "code": code})
+            d = data.get("data", {})
+            if not d:
+                return None
+
+            name = str(d.get("n", code))
+            industry = str(d.get("i", "") or d.get("s", ""))
+            description = str(d.get("bd", ""))[:2000]
+
+            logger.info(f"itick 股票信息: {name} ({industry})")
+            return StockInfo(
+                code=code,
+                name=name,
+                market=market,
+                industry=industry,
+                description=description,
+                update_time=datetime.now().isoformat(),
+            )
+        except Exception as e:
+            logger.error(f"itick fetch_stock_info 失败 ({code}): {e}")
+            return None
+
+    # ── fetch_price_history ──
+
+    def fetch_price_history(self, code: str, start_date: str, end_date: str) -> list[PriceData]:
+        """通过 itick /stock/kline 获取日 K 线数据。"""
+        from utils.market import detect_market
+        market = detect_market(code)
+        region = self._a_stock_region(code) if market == "A" else "US"
+
+        # 估算需要的 K 线条数：日期跨度 + 20% 余量
+        try:
+            from datetime import datetime as _dt
+            d_start = _dt.strptime(start_date, "%Y-%m-%d")
+            d_end = _dt.strptime(end_date, "%Y-%m-%d")
+            days = max((d_end - d_start).days, 1)
+            limit = min(int(days * 1.4), 2000)  # 最多 2000 条
+        except Exception:
+            limit = 1000
+
+        try:
+            data = self._get("/stock/kline", {
+                "region": region, "code": code,
+                "kType": 8,        # 日 K 线
+                "limit": limit,
+            })
+            bars = data.get("data", [])
+            if not bars:
+                logger.warning(f"itick K 线为空 ({code})")
+                return []
+
+            prices = []
+            for bar in bars:
+                # 时间戳（毫秒） → 日期字符串
+                ts = bar.get("t", 0)
+                date_str = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+
+                # 按日期范围过滤
+                if date_str < start_date or date_str > end_date:
+                    continue
+
+                try:
+                    prices.append(PriceData(
+                        code=code,
+                        date=date_str,
+                        open=float(bar["o"]),
+                        high=float(bar["h"]),
+                        low=float(bar["l"]),
+                        close=float(bar["c"]),
+                        volume=float(bar["v"]),
+                    ))
+                except (KeyError, ValueError, TypeError):
+                    continue
+
+            logger.info(f"itick K 线: {len(prices)} 条 ({start_date}~{end_date})")
+            return prices
+        except Exception as e:
+            logger.error(f"itick fetch_price_history 失败 ({code}): {e}")
+            return []
+
+
+def get_stock_fetcher(data_source: str = "free") -> BaseStockFetcher:
+    """
+    根据配置返回数据源实例。
+
+    Args:
+        data_source: "free"（免费 akshare+yfinance）/ "custom"（付费 itick 等）
+
+    Returns:
+        BaseStockFetcher 实例
+    """
     from config.settings import Settings
     settings = Settings()
-    if settings.get("data_source", "free") == "custom":
-        return CustomStockFetcher(
-            api_endpoint=settings.get("custom_api_endpoint", ""),
-            api_key=settings.get("custom_api_key", ""),
-        )
+    if data_source == "custom":
+        token = settings.get("paid_api_token", "")
+        if token:
+            logger.info("使用付费数据源: itick")
+            return ItickStockFetcher(token)
+        # 有 custom_api_endpoint 的旧逻辑兼容
+        if settings.get("custom_api_endpoint", ""):
+            return CustomStockFetcher(
+                api_endpoint=settings.get("custom_api_endpoint", ""),
+                api_key=settings.get("custom_api_key", ""),
+            )
+        logger.warning("付费数据源已选择但未配置 token，降级为免费数据源")
     return FreeStockFetcher()

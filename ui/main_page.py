@@ -1,12 +1,12 @@
 """
-主分析页面 — 股票分析的核心交互页面。
+主分析页面 — 股票分析的核心交互页面（纯 UI 层）。
 
-功能：
-  1. 选择市场（A 股 / 美股）
-  2. 输入股票代码或名称，自动搜索匹配
-  3. 选择回测周期和交易策略
-  4. 开始 / 停止分析（按钮互斥 + 置灰）
-  5. 展示 K 线图 + Markdown 报告 + 导出 PDF + 评分
+所有业务逻辑已剥离到 services/analysis_service.py，
+本模块仅负责：
+  1. 渲染控件
+  2. 响应用户交互
+  3. 启动后台分析线程
+  4. 展示结果
 """
 
 import logging
@@ -17,23 +17,13 @@ import flet as ft
 
 from config.settings import Settings
 from data.database import Database
-from data.stock_fetcher import get_stock_fetcher
-from data.news_fetcher import fetch_news
-from data.models import StockInfo, AnalysisReport
-from analysis.technical import calc_all_indicators, summarize
-from analysis.sentiment import analyze, aggregate
-from analysis.strategy import get_strategy, PrecomputedSignalsStrategy
-from analysis.backtest import BacktestEngine
-from report.chart import generate_kline_chart
-from report.generator import generate_report
+from data.models import StockInfo
+from services.analysis_service import AnalysisService, AnalysisRequest, AnalysisResponse
 from report.pdf_exporter import export_report_to_pdf
 from ui.components import StarRating
-from utils.helpers import get_backtest_dates
 
 logger = logging.getLogger(__name__)
 
-
-# ======================== 按钮样式 ========================
 
 _BTN_START_STYLE = ft.ButtonStyle(
     bgcolor={"": ft.Colors.BLUE_700, "disabled": ft.Colors.GREY_400},
@@ -58,16 +48,16 @@ class MainPage(ft.Container):
 
     def __init__(self):
         super().__init__()
-        self._analysis_result = None
+        self._service = AnalysisService()
         self._current_report_id = None
         self._chart_path = None
         self._report_content = ""
-        self._stop_flag = False
+        self._stock_info = None
+        self._backtest_results = None
 
     # ======================== 构建 UI ========================
 
     def build(self):
-        # --- 市场 ---
         self._market_dd = ft.Dropdown(
             label="市场", width=100, value="US",
             options=[
@@ -75,16 +65,12 @@ class MainPage(ft.Container):
                 ft.dropdown.Option("A", "A 股"),
             ],
         )
-
-        # --- 代码/名称 ---
         self._code_input = ft.TextField(
             label="股票代码",
-            hint_text="代码或名称（如 600519、茅台、AAPL、英伟达）",
-            width=250,
-            on_submit=self._start_analysis,
+            hint_text="输入代码或公司名称（如 600519、茅台、AAPL、英伟达）",
+            width=280,
+            on_submit=self._on_start,
         )
-
-        # --- 回测周期 ---
         self._period_dd = ft.Dropdown(
             label="回测周期", width=140, value="3m",
             options=[
@@ -94,76 +80,47 @@ class MainPage(ft.Container):
                 ft.dropdown.Option("3y", "3 年"),
             ],
         )
-
-        # --- 策略 ---
-        self._strategy_dd = ft.Dropdown(
-            label="交易策略", width=200, value="ma_crossover",
+        self._source_dd = ft.Dropdown(
+            label="数据源", width=120, value="free",
             options=[
-                ft.dropdown.Option("ma_crossover", "双均线交叉"),
-                ft.dropdown.Option("macd", "MACD 金叉死叉"),
-                ft.dropdown.Option("rsi", "RSI 超买超卖"),
-                ft.dropdown.Option("bollinger", "布林带均值回归"),
-                ft.dropdown.Option("buy_and_hold", "买入持有（基准）"),
-                ft.dropdown.Option("triple_ma", "三均线排列"),
+                ft.dropdown.Option("free", "免费数据"),
+                ft.dropdown.Option("custom", "付费数据"),
             ],
         )
-
-        # --- 开始 / 停止 ---
         self._start_btn = ft.Button(
             content=ft.Text("开始分析", color=ft.Colors.WHITE),
-            icon=ft.Icons.PLAY_ARROW,
-            icon_color=ft.Colors.WHITE,
-            style=_BTN_START_STYLE,
-            on_click=self._start_analysis,
+            icon=ft.Icons.PLAY_ARROW, icon_color=ft.Colors.WHITE,
+            style=_BTN_START_STYLE, on_click=self._on_start,
         )
         self._stop_btn = ft.Button(
             content=ft.Text("停止", color=ft.Colors.WHITE),
-            icon=ft.Icons.STOP,
-            icon_color=ft.Colors.WHITE,
-            style=_BTN_STOP_STYLE,
-            disabled=True,
-            on_click=self._stop_analysis,
+            icon=ft.Icons.STOP, icon_color=ft.Colors.WHITE,
+            style=_BTN_STOP_STYLE, disabled=True, on_click=self._on_stop,
         )
-
-        # --- 进度 ---
         self._progress_row = ft.Row(
-            visible=False,
-            alignment=ft.MainAxisAlignment.CENTER,
-            spacing=12,
+            visible=False, alignment=ft.MainAxisAlignment.CENTER, spacing=12,
             controls=[
                 ft.ProgressRing(width=20, height=20, stroke_width=3, color=ft.Colors.BLUE_700),
                 ft.Text("", size=14, color=ft.Colors.BLUE_700),
             ],
         )
         self._progress_text = self._progress_row.controls[1]
-
-        # --- 错误 ---
         self._error_text = ft.Text("", color=ft.Colors.RED, size=14)
-
-        # --- 导出 & 评分 ---
         self._export_btn = ft.Button(
-            content=ft.Text("导出 PDF"),
-            icon=ft.Icons.PICTURE_AS_PDF,
-            on_click=self._export_pdf, visible=False,
+            content=ft.Text("导出 PDF"), icon=ft.Icons.PICTURE_AS_PDF,
+            on_click=self._on_export_pdf, visible=False,
         )
         self._star_rating = StarRating(
-            max_stars=5, initial_rating=0,
-            on_change=self._on_rating_change,
+            max_stars=5, initial_rating=0, on_change=self._on_rating_change,
         )
         self._star_rating.visible = False
-
-        # --- 报告区 ---
         self._report_view = ft.Markdown(
             value="", selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
-            code_theme="monokai-sublime",
-            visible=False,
+            code_theme="monokai-sublime", visible=False,
         )
-
-        # --- K 线图 ---
         self._chart_image = ft.Image(src="", visible=False, fit="contain", width=700)
 
-        # --- 容器 ---
         chart_container = ft.Container(
             visible=False,
             content=ft.Column([
@@ -182,8 +139,7 @@ class MainPage(ft.Container):
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     controls=[
                         ft.Row(spacing=16, controls=[
-                            self._export_btn,
-                            self._star_rating,
+                            self._export_btn, self._star_rating,
                             ft.Text("报告评分", size=13, color=ft.Colors.GREY_600),
                         ]),
                     ],
@@ -193,90 +149,79 @@ class MainPage(ft.Container):
         self._chart_container = chart_container
         self._report_container = report_container
 
-        # --- 整体布局 ---
         self.content = ft.Column(
-            scroll=ft.ScrollMode.AUTO,
-            expand=True,
+            scroll=ft.ScrollMode.AUTO, expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             controls=[
                 ft.Container(
                     margin=ft.Margin(top=20, right=0, bottom=0, left=0),
                     content=ft.ResponsiveRow(
-                        alignment=ft.MainAxisAlignment.CENTER,
-                        spacing=16,
+                        alignment=ft.MainAxisAlignment.CENTER, spacing=16,
                         controls=[
                             ft.Column(col={"sm": 6, "md": 2}, controls=[self._market_dd]),
                             ft.Column(col={"sm": 6, "md": 3}, controls=[self._code_input]),
                             ft.Column(col={"sm": 6, "md": 2}, controls=[self._period_dd]),
-                            ft.Column(col={"sm": 6, "md": 2}, controls=[self._strategy_dd]),
-                            ft.Column(col={"sm": 12, "md": 2}, controls=[
+                            ft.Column(col={"sm": 6, "md": 2}, controls=[self._source_dd]),
+                            ft.Column(col={"sm": 12, "md": 3}, controls=[
                                 ft.Row(spacing=8, controls=[self._start_btn, self._stop_btn]),
                             ]),
                         ],
                     ),
                 ),
-                self._progress_row,
-                self._error_text,
-                chart_container,
-                report_container,
+                self._progress_row, self._error_text,
+                chart_container, report_container,
             ],
         )
         return self.content
 
-    # ======================== 按钮控制 ========================
+    # ======================== 按钮状态 ========================
 
     def _set_running(self):
         self._start_btn.disabled = True
         self._stop_btn.disabled = False
-        self._start_btn.update()
-        self._stop_btn.update()
+        self._start_btn.update(); self._stop_btn.update()
 
     def _set_idle(self):
         self._start_btn.disabled = False
         self._stop_btn.disabled = True
-        self._start_btn.update()
-        self._stop_btn.update()
+        self._start_btn.update(); self._stop_btn.update()
 
-    # ======================== 分析流程 ========================
+    # ======================== 事件处理 ========================
 
-    def _start_analysis(self, e):
+    def _on_start(self, e):
         raw = self._code_input.value.strip()
         if not raw:
             self._show_error("请输入股票代码或名称")
             return
-
         if not Settings().get("work_dir", ""):
             self._show_error("请先在设置中配置工作目录")
             return
 
         self._show_error("")
-        self._reset_result_state()
+        self._reset_ui()
         self._set_running()
-        self._stop_flag = False
         self._progress_row.visible = True
-        self._progress_text.value = "正在搜索股票..."
+        self._progress_text.value = "正在准备..."
         self._progress_row.update()
         self.page.update()
 
-        market = self._market_dd.value
-        period = self._period_dd.value
-        strategy_name = self._strategy_dd.value
         thread = threading.Thread(
-            target=self._do_search_then_analyze,
-            args=(raw, market, period, strategy_name),
+            target=self._run_analysis,
+            args=(raw, self._market_dd.value, self._period_dd.value, self._source_dd.value),
             daemon=True,
         )
         thread.start()
 
-    def _stop_analysis(self, e):
-        self._stop_flag = True
+    def _on_stop(self, e):
+        self._service.cancel()
         self._show_error("正在停止...")
 
-    def _reset_result_state(self):
-        self._analysis_result = None
+    def _reset_ui(self):
         self._current_report_id = None
         self._chart_path = None
         self._report_content = ""
+        self._stock_info = None
+        self._backtest_results = None
         self._report_view.value = ""
         self._report_view.visible = False
         self._chart_container.visible = False
@@ -291,279 +236,63 @@ class MainPage(ft.Container):
         self._error_text.value = msg
         self._error_text.update()
 
-    # ======================== 搜索 → 分析  ========================
+    # ======================== 后台分析线程 ========================
 
-    def _do_search_then_analyze(self, raw: str, market: str, period: str, strategy_name: str):
-        """后台线程：搜索股票代码 → 调用分析流程。"""
-        code = raw.strip().upper()
+    def _run_analysis(self, raw: str, market: str, period: str, data_source: str):
+        """后台线程：调用 Service 执行分析。"""
+        request = AnalysisRequest(raw_input=raw, market=market, period=period,
+                                  data_source=data_source)
+        self._service = AnalysisService()  # 新实例，重置取消状态
 
-        if market == "A":
-            if not (code.isascii() and code.isdigit() and len(code) == 6):
-                from utils.helpers import _search_a_stock_fallback, _search_a_stock
-                self._update_progress("正在搜索 A 股...")
-                results = _search_a_stock_fallback(raw)
-                if not results:
-                    results = _search_a_stock(raw)
-                if not results:
-                    self._show_result_error(f"未找到与「{raw}」匹配的 A 股")
-                    return
-                code = results[0]["code"]
-        else:
-            if not (code.isascii() and code.replace(".", "").replace("-", "").isalpha()):
-                from utils.helpers import _search_us_stock_fallback, _search_us_stock_online
-                self._update_progress("正在搜索美股...")
-                results = _search_us_stock_fallback(raw)
-                if not results:
-                    results = _search_us_stock_online(raw)
-                if not results:
-                    self._show_result_error(f"未找到与「{raw}」匹配的美股")
-                    return
-                code = results[0]["code"]
+        def on_progress(msg: str):
+            try:
+                self.page.run_task(self._update_progress_async, msg)
+            except Exception:
+                pass
 
-        if self._stop_flag:
-            return
-        self._run_analysis(code, market, period, strategy_name)
-
-    # ---- 主流程：拆为多个职责单一的私有方法，便于阅读和取消 ----
-
-    def _run_analysis(self, code: str, market: str, period: str, strategy_name: str):
-        ctx = {"code": code}  # 简单的日志上下文（多任务并发时可定位）
         try:
-            t0 = datetime.now()
-
-            info = self._fetch_stock_info(code, market, ctx)
-            if self._stop_flag: return
-
-            prices = self._fetch_prices(code, period, ctx)
-            if prices is None:
-                return  # 错误已通过 _show_result_error 通知 UI
-            if self._stop_flag: return
-
-            df = self._compute_indicators(prices, ctx)
-            if self._stop_flag: return
-
-            news_agg = self._fetch_and_analyze_news(code, market, ctx)
-            if self._stop_flag: return
-
-            bt_df, bt_result = self._run_backtest(df, strategy_name, ctx)
-            if self._stop_flag: return
-
-            self._chart_path = self._generate_chart(df, bt_df, code, info.name, ctx)
-
-            tech = summarize(df, info.name)
-            self._report_content = self._generate_report_content(info, tech, news_agg, bt_result, ctx)
-
-            self._persist_report(info, market, period, ctx)
-            self._analysis_result = {"stock": info.to_dict(), "backtest": bt_result}
-
-            elapsed = (datetime.now() - t0).total_seconds()
-            logger.info(f"[done] {code} 分析完成，总耗时 {elapsed:.1f}s")
-            self._show_results()
-
-        except Exception as ex:
-            logger.exception(f"Analysis failed for {code}")
-            self._show_result_error(f"分析出错：{ex}")
+            response = self._service.analyze(request, on_progress=on_progress)
+            self._on_analysis_done(response)
+        except ValueError as e:
+            self._show_result_error(str(e))
+        except RuntimeError as e:
+            self._show_result_error(str(e))
+        except Exception as e:
+            logger.exception(f"Analysis failed")
+            self._show_result_error(f"分析出错：{e}")
         finally:
             try:
                 self.page.run_task(self._done_async)
             except Exception:
                 pass
 
-    # ---- 1) 股票信息 ----
-    def _fetch_stock_info(self, code: str, market: str, ctx: dict) -> StockInfo:
-        logger.info(f"[1/9] [{code}] 获取股票信息")
-        self._update_progress("正在获取股票信息...")
-        fetcher = get_stock_fetcher()
-        info = fetcher.fetch_stock_info(code)
-        if info:
-            Database().upsert_stock(info)
-            logger.info(f"[1/9] [{code}] 股票信息: {info.name} ({info.industry})")
-            return info
-        logger.warning(f"[1/9] [{code}] 未获取到股票信息，使用默认名")
-        return StockInfo(code=code, name=code, market=market)
+    def _on_analysis_done(self, response: AnalysisResponse):
+        """分析完成 → 更新 UI 状态。"""
+        self._chart_path = response.chart_path
+        self._report_content = response.report_content
+        self._current_report_id = response.report_id
+        self._stock_info = response.stock_info
+        self._backtest_results = response.backtest_results
+        self._show_results()
 
-    # ---- 2) 股价数据（含缓存覆盖度校验，修复 P1-4） ----
-    def _fetch_prices(self, code: str, period: str, ctx: dict):
-        logger.info(f"[2/9] [{code}] 获取股价数据")
-        self._update_progress("正在获取股价数据...")
-        start, end = get_backtest_dates(period)
-        prices = Database().get_prices(code, start, end)
-        logger.info(f"[2/9] [{code}] 缓存数据: {len(prices)} 条 (期望区间 {start}~{end})")
+    # ======================== UI 更新（线程安全） ========================
 
-        need_fetch = self._cache_needs_refresh(prices, start, end)
-        if need_fetch:
-            logger.info(f"[2/9] [{code}] 缓存不足/过旧，联网拉取 {start}~{end}")
-            self._update_progress("正在联网获取最新股价数据...")
-            fetcher = get_stock_fetcher()
-            new_prices = fetcher.fetch_price_history(code, start, end)
-            if new_prices:
-                Database().insert_prices(new_prices)
-                prices = Database().get_prices(code, start, end)
-                logger.info(f"[2/9] [{code}] 联网获取 {len(new_prices)} 条，合计 {len(prices)} 条")
-        else:
-            logger.info(f"[2/9] [{code}] 使用缓存（覆盖完整，最新 {prices[-1].date}）")
+    async def _update_progress_async(self, text: str):
+        self._progress_text.value = text
+        self._progress_row.update()
 
-        if not prices:
-            self._show_result_error(f"无法获取 {code} 的股价数据，请检查代码或网络")
-            return None
-        return prices
-
-    @staticmethod
-    def _cache_needs_refresh(prices, start: str, end: str) -> bool:
-        """
-        判断本地缓存是否需要联网刷新。
-
-        触发条件（任一即刷新）：
-          - 数据少于 5 条
-          - 缓存最早一条晚于期望开始日 + 7 天（说明早期数据缺失，常见于"周期变长"）
-          - 缓存最新一条早于今天 - 7 天（说明近端数据过旧）
-        """
-        from datetime import date, timedelta
-        if len(prices) < 5:
-            return True
-        first_date = prices[0].date
-        last_date = prices[-1].date
-        # 期望区间起点 vs 实际起点：差 > 7 天就不算覆盖
-        # （直接比较 ISO 字符串能正确排序）
-        expected_start = start
-        if first_date and expected_start and first_date > expected_start:
-            # 转 date 比较天数差
-            try:
-                d_first = date.fromisoformat(first_date)
-                d_start = date.fromisoformat(expected_start)
-                if (d_first - d_start).days > 7:
-                    return True
-            except ValueError:
-                pass
-        # 末端过期
-        if last_date < (date.today() - timedelta(days=7)).isoformat():
-            return True
-        return False
-
-    # ---- 3) 技术指标 ----
-    def _compute_indicators(self, prices, ctx: dict):
-        import pandas as pd
-        df = pd.DataFrame([p.to_dict() for p in prices])
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date").reset_index(drop=True)
-        logger.info(
-            f"[3/9] [{ctx['code']}] 数据预处理: {len(df)} 行, "
-            f"{df['date'].iloc[0].strftime('%Y-%m-%d')} ~ "
-            f"{df['date'].iloc[-1].strftime('%Y-%m-%d')}"
-        )
-        logger.info(f"[4/9] [{ctx['code']}] 计算技术指标")
-        self._update_progress("正在计算技术指标...")
-        return calc_all_indicators(df)
-
-    # ---- 4) 新闻：24h 缓存复用 + 拉取 + 情感分析 + 持久化 ----
-    def _fetch_and_analyze_news(self, code: str, market: str, ctx: dict) -> dict:
-        from analysis.constants import NEWS_CACHE_HOURS, NEWS_FETCH_LIMIT
-
-        logger.info(f"[5/9] [{code}] 检查新闻缓存（{NEWS_CACHE_HOURS}h）")
-        self._update_progress("正在加载新闻...")
-        cached = Database().get_recent_news_with_sentiment(code, hours=NEWS_CACHE_HOURS, limit=NEWS_FETCH_LIMIT)
-        if cached:
-            logger.info(f"[5/9] [{code}] 命中新闻缓存 {len(cached)} 条，跳过抓取/分析")
-            return aggregate(cached)
-
-        news_list = []
-        try:
-            self._update_progress("正在获取新闻...")
-            news_list = fetch_news(code, market, limit=NEWS_FETCH_LIMIT)
-        except Exception as e:
-            logger.warning(f"[5/9] [{code}] 新闻抓取失败: {e}")
-        logger.info(f"[5/9] [{code}] 新闻: {len(news_list)} 条")
-
-        if news_list:
-            self._update_progress("正在进行新闻情感分析...")
-            news_list = analyze(news_list)
-            try:
-                Database().insert_news(news_list)
-            except Exception as e:
-                logger.warning(f"[5/9] [{code}] 新闻持久化失败: {e}")
-
-        news_agg = aggregate(news_list)
-        logger.info(
-            f"[5/9] [{code}] 情感分析: {news_agg['sentiment_score']:.2f} "
-            f"({news_agg['summary'][:50]}...)"
-        )
-        return news_agg
-
-    # ---- 5) 回测 ----
-    def _run_backtest(self, df, strategy_name: str, ctx: dict):
-        logger.info(f"[6/9] [{ctx['code']}] 运行回测: {strategy_name}")
-        self._update_progress("正在运行回测...")
-        strategy = get_strategy(strategy_name)
-        # 仅生成一次信号（避免在策略类和 BacktestEngine 内部各算一次）
-        bt_df = strategy.generate_signals(df.copy())
-        engine = BacktestEngine()
-        # 信号已生成，封装成 PrecomputedSignalsStrategy 以避免重复计算
-        bt_result = engine.run(bt_df, PrecomputedSignalsStrategy(strategy))
-        logger.info(
-            f"[6/9] [{ctx['code']}] 回测完成: 总收益={bt_result['total_return']:.2%}, "
-            f"夏普={bt_result['sharpe_ratio']:.2f}, 回撤={bt_result['max_drawdown']:.2%}"
-        )
-        return bt_df, bt_result
-
-    # ---- 6) K 线图 ----
-    def _generate_chart(self, df, bt_df, code: str, name: str, ctx: dict):
-        logger.info(f"[7/9] [{code}] 生成 K 线图")
-        self._update_progress("正在生成 K 线图...")
-        chart_df = df.copy()
-        if "signal" in bt_df.columns:
-            chart_df["signal"] = bt_df["signal"].values
-        path = generate_kline_chart(chart_df, code, name)
-        logger.info(f"[7/9] [{code}] K 线图: {path or '生成失败'}")
-        return path
-
-    # ---- 7) 报告生成 ----
-    def _generate_report_content(self, info, tech, news_agg, bt_result, ctx: dict) -> str:
-        logger.info(f"[8/9] [{ctx['code']}] 生成分析报告 (LLM: {Settings().get('llm_model')})")
-        self._update_progress("正在生成分析报告...")
-        content = generate_report(info.to_dict(), tech, news_agg, bt_result)
-        if content:
-            logger.info(f"[8/9] [{ctx['code']}] 报告生成完成: {len(content)} 字符")
-            return content
-        logger.error(f"[8/9] [{ctx['code']}] 报告生成失败，使用默认文本")
-        return "报告生成失败，请稍后重试。"
-
-    # ---- 8) 持久化 ----
-    def _persist_report(self, info, market: str, period: str, ctx: dict):
-        logger.info(f"[9/9] [{ctx['code']}] 保存报告到数据库")
-        self._update_progress("正在保存报告...")
-        report = AnalysisReport(
-            code=info.code, name=info.name, market=market,
-            backtest_period=period,
-            create_time=datetime.now().isoformat(),
-            content=self._report_content,
-            chart_path=self._chart_path or "",
-        )
-        self._current_report_id = Database().insert_report(report)
-
-    # ======================== 线程安全 UI 更新 ========================
-
-    def _update_progress(self, text: str):
-        try:
-            self.page.run_task(self._update_progress_async, text)
-        except Exception:
-            pass
+    async def _done_async(self):
+        self._progress_row.visible = False
+        self._progress_row.update()
+        self._set_idle()
+        self.page.update()
 
     def _show_result_error(self, msg: str):
         logger.error(msg)
         try:
             self.page.run_task(self._show_result_error_async, msg)
-        except Exception as e:
-            logger.error(f"Failed to show error via run_task: {e}")
-
-    def _show_results(self):
-        try:
-            self.page.run_task(self._show_results_async)
         except Exception:
             pass
-
-    async def _update_progress_async(self, text: str):
-        self._progress_text.value = text
-        self._progress_row.update()
 
     async def _show_result_error_async(self, msg: str):
         self._show_error(msg)
@@ -572,11 +301,11 @@ class MainPage(ft.Container):
         self._set_idle()
         self.page.update()
 
-    async def _done_async(self):
-        self._progress_row.visible = False
-        self._progress_row.update()
-        self._set_idle()
-        self.page.update()
+    def _show_results(self):
+        try:
+            self.page.run_task(self._show_results_async)
+        except Exception:
+            pass
 
     async def _show_results_async(self):
         if not self._report_content:
@@ -601,22 +330,21 @@ class MainPage(ft.Container):
 
     # ======================== PDF 导出 / 评分 ========================
 
-    def _export_pdf(self, e):
+    def _on_export_pdf(self, e):
         if not self._report_content:
             self._show_error("没有可导出的报告")
             return
-        si = self._analysis_result.get("stock", {}) if self._analysis_result else {}
+        si = self._stock_info
         pdf_path = export_report_to_pdf(
             self._report_content, self._chart_path or "",
-            si.get("name", ""), si.get("code", ""),
+            si.name if si else "", si.code if si else "",
             self._period_dd.value,
         )
         if pdf_path:
             if self._current_report_id:
                 Database().update_report_pdf(self._current_report_id, pdf_path)
             self.page.snack_bar = ft.SnackBar(
-                ft.Text(f"PDF 已导出：{pdf_path}"),
-                bgcolor=ft.Colors.GREEN_700,
+                ft.Text(f"PDF 已导出：{pdf_path}"), bgcolor=ft.Colors.GREEN_700,
             )
             self.page.snack_bar.open = True
             self.page.update()
@@ -627,8 +355,7 @@ class MainPage(ft.Container):
         if self._current_report_id and rating > 0:
             Database().update_report_rating(self._current_report_id, rating)
             self.page.snack_bar = ft.SnackBar(
-                ft.Text(f"已评分：{rating} 星"),
-                bgcolor=ft.Colors.BLUE_700,
+                ft.Text(f"已评分：{rating} 星"), bgcolor=ft.Colors.BLUE_700,
             )
             self.page.snack_bar.open = True
             self.page.update()

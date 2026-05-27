@@ -19,7 +19,6 @@ import logging
 from datetime import datetime, date
 
 from data.models import NewsItem
-from data.database import Database
 from data.stock_fetcher import _apply_proxy, _without_system_proxy
 
 logger = logging.getLogger(__name__)

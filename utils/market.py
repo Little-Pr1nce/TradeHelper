@@ -1,23 +1,18 @@
 """
-工具函数模块
+市场识别与股票搜索工具。
 
-提供股票代码校验、市场识别、日期格式化、中文字体查找、
-回测日期计算和日志配置等通用工具函数。
+提供 A 股/美股的市场判别、在线搜索和离线兜底匹配。
 """
 
 import re
 import logging
-import os
-import sys
-from datetime import datetime, date, timedelta
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
 def detect_market(code: str) -> str:
     """
-    仅识别股票所属市场，不做合法性校验。
+    识别股票所属市场。
 
     Args:
         code: 股票代码字符串
@@ -33,120 +28,7 @@ def detect_market(code: str) -> str:
     return ""
 
 
-def _format_date(d: date | datetime | str) -> str:
-    """将各种日期类型统一格式化为 'YYYY-MM-DD'（仅本模块内部使用）。"""
-    if isinstance(d, str):
-        return d[:10]
-    if isinstance(d, datetime):
-        return d.strftime("%Y-%m-%d")
-    if isinstance(d, date):
-        return d.isoformat()
-    return str(d)
-
-
-def get_chinese_font_path() -> str | None:
-    """
-    自动查找操作系统中可用的中文字体路径。
-
-    用于 mplfinance K 线图标题和 reportlab PDF 的中文渲染。
-    按平台分别搜索常见中文字体：
-      - macOS: 苹方、黑体、Hiragino Sans GB
-      - Windows: 微软雅黑、黑体、宋体
-      - Linux: 文泉驿、Droid Sans、Noto Sans CJK
-
-    【扩展点】如需支持更多字体，在对应平台的 font_paths 列表中添加路径即可。
-
-    Returns:
-        找到的第一个可用字体文件的绝对路径，未找到则返回 None
-    """
-    font_paths = []
-
-    if sys.platform == "darwin":
-        # macOS 常见中文字体
-        font_paths = [
-            "/System/Library/Fonts/PingFang.ttc",
-            "/System/Library/Fonts/STHeiti Light.ttc",
-            "/System/Library/Fonts/Hiragino Sans GB.ttc",
-            "/Library/Fonts/Arial Unicode.ttf",
-        ]
-    elif sys.platform == "win32":
-        # Windows 常见中文字体
-        font_paths = [
-            os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", f)
-            for f in ["msyh.ttc", "msyhbd.ttc", "simhei.ttf", "simsun.ttc"]
-        ]
-    else:
-        # Linux 常见中文字体
-        font_paths = [
-            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        ]
-
-    for p in font_paths:
-        if os.path.exists(p):
-            return p
-    return None
-
-
-def get_backtest_dates(period: str) -> tuple[str, str]:
-    """
-    根据回测周期计算起始日期和结束日期。
-
-    支持的周期：
-      - "3m": 3 个月（约 90 天）
-      - "6m": 6 个月（约 180 天）
-      - "1y": 1 年（约 365 天）
-      - "3y": 3 年（约 1095 天）
-
-    【扩展点】如需支持更多周期（如 5y、10y），在 periods 字典中添加键值对即可。
-
-    Args:
-        period: 回测周期标识 ("3m" / "6m" / "1y" / "3y")
-
-    Returns:
-        (开始日期, 结束日期) 的日期字符串元组
-    """
-    today = date.today()
-    periods = {
-        "3m": 90,
-        "6m": 180,
-        "1y": 365,
-        "3y": 1095,
-    }
-    days = periods.get(period, 90)
-    # 统一用 timedelta 做日期减法，避免 today.replace(year=...)
-    # 在 2 月 29 日（闰年）回到非闰年时抛 ValueError。
-    start = today - timedelta(days=days)
-    return _format_date(start), _format_date(today)
-
-
-def setup_logging(work_dir: str):
-    """
-    配置应用全局日志系统。
-
-    日志同时输出到：
-      - 文件：{work_dir}/logs/tradehelper.log（UTF-8 编码，追加模式）
-      - 控制台：标准输出
-
-    Args:
-        work_dir: 用户配置的工作目录路径
-    """
-    log_dir = Path(work_dir) / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "tradehelper.log"
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
-            logging.StreamHandler(),
-        ],
-    )
-
-
-def _search_a_stock(keyword: str) -> list[dict]:
+def search_a_stock(keyword: str) -> list[dict]:
     """通过 akshare 在线搜索 A 股。"""
     try:
         from data.stock_fetcher import _without_system_proxy
@@ -164,7 +46,7 @@ def _search_a_stock(keyword: str) -> list[dict]:
     return []
 
 
-def _search_a_stock_fallback(keyword: str) -> list[dict]:
+def search_a_stock_fallback(keyword: str) -> list[dict]:
     """热门 A 股中英文对照表（在线搜索前的快速匹配）。"""
     FALLBACK = {
         "600519": ["贵州茅台", "茅台"],
@@ -215,7 +97,7 @@ def _search_a_stock_fallback(keyword: str) -> list[dict]:
     return results
 
 
-def _search_us_stock_online(keyword: str) -> list[dict]:
+def search_us_stock_online(keyword: str) -> list[dict]:
     """通过 Yahoo Finance 在线搜索美股。"""
     from data.stock_fetcher import _apply_proxy, _without_system_proxy
     results = []
@@ -256,7 +138,7 @@ def _search_us_stock_online(keyword: str) -> list[dict]:
     return results
 
 
-def _search_us_stock_fallback(keyword: str) -> list[dict]:
+def search_us_stock_fallback(keyword: str) -> list[dict]:
     """
     内置热门美股中英文对照表（仅在线搜索失败时兜底）。
 
