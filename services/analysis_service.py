@@ -130,10 +130,19 @@ class AnalysisService:
 
         news_df = self._build_news_df(code)
 
+        # 无新闻数据时自动调整权重：技术面 100%，新闻面 0%
+        # 否则 Final_Score 永远达不到策略阈值（如 0.6/0.7）
+        if news_df is None or news_df.empty:
+            w_tech, w_news = 1.0, 0.0
+            logger.info("无新闻数据，Alpha 权重自动调整为 w_tech=1.0")
+        else:
+            w_tech, w_news = 0.6, 0.4
+
         # ---- 5. 执行分析管道 ----
         _progress("正在执行量化分析...")
         market_type = detect_market(code) or request.market
-        pipeline_result = run_pipeline(df, news_df, market=market_type)
+        pipeline_result = run_pipeline(df, news_df, market=market_type,
+                                       w_tech=w_tech, w_news=w_news)
         if _stop(): return self._empty_response(code)
 
         # ---- 6. 提取因子得分 ----
@@ -147,9 +156,15 @@ class AnalysisService:
         # ---- 8. 生成报告 ----
         _progress("正在生成分析报告...")
         tech = summarize(pipeline_result.df, info.name)
+
+        # 提取实际回测数据的日期范围（而非请求的周期标签）
+        dates = pipeline_result.df["date"]
+        data_range = f"{dates.iloc[0].strftime('%Y-%m-%d')} ~ {dates.iloc[-1].strftime('%Y-%m-%d')}"
+
         report_content = generate_report(
             info.to_dict(), tech, news_agg,
             pipeline_result.backtest, alpha_stats,
+            data_range=data_range,
         )
         if not report_content:
             report_content = "报告生成失败，请稍后重试。"
@@ -209,7 +224,10 @@ class AnalysisService:
     def _fetch_prices(self, code: str, period: str, data_source: str = "free") -> pd.DataFrame | None:
         start, end = get_backtest_dates(period)
         prices = Database().get_prices(code, start, end)
-        logger.info(f"缓存数据: {len(prices)} 条 ({start}~{end})")
+        if prices:
+            logger.info(f"缓存数据: {len(prices)} 条 ({prices[0].date}~{prices[-1].date})")
+        else:
+            logger.info(f"缓存数据: 0 条")
 
         if self._cache_needs_refresh(prices, start, end):
             logger.info(f"缓存不足，联网拉取")
@@ -232,21 +250,17 @@ class AnalysisService:
 
     @staticmethod
     def _cache_needs_refresh(prices, start: str, end: str) -> bool:
+        """判断缓存是否需要刷新。仅数据量极少或过旧时刷新。"""
         from datetime import date, timedelta
-        if len(prices) < 5:
+        if len(prices) < 100:
+            logger.info(f"缓存刷新原因: 数据量 {len(prices)} < 100")
             return True
-        first_date = prices[0].date
         last_date = prices[-1].date
-        if first_date and start and first_date > start:
-            try:
-                d_first = date.fromisoformat(first_date)
-                d_start = date.fromisoformat(start)
-                if (d_first - d_start).days > 7:
-                    return True
-            except ValueError:
-                pass
-        if last_date < (date.today() - timedelta(days=7)).isoformat():
+        week_ago = (date.today() - timedelta(days=7)).isoformat()
+        if last_date < week_ago:
+            logger.info(f"缓存刷新原因: 最新数据 {last_date} < {week_ago} (7天前)")
             return True
+        logger.info(f"缓存命中: {len(prices)} 条 ({prices[0].date}~{last_date}), 无需刷新")
         return False
 
     def _fetch_news(self, code: str, market: str, progress) -> dict:

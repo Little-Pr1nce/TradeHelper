@@ -19,7 +19,6 @@ from config.settings import Settings
 from data.database import Database
 from data.models import StockInfo
 from services.analysis_service import AnalysisService, AnalysisRequest, AnalysisResponse
-from report.pdf_exporter import export_report_to_pdf
 from ui.components import StarRating
 
 logger = logging.getLogger(__name__)
@@ -91,7 +90,7 @@ class MainPage(ft.Container):
 
         # ── 数据源 ──
         self._source_dd = ft.Dropdown(
-            label="数据源", width=130, value="free",
+            label="数据源", width=130, value="custom",
             options=[
                 ft.dropdown.Option("free", "免费数据"),
                 ft.dropdown.Option("custom", "付费数据"),
@@ -177,7 +176,7 @@ class MainPage(ft.Container):
         self._export_btn = ft.ElevatedButton(
             content=ft.Row(spacing=6, controls=[
                 ft.Icon(ft.Icons.PICTURE_AS_PDF, size=16),
-                ft.Text("导出 PDF"),
+                ft.Text("导出为文件"),
             ]),
             style=ft.ButtonStyle(
                 shape=ft.RoundedRectangleBorder(radius=8),
@@ -404,22 +403,104 @@ class MainPage(ft.Container):
         if not self._report_content:
             self._show_error("没有可导出的报告")
             return
+        try:
+            path = self._export_html()
+            if path and self._current_report_id:
+                Database().update_report_pdf(self._current_report_id, path)
+            if path:
+                self._show_export_dialog(path)
+            else:
+                self._show_error("导出失败")
+        except Exception as ex:
+            logger.exception("导出失败")
+            self._show_error(f"导出失败：{ex}")
+
+    def _export_html(self) -> str:
+        """将 Markdown 报告导出为 HTML 文件。内嵌 K 线图为 base64。"""
+        import os, base64
+        from config.settings import Settings
+
+        html_dir = Settings().pdf_dir
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         si = self._stock_info
-        pdf_path = export_report_to_pdf(
-            self._report_content, self._chart_path or "",
-            si.name if si else "", si.code if si else "",
-            self._period_dd.value,
+        code = si.code if si else "report"
+        filename = f"report_{code}_{timestamp}.html"
+        filepath = os.path.join(html_dir, filename)
+
+        # K 线图 → base64 内嵌
+        chart_html = ""
+        if self._chart_path and os.path.exists(self._chart_path):
+            with open(self._chart_path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+            chart_html = f'<p align="center"><img src="data:image/png;base64,{b64}" style="max-width:100%;"></p>'
+
+        # Markdown → HTML
+        from markdown_it import MarkdownIt
+        md = MarkdownIt().enable(["table", "strikethrough"])
+        body_html = md.render(self._report_content)
+
+        html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{si.name if si else code} 分析报告</title>
+<style>
+  body {{ font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #333; line-height: 1.8; }}
+  h1 {{ border-bottom: 2px solid #2a6496; padding-bottom: 8px; }}
+  h2 {{ color: #2a6496; margin-top: 32px; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
+  th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
+  th {{ background: #2a6496; color: #fff; }}
+  tr:nth-child(even) {{ background: #f5f7fa; }}
+  blockquote {{ border-left: 3px solid #2a6496; padding-left: 16px; color: #666; margin: 12px 0; }}
+  code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
+  pre {{ background: #f5f5f5; padding: 16px; border-radius: 6px; overflow-x: auto; }}
+  img {{ max-width: 100%; }}
+</style>
+</head>
+<body>
+{chart_html}
+{body_html}
+</body>
+</html>"""
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(html)
+        logger.info(f"HTML 报告已导出: {filepath}")
+        return filepath
+
+    def _show_export_dialog(self, filepath: str):
+        """导出成功：SnackBar 提示，5 秒自动消失。"""
+        import os, subprocess, sys, threading
+
+        folder = os.path.dirname(filepath)
+
+        def on_action(e):
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", folder])
+            elif sys.platform == "win32":
+                os.startfile(folder)
+            else:
+                subprocess.Popen(["xdg-open", folder])
+
+        # 清理旧的 snackbar / dialog 状态
+        self.page.dialog = None
+        self.page.snack_bar = ft.SnackBar(
+            content=ft.Text(f"已导出至：{os.path.basename(filepath)}"),
+            bgcolor=ft.Colors.GREEN_700,
+            action="打开目录",
+            on_action=on_action,
+            duration=5000,
         )
-        if pdf_path:
-            if self._current_report_id:
-                Database().update_report_pdf(self._current_report_id, pdf_path)
-            self.page.snack_bar = ft.SnackBar(
-                ft.Text(f"PDF 已导出：{pdf_path}"), bgcolor=ft.Colors.GREEN_700,
-            )
-            self.page.snack_bar.open = True
-            self.page.update()
-        else:
-            self._show_error("PDF 导出失败")
+        self.page.snack_bar.open = True
+        self.page.update()
+
+        # 后台打开浏览器
+        def _open():
+            import webbrowser
+            webbrowser.open(f"file://{filepath}")
+        threading.Thread(target=_open, daemon=True).start()
 
     def _on_rating_change(self, rating: int):
         if self._current_report_id and rating > 0:

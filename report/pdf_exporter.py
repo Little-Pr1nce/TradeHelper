@@ -31,7 +31,7 @@ from reportlab.lib.units import mm, cm
 from reportlab.lib.colors import HexColor
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Image,
+    SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle,
 )
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -246,19 +246,52 @@ def export_report_to_pdf(
             # 正文逐行处理
             lines = content.strip().split("\n")
             in_code_block = False
-            for line in lines:
-                stripped = line.strip()
+            in_table = False
+            table_rows: list[list[str]] = []
+            i = 0
+            while i < len(lines):
+                stripped = lines[i].strip()
+                i += 1
+
                 if not stripped:
-                    elements.append(Spacer(1, 2*mm))  # 空行
+                    # 空行结束表格
+                    if in_table and table_rows:
+                        elements.append(_build_pdf_table(table_rows, styles))
+                        table_rows = []
+                        in_table = False
+                    elements.append(Spacer(1, 2*mm))
                     continue
 
-                # 代码块开关（``` 成对出现）
+                # 代码块开关
                 if stripped.startswith("```"):
                     in_code_block = not in_code_block
                     continue
                 if in_code_block:
                     elements.append(Paragraph(_escape_html(stripped), styles["ChineseCode"]))
                     continue
+
+                # Markdown 表格：以 | 开头且包含表头分隔行（|---|---|）
+                if stripped.startswith("|") and "|" in stripped:
+                    # 检查后面是否跟着分隔行
+                    if i < len(lines) and re.match(r"^\|[\s\-:|]+\|$", lines[i].strip()):
+                        if not in_table:
+                            in_table = True
+                            table_rows = []
+                        # 表头
+                        table_rows.append([c.strip() for c in stripped.split("|")[1:-1]])
+                        # 跳过分隔行
+                        i += 1
+                        continue
+                    elif in_table:
+                        # 数据行
+                        table_rows.append([c.strip() for c in stripped.split("|")[1:-1]])
+                        continue
+
+                # 非表格内容 → 结束表格
+                if in_table and table_rows:
+                    elements.append(_build_pdf_table(table_rows, styles))
+                    table_rows = []
+                    in_table = False
 
                 if stripped.startswith("### "):
                     elements.append(Paragraph(_inline_md_to_html(stripped[4:]), styles["ChineseH3"]))
@@ -274,6 +307,10 @@ def export_report_to_pdf(
                     elements.append(Paragraph(_inline_md_to_html(stripped[2:]), styles["ChineseSmall"]))
                 else:
                     elements.append(Paragraph(_inline_md_to_html(stripped), styles["ChineseBody"]))
+
+            # 处理末尾的表格
+            if in_table and table_rows:
+                elements.append(_build_pdf_table(table_rows, styles))
 
         # ---- 免责声明 ----
         elements.append(Spacer(1, 1*cm))
@@ -299,23 +336,62 @@ def _escape_html(text: str) -> str:
                 .replace(">", "&gt;"))
 
 
+def _build_pdf_table(rows: list[list[str]], styles: dict):
+    """将 Markdown 表格行转为 reportlab Table 对象。"""
+    if not rows:
+        return Spacer(1, 2*mm)
+
+    # 转 HTML 的内联格式
+    html_rows = [[_inline_md_to_html(cell) for cell in row] for row in rows]
+
+    col_widths = [min(max(len(cell) * 4 + 20 for cell in col), 160) for col in zip(*html_rows)]
+    total = sum(col_widths)
+    if total > 460:
+        scale = 460 / total
+        col_widths = [w * scale for w in col_widths]
+
+    table = Table(html_rows, colWidths=col_widths)
+    style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), HexColor("#2a6496")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), HexColor("#ffffff")),
+        ("FONTNAME", (0, 0), (-1, -1), styles["ChineseBody"].fontName),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.5, HexColor("#cccccc")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [HexColor("#ffffff"), HexColor("#f5f7fa")]),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+    table.setStyle(TableStyle(style_cmds))
+    return table
+
+
 def _inline_md_to_html(text: str) -> str:
     """
-    把内联 Markdown 转成 reportlab Paragraph 支持的 HTML 子集。
+    把内联 Markdown 转成 reportlab Paragraph 支持的 HTML。
 
-    支持：
-      - 行内粗体  **xxx** → <b>xxx</b>
-      - 行内斜体  *xxx*   → <i>xxx</i>（避免吞掉 **）
-      - 行内代码  `xxx`   → <font face="Courier">xxx</font>
-    其他字符做 HTML 转义，避免 reportlab 解析错误。
+    reportlab Paragraph 支持: <b> <i> <u> <strike> <font> <br/> <a>
     """
+    # HTML 转义保护
     escaped = _escape_html(text)
-    # 粗体：**xx** （非贪婪），先于斜体
+
+    # 图片 → 占位
+    escaped = re.sub(r"!\[.*?\]\(.*?\)", "[图片]", escaped)
+    # 链接 → 保留文字
+    escaped = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", escaped)
+
+    # 粗体 **text**（支持中文）
     escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
-    # 斜体：*xx*
-    escaped = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", escaped)
-    # 行内代码：`xx`
-    escaped = re.sub(r"`([^`]+)`", r'<font face="Courier">\1</font>', escaped)
+    # 粗体 __text__
+    escaped = re.sub(r"__(.+?)__", r"<b>\1</b>", escaped)
+    # 斜体 *text*
+    escaped = re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"<i>\1</i>", escaped)
+    # 删除线 ~~text~~
+    escaped = re.sub(r"~~(.+?)~~", r"<strike>\1</strike>", escaped)
+    # 行内代码 `text`
+    escaped = re.sub(r"`([^`\n]+)`", r'<font face="Courier">\1</font>', escaped)
+
     return escaped
 
 

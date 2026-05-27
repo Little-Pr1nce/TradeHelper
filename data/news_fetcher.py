@@ -98,8 +98,8 @@ def _fetch_news_us(code: str, limit: int = 15) -> list[NewsItem]:
     import time as _time
     import random as _random
 
-    # 随机延迟 2~5 秒，降低被限流概率
-    delay = _random.uniform(2.0, 5.0)
+    # 模拟人工操作：5~8 秒随机延迟（绕过 yfinance 反爬）
+    delay = _random.uniform(1.0, 3.0)
     logger.info(f"等待 {delay:.1f}s 后获取美股新闻（防限流）...")
     _time.sleep(delay)
 
@@ -138,15 +138,14 @@ def _fetch_news_us(code: str, limit: int = 15) -> list[NewsItem]:
                 "Rate limited", "Too Many Requests", "rate limited", "429",
             ])
             if is_rate_limited and attempt < 2:
-                wait = 5 * (2 ** attempt) + _random.uniform(0, 2)
+                wait = 10 * (2 ** attempt) + _random.uniform(0, 3)
                 logger.warning(
                     f"美股新闻被限流，{wait:.0f}s 后重试 ({attempt+2}/3)..."
                 )
                 _time.sleep(wait)
                 continue
-            # 非限流错误或最后一次重试，不等待直接跳出
-            if attempt < 2 and not is_rate_limited:
-                _time.sleep(2)
+            if attempt < 2:
+                _time.sleep(3)
                 continue
             break
 

@@ -34,6 +34,7 @@ def build_user_prompt(
     bt_summary: str,
     bt_table: str,
     alpha_text: str,
+    data_range: str = "",
 ) -> str:
     """构建 LLM user prompt（将各模块数据拼接为自然语言输入）。"""
     name = stock_info.get("name", "")
@@ -42,6 +43,10 @@ def build_user_prompt(
     top_news = news_aggregation.get("top_news", "")
 
     return f"""请用中文分析以下股票 {name}({code})：
+
+## 回测数据范围
+{data_range or '未提供'}
+（注意：回测使用的实际数据日期范围如上，可能因数据源限制与用户选择周期不完全一致）
 
 ## 股票基本信息
 - 名称：{name}
