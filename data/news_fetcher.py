@@ -1,153 +1,128 @@
 """
-金融新闻获取模块
+新闻获取模块。
 
-根据股票所属市场自动选择新闻数据源：
-  - A 股：通过 akshare.stock_news_em() 获取东方财富个股新闻
-  - 美股：通过 yfinance.Ticker.news 获取 Yahoo Finance 新闻
-
-返回统一的 NewsItem 列表，供情感分析模块 (analysis/sentiment.py) 使用。
-
-【扩展点】添加新新闻源：
-  1. 在 fetch_news() 中为新市场添加分支
-  2. 实现对应的 _fetch_news_xxx() 函数
-  3. 可用的第三方新闻源：NewsAPI、Finnhub、新浪财经等
-
-数据格式统一：所有源返回的 NewsItem 都包含 (title, date, source) 三个核心字段。
+流程：
+  1. 查数据库 → 今天新闻 >= 5 条 → 直接用缓存
+  2. 否则 → 调 LLM 获取 → 写入数据库 → 交给 FinBERT 分析
 """
 
+import json
 import logging
-from datetime import datetime, date
+import re
+from datetime import date
 
 from data.models import NewsItem
-from data.stock_fetcher import _apply_proxy, _without_system_proxy
+from data.database import Database
 
 logger = logging.getLogger(__name__)
 
+_NEWS_PROMPT_EN = """You are a professional financial news editor. Search for the latest real news about {name} ({code}) from reputable financial websites (Reuters, Bloomberg, CNBC, etc.).
 
-def fetch_news(code: str, market: str, limit: int = 15) -> list[NewsItem]:
+Return {limit} news items sorted by date descending (newest first). Each item must include: date (YYYY-MM-DD), title, full content, source name.
+Output MUST be in English. Output ONLY the JSON array below, nothing else:
+
+[
+  {{"date": "2026-05-27", "title": "News Title", "content": "Full news content here", "source": "Reuters"}},
+  {{"date": "2026-05-26", "title": "News Title", "content": "Full news content here", "source": "Bloomberg"}}
+]"""
+
+_NEWS_PROMPT_CN = """你是一位专业的财经新闻编辑。请从正规财经网站（东方财富、财联社、证券时报、 Reuters、Bloomberg 等）获取关于 {name}（{code}）近一周的真实新闻。
+
+返回 {limit} 条新闻，按日期从新到旧排列。每条包含：日期(YYYY-MM-DD)、标题、完整内容、来源名称。
+请用中文输出。只输出以下 JSON 数组，不要其他内容：
+
+[
+  {{"date": "2026-05-27", "title": "新闻标题", "content": "完整新闻内容", "source": "东方财富"}},
+  {{"date": "2026-05-26", "title": "新闻标题", "content": "完整新闻内容", "source": "财联社"}}
+]"""
+
+
+def fetch_news(
+    name: str, code: str, market: str,
+    model: str, base_url: str, api_key: str,
+    limit: int = 5,
+) -> list[NewsItem]:
     """
-    获取指定股票的最新新闻。
-
-    根据市场自动选择数据源，返回统一格式的 NewsItem 列表。
+    获取股票新闻（缓存优先，LLM 兜底）。
 
     Args:
+        name: 股票名称
         code: 股票代码
-        market: 市场标识 ("A" / "US")
-        limit: 最大返回条数（默认 15 条）
+        market: 市场 (A/US)
+        model/base_url/api_key: LLM 配置
+        limit: 最大条数
 
     Returns:
-        NewsItem 列表（尚未填充 sentiment 和 confidence 字段，
-        需调用 analysis/sentiment.py 的 analyze() 完成情感分析）
+        NewsItem 列表（不含情感标签，需 FinBERT 分析）
     """
-    if market == "A":
-        return _fetch_news_a(code, limit)
-    elif market == "US":
-        return _fetch_news_us(code, limit)
-    return []
+    # 1. 查缓存：今天至少有 5 条新闻就直接用
+    today_str = date.today().isoformat()
+    cached = Database().get_news(code, limit=50)
+    today_cached = [n for n in cached if str(n.date)[:10] == today_str]
+    if len(today_cached) >= limit:
+        recent = sorted(cached, key=lambda n: str(n.date), reverse=True)[:limit]
+        logger.info(f"新闻缓存命中: {len(recent)} 条 (今日 {len(today_cached)} 条)")
+        return recent
 
+    # 2. 调 LLM 获取
+    logger.info(f"缓存不足 (今日 {len(today_cached)} 条)，调用 LLM...")
 
-def _fetch_news_a(code: str, limit: int = 15) -> list[NewsItem]:
-    """
-    通过 akshare 获取 A 股个股新闻。
+    prompt_template = _NEWS_PROMPT_EN if market == "US" else _NEWS_PROMPT_CN
+    prompt = prompt_template.format(name=name, code=code, limit=limit)
 
-    数据来源：东方财富财经新闻
-    接口：akshare.stock_news_em(symbol=code)
-    返回字段：发布日期、标题、来源
-
-    注意：
-      - akshare 的新闻接口返回的列名可能因版本不同而变化，
-        代码使用 .get() 做容错处理。
-      - 如果某条新闻缺少日期，回退到当天日期。
-    """
     try:
-        import akshare as ak
-        with _without_system_proxy():
-            df = ak.stock_news_em(symbol=code)
-        if df is None or df.empty:
-            logger.warning(f"No news found for A-stock {code}")
-            return []
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=120.0)
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=2000,
+        )
+        response = completion.choices[0].message.content or ""
+        logger.info(f"LLM 返回 {len(response)} 字符")
 
-        news_list = []
-        for _, row in df.head(limit).iterrows():
-            news_list.append(NewsItem(
-                code=code,
-                # 日期容错：优先取"发布时间"列，否则取今天
-                date=str(row.get("发布时间", date.today().isoformat()))[:10],
-                title=str(row.get("标题", row.get("title", ""))),
-                source=str(row.get("文章来源", row.get("source", ""))),
-            ))
-        logger.info(f"Fetched {len(news_list)} news for A-stock {code}")
-        return news_list
+        items = _parse_llm_json(response, code, limit)
+        logger.info(f"LLM 新闻: 解析出 {len(items)} 条")
+        if items:
+            Database().insert_news(items)
+        else:
+            logger.warning(f"LLM 新闻解析为空，原始响应前 300 字符: {response[:300]}")
+        return items
+
     except Exception as e:
-        logger.error(f"Failed to fetch news for A-stock {code}: {e}")
+        logger.error(f"LLM 新闻获取失败: {e}", exc_info=True)
         return []
 
 
-def _fetch_news_us(code: str, limit: int = 15) -> list[NewsItem]:
-    """
-    通过 yfinance 获取美股新闻。
+def _parse_llm_json(response: str, code: str, limit: int) -> list[NewsItem]:
+    """解析 LLM 返回的 JSON 新闻列表。"""
+    # 去掉 ```json ... ``` 包裹
+    response = re.sub(r"```(?:json)?\s*", "", response)
+    response = re.sub(r"\s*```", "", response)
+    response = response.strip()
 
-    数据来源：Yahoo Finance 聚合新闻
-    接口：yfinance.Ticker.news
+    # 找到 JSON 数组
+    match = re.search(r"\[\s*\{[\s\S]*\}\s*\]", response)
+    json_str = match.group(0) if match else response
 
-    反爬策略：
-      - 请求前先等待 2~5 秒随机延迟，模拟人工操作
-      - 遇到限流（429 / Rate limited）时指数退避重试最多 3 次
-      - 重试间隔：5s → 10s → 20s
-    """
-    import time as _time
-    import random as _random
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError:
+        logger.warning(f"JSON 解析失败: {json_str[:300]}")
+        return []
 
-    # 模拟人工操作：5~8 秒随机延迟（绕过 yfinance 反爬）
-    delay = _random.uniform(1.0, 3.0)
-    logger.info(f"等待 {delay:.1f}s 后获取美股新闻（防限流）...")
-    _time.sleep(delay)
-
-    last_error = None
-    for attempt in range(3):
+    items = []
+    for item in data[:limit]:
         try:
-            _apply_proxy()
-            import yfinance as yf
-            ticker = yf.Ticker(code)
-            raw_news = ticker.news
-            if not raw_news:
-                logger.warning(f"No news found for US stock {code}")
-                return []
-
-            news_list = []
-            for item in raw_news[:limit]:
-                content = item.get("content", {})
-                pub_date = content.get("pubDate", 0)
-                if isinstance(pub_date, (int, float)):
-                    date_str = datetime.fromtimestamp(pub_date).strftime("%Y-%m-%d")
-                else:
-                    date_str = str(pub_date)[:10] if pub_date else date.today().isoformat()
-                news_list.append(NewsItem(
-                    code=code,
-                    date=date_str,
-                    title=content.get("title", ""),
-                    source=content.get("provider", {}).get("displayName", ""),
-                ))
-            logger.info(f"Fetched {len(news_list)} news for US stock {code}")
-            return news_list
-
-        except Exception as e:
-            last_error = e
-            msg = str(e)
-            is_rate_limited = any(kw in msg for kw in [
-                "Rate limited", "Too Many Requests", "rate limited", "429",
-            ])
-            if is_rate_limited and attempt < 2:
-                wait = 10 * (2 ** attempt) + _random.uniform(0, 3)
-                logger.warning(
-                    f"美股新闻被限流，{wait:.0f}s 后重试 ({attempt+2}/3)..."
-                )
-                _time.sleep(wait)
-                continue
-            if attempt < 2:
-                _time.sleep(3)
-                continue
-            break
-
-    logger.warning(f"Failed to fetch news for US stock {code} after retries: {last_error}")
-    return []
+            items.append(NewsItem(
+                code=code,
+                date=str(item.get("date", ""))[:10],
+                title=str(item.get("title", "")),
+                source=str(item.get("source", "")),
+            ))
+        except (KeyError, ValueError, TypeError):
+            continue
+    # 确保按日期倒序（代码层兜底，即使 LLM 返回顺序有误也纠正）
+    items.sort(key=lambda n: str(n.date), reverse=True)
+    return items

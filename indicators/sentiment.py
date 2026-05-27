@@ -94,10 +94,24 @@ def _get_pipeline():
 
 
 class _SimpleFallbackAnalyzer:
-    POSITIVE_WORDS = {"涨", "增长", "利好", "突破", "盈利", "升", "牛",
-                       "up", "gain", "profit", "growth", "bull", "breakthrough"}
-    NEGATIVE_WORDS = {"跌", "下降", "利空", "亏损", "风险", "降", "熊", "暴跌",
-                       "down", "loss", "risk", "bear", "decline", "crash"}
+    POSITIVE_WORDS = {
+        "涨", "增长", "利好", "突破", "盈利", "升", "牛", "反弹",
+        "创新高", "超预期", "回购", "分红", "加仓", "买入", "增持",
+        "业绩增长", "营收增长", "净利润", "市场份额", "新产品",
+        "上调", "看好", "助力", "达成", "确保", "爆发", "乐观",
+        "强于", "跑赢", "领涨", "扩张", "合作", "发布", "升级",
+        "up", "gain", "profit", "growth", "bull", "breakthrough",
+        "positive", "upgrade", "beat", "rally", "surge", "rise",
+    }
+    NEGATIVE_WORDS = {
+        "跌", "下降", "利空", "亏损", "风险", "降", "熊", "暴跌",
+        "创新低", "低于预期", "减持", "抛售", "减仓", "卖出", "下滑",
+        "业绩下滑", "营收下滑", "裁", "诉讼", "调查", "罚款",
+        "下调", "看空", "受限", "限制", "受影响", "警告", "悲观",
+        "弱于", "跑输", "领跌", "萎缩", "违约", "暴雷", "退市",
+        "down", "loss", "risk", "bear", "decline", "crash",
+        "negative", "downgrade", "miss", "plunge", "drop", "fall",
+    }
 
     def __call__(self, texts, **_kwargs):
         results = []
@@ -145,6 +159,20 @@ def analyze(news_list: list[NewsItem]) -> list[NewsItem]:
             item.sentiment = label.lower()
         item.confidence = round(score, 4)
 
+    # FinBERT 全判 neutral（常见于中文新闻）→ 降级为中文关键词匹配
+    all_neutral = all(n.sentiment == "neutral" for n in news_list)
+    if all_neutral and len(news_list) > 0:
+        logger.info("FinBERT 全部判为 neutral，切换为中文关键词匹配")
+        fallback = _SimpleFallbackAnalyzer()
+        fb_results = fallback(texts)
+        for item, result in zip(news_list, fb_results):
+            label = result.get("label", "neutral")
+            item.sentiment = label if label in ("positive", "negative") else "neutral"
+            item.confidence = result.get("score", 0.5)
+            logger.info(
+                f"  [{item.sentiment:<8} {item.confidence:.2f}] {item.title[:50]}"
+            )
+
     return news_list
 
 
@@ -169,7 +197,8 @@ def aggregate(news_list: list[NewsItem]) -> dict:
     top_news = []
     for n in news_list[:5]:
         emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(n.sentiment, "⚪")
-        top_news.append(f"- {emoji} [{n.date}] {n.title}")
+        src = f" — {n.source}" if n.source else ""
+        top_news.append(f"- {emoji} [{n.date}] {n.title}{src}")
 
     return {"total": total, "positive": pos, "negative": neg, "neutral": neu,
             "sentiment_score": round(score, 4), "summary": summary, "top_news": "\n".join(top_news)}

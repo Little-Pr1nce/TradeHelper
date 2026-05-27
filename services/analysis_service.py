@@ -23,7 +23,6 @@ from data.news_fetcher import fetch_news
 from data.models import StockInfo, PriceData, AnalysisReport
 from indicators.technical import calc_all_indicators, summarize
 from indicators.sentiment import analyze, aggregate
-from indicators.constants import NEWS_CACHE_HOURS, NEWS_FETCH_LIMIT
 from core.pipeline import run_pipeline, AnalysisResult as PipelineResult
 from report.chart import generate_kline_chart
 from report.generator import generate_report
@@ -125,7 +124,7 @@ class AnalysisService:
         if _stop(): return self._empty_response(code)
 
         # ---- 4. 获取新闻情感数据 ----
-        news_agg = self._fetch_news(code, request.market, _progress)
+        news_agg = self._fetch_news(code, request.market, _progress, info.name)
         if _stop(): return self._empty_response(code)
 
         news_df = self._build_news_df(code)
@@ -263,30 +262,23 @@ class AnalysisService:
         logger.info(f"缓存命中: {len(prices)} 条 ({prices[0].date}~{last_date}), 无需刷新")
         return False
 
-    def _fetch_news(self, code: str, market: str, progress) -> dict:
+    def _fetch_news(self, code: str, market: str, progress,
+                    name: str = "") -> dict:
         progress("正在加载新闻...")
-        cached = Database().get_recent_news_with_sentiment(
-            code, hours=NEWS_CACHE_HOURS, limit=NEWS_FETCH_LIMIT
+        from config.settings import Settings
+        settings = Settings()
+        news_list = fetch_news(
+            name=name, code=code, market=market,
+            model=settings.get("llm_model", ""),
+            base_url=settings.get("llm_base_url", ""),
+            api_key=settings.get("llm_api_key", ""),
         )
-        if cached:
-            logger.info(f"命中新闻缓存 {len(cached)} 条")
-            return aggregate(cached)
-
-        news_list = []
-        try:
-            progress("正在获取新闻...")
-            news_list = fetch_news(code, market, limit=NEWS_FETCH_LIMIT)
-        except Exception as e:
-            logger.warning(f"新闻抓取失败: {e}")
         logger.info(f"新闻: {len(news_list)} 条")
 
         if news_list:
             progress("正在进行新闻情感分析...")
             news_list = analyze(news_list)
-            try:
-                Database().insert_news(news_list)
-            except Exception as e:
-                logger.warning(f"新闻持久化失败: {e}")
+            Database().insert_news(news_list)
 
         news_agg = aggregate(news_list)
         logger.info(f"情感得分: {news_agg['sentiment_score']:.2f}")
