@@ -101,17 +101,37 @@ CREATE TABLE IF NOT EXISTS news_sentiment (
 
 CREATE INDEX IF NOT EXISTS idx_news_code ON news_sentiment(code);
 CREATE INDEX IF NOT EXISTS idx_news_date ON news_sentiment(date);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_news_unique ON news_sentiment(code, date, title);
 """
 
 
-def _dedupe_news(conn: sqlite3.Connection):
-    """合并历史重复新闻（同 code+date+title 保留 id 最小的一条）。"""
+def _dedupe_news(conn: sqlite3.Connection) -> int:
+    """合并历史重复新闻，优先保留有 sentiment 且 confidence 更高的记录。"""
+    before = conn.execute("SELECT COUNT(*) FROM news_sentiment").fetchone()[0]
     conn.execute("""
-        DELETE FROM news_sentiment WHERE id NOT IN (
-            SELECT MIN(id) FROM news_sentiment GROUP BY code, date, title
+        DELETE FROM news_sentiment WHERE id IN (
+            SELECT id FROM (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY code, date, title
+                       ORDER BY (sentiment != '') DESC, confidence DESC, id
+                       ) AS rn
+                FROM news_sentiment
+            ) WHERE rn > 1
         )
     """)
+    removed = before - conn.execute("SELECT COUNT(*) FROM news_sentiment").fetchone()[0]
+    if removed:
+        logger.info(f"DB migrate: deduped {removed} duplicate news rows")
+    return removed
+
+
+def _ensure_unique_news_index(conn: sqlite3.Connection):
+    """去重后再建唯一索引，避免旧库重复数据导致启动失败。"""
+    _dedupe_news(conn)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_news_unique "
+        "ON news_sentiment(code, date, title)"
+    )
 
 
 class Database:
@@ -170,11 +190,7 @@ class Database:
         # 老版本数据库 schema 迁移
         _ensure_column(conn, "reports", "chart_path", "TEXT", "''")
         _ensure_column(conn, "news_sentiment", "content", "TEXT", "''")
-        _dedupe_news(conn)
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_news_unique "
-            "ON news_sentiment(code, date, title)"
-        )
+        _ensure_unique_news_index(conn)
         conn.commit()
         return conn
 

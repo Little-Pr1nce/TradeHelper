@@ -135,6 +135,44 @@ def test_parse_finnhub_entry():
     assert item.source == "Bloomberg"
 
 
+def test_dedupe_before_unique_index():
+    """模拟旧库含重复新闻，初始化时不应抛 IntegrityError。"""
+    tmpdir = tempfile.mkdtemp()
+    db_path = os.path.join(tmpdir, "dup.db")
+    Database._instance = None
+
+    conn = __import__("sqlite3").connect(db_path)
+    conn.executescript("""
+        CREATE TABLE news_sentiment (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT, date TEXT, title TEXT,
+            source TEXT, sentiment TEXT, confidence REAL
+        );
+    """)
+    conn.executemany(
+        "INSERT INTO news_sentiment (code, date, title, source, sentiment, confidence) VALUES (?,?,?,?,?,?)",
+        [
+            ("600519", "2026-05-27", "Dup", "A", "", 0.0),
+            ("600519", "2026-05-27", "Dup", "B", "positive", 0.9),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database.init(db_path)
+    row = db.execute(
+        "SELECT COUNT(*), sentiment FROM news_sentiment WHERE code=? AND title=?",
+        ("600519", "Dup"),
+    ).fetchone()
+    assert row[0] == 1, f"去重后应剩 1 条，实际 {row[0]}"
+    assert row[1] == "positive", "应保留带 sentiment 的记录"
+
+    indexes = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_news_unique'"
+    ).fetchall()
+    assert len(indexes) == 1
+
+
 if __name__ == "__main__":
     tests = [
         test_parse_llm_json_markdown,
@@ -146,6 +184,7 @@ if __name__ == "__main__":
         test_merge_news_dedupes,
         test_parse_yfinance_entry,
         test_parse_finnhub_entry,
+        test_dedupe_before_unique_index,
     ]
     passed = 0
     for t in tests:
