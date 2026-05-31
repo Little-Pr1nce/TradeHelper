@@ -35,6 +35,7 @@ def build_user_prompt(
     bt_table: str,
     alpha_text: str,
     data_range: str = "",
+    extra_sections: str = "",
 ) -> str:
     """构建 LLM user prompt（将各模块数据拼接为自然语言输入）。"""
     name = stock_info.get("name", "")
@@ -67,6 +68,7 @@ def build_user_prompt(
 重点新闻：
 {top_news}
 
+{extra_sections}
 ## 三策略回测对比
 {bt_summary}
 

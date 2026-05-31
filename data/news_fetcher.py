@@ -16,9 +16,9 @@ from data.database import Database
 
 logger = logging.getLogger(__name__)
 
-_NEWS_PROMPT_EN = """You are a professional financial news editor. Search for the latest real news about {name} ({code}) from reputable financial websites (Reuters, Bloomberg, CNBC, etc.).
+_NEWS_PROMPT_EN = """You are a financial news editor. Provide the most recent real news about {name} ({code}) from reputable sources (Reuters, Bloomberg, CNBC, etc.).
 
-Return {limit} news items sorted by date descending (newest first). Each item must include: date (YYYY-MM-DD), title, full content, source name.
+Return 5 news items sorted by date descending (newest first). Each item must include: date (YYYY-MM-DD), title, full content, source name.
 Output MUST be in English. Output ONLY the JSON array below, nothing else:
 
 [
@@ -26,9 +26,9 @@ Output MUST be in English. Output ONLY the JSON array below, nothing else:
   {{"date": "2026-05-26", "title": "News Title", "content": "Full news content here", "source": "Bloomberg"}}
 ]"""
 
-_NEWS_PROMPT_CN = """你是一位专业的财经新闻编辑。请从正规财经网站（东方财富、财联社、证券时报、 Reuters、Bloomberg 等）获取关于 {name}（{code}）近一周的真实新闻。
+_NEWS_PROMPT_CN = """你是一位财经新闻编辑。请提供关于 {name}（{code}）的最新真实新闻，来源需为正规渠道（东方财富、财联社、证券时报、Reuters、Bloomberg 等）。
 
-返回 {limit} 条新闻，按日期从新到旧排列。每条包含：日期(YYYY-MM-DD)、标题、完整内容、来源名称。
+返回 5 条新闻，按日期从新到旧排列。每条包含：日期(YYYY-MM-DD)、标题、完整内容、来源名称。
 请用中文输出。只输出以下 JSON 数组，不要其他内容：
 
 [
@@ -68,7 +68,7 @@ def fetch_news(
     logger.info(f"缓存不足 (今日 {len(today_cached)} 条)，调用 LLM...")
 
     prompt_template = _NEWS_PROMPT_EN if market == "US" else _NEWS_PROMPT_CN
-    prompt = prompt_template.format(name=name, code=code, limit=limit)
+    prompt = prompt_template.format(name=name, code=code)
 
     try:
         from openai import OpenAI

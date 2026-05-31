@@ -137,11 +137,30 @@ class AnalysisService:
         else:
             w_tech, w_news = 0.6, 0.4
 
+        # ---- 4.5. 获取基本面数据（估值 + 财务） ----
+        fundamental_data = None
+        try:
+            from config.settings import Settings
+            from alpha.fundamental import fetch_fundamental_factors
+            settings = Settings()
+            _progress("正在获取基本面数据...")
+            fundamental_data = fetch_fundamental_factors(
+                name=info.name, code=code, market=request.market,
+                model=settings.get("llm_model", ""),
+                base_url=settings.get("llm_base_url", ""),
+                api_key=settings.get("llm_api_key", ""),
+            )
+        except Exception as e:
+            logger.warning(f"基本面数据获取失败: {e}")
+
         # ---- 5. 执行分析管道 ----
         _progress("正在执行量化分析...")
         market_type = detect_market(code) or request.market
-        pipeline_result = run_pipeline(df, news_df, market=market_type,
-                                       w_tech=w_tech, w_news=w_news)
+        pipeline_result = run_pipeline(
+            df, news_df, market=market_type,
+            w_tech=w_tech, w_news=w_news,
+            fundamental_data=fundamental_data,
+        )
         if _stop(): return self._empty_response(code)
 
         # ---- 6. 提取因子得分 ----
@@ -156,14 +175,29 @@ class AnalysisService:
         _progress("正在生成分析报告...")
         tech = summarize(pipeline_result.df, info.name)
 
-        # 提取实际回测数据的日期范围（而非请求的周期标签）
+        # 数据日期范围
         dates = pipeline_result.df["date"]
         data_range = f"{dates.iloc[0].strftime('%Y-%m-%d')} ~ {dates.iloc[-1].strftime('%Y-%m-%d')}"
+
+        # 盘口数据（实时信号，仅 itick）
+        depth_factor = None
+        if request.data_source == "custom":
+            try:
+                _progress("正在获取实时盘口...")
+                from alpha.depth_factor import fetch_depth_factor
+                from config.settings import Settings as _S
+                depth_factor = fetch_depth_factor(
+                    code, request.market, _S().get("paid_api_token", ""),
+                )
+            except Exception as e:
+                logger.warning(f"盘口数据获取失败: {e}")
 
         report_content = generate_report(
             info.to_dict(), tech, news_agg,
             pipeline_result.backtest, alpha_stats,
-            data_range=data_range,
+            data_range=data_range, depth_factor=depth_factor,
+            validation=pipeline_result.validation,
+            fundamental_data=pipeline_result.fundamental_data,
         )
         if not report_content:
             report_content = "报告生成失败，请稍后重试。"

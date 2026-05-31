@@ -77,6 +77,9 @@ def generate_report(
     backtest_results: dict,
     alpha_stats: dict | None = None,
     data_range: str = "",
+    depth_factor: dict | None = None,
+    validation: dict | None = None,
+    fundamental_data: dict | None = None,
 ) -> str:
     """
     生成完整分析报告。
@@ -97,7 +100,8 @@ def generate_report(
     if not api_key and "localhost" not in base_url and "127.0.0.1" not in base_url:
         return _generate_fallback_report(
             stock_info, technical_summary, news_aggregation,
-            backtest_results, alpha_stats, data_range,
+            backtest_results, alpha_stats, data_range, depth_factor,
+            validation, fundamental_data,
         )
 
     # 构建 LLM 提示词
@@ -116,9 +120,27 @@ def generate_report(
         )
 
     data_info = f"回测数据范围：{data_range}" if data_range else ""
+    # 构建额外数据段（因子检验 + 基本面 + 盘口）
+    extra = ""
+    if validation:
+        rows = []
+        for col, v in validation.items():
+            grade = v.get("grade", "?")
+            mult = v.get("multiplier", 1.0)
+            status = "全权" if mult >= 1.0 else ("半权" if mult >= 0.5 else "剔除")
+            rows.append(f"| {col} | {v.get('samples', 0)} | {v.get('IC', 0):+.4f} | {v.get('IR', 0):+.2f} | {grade} | {status} |")
+        if rows:
+            extra += "\n## 因子有效性检验\n\n| 因子 | 样本数 | IC | IR | 评级 | 处置 |\n|------|--------|-----|------|------|------|\n" + "\n".join(rows) + "\n"
+    if fundamental_data and fundamental_data.get("style_factors"):
+        sf = fundamental_data["style_factors"]
+        ff = fundamental_data["fundamental_factors"]
+        extra += f"\n## 基本面与估值因子\n- PE(TTM)历史分位: {sf['pe_percentile']:.1%}\n- PB历史分位: {sf['pb_percentile']:.1%}\n- ROE: {ff['roe']:.1%}\n- 毛利率: {ff['gross_margin']:.1%}\n- 资产负债率: {ff['debt_ratio']:.1%}\n- 净利润同比: {ff['net_profit_yoy']:+.1%}\n- 营收同比: {ff['revenue_yoy']:+.1%}\n"
+    if depth_factor and depth_factor.get("available"):
+        d = depth_factor
+        extra += f"\n## 实时盘口数据\n- 买盘总量: {d['bid_volume']:,.0f}\n- 卖盘总量: {d['ask_volume']:,.0f}\n- 买卖比: {d['imbalance']:.2f}\n- 盘口信号得分: {d['depth_score']:+.3f}\n"
     user_prompt = build_user_prompt(
         stock_info, technical_summary, news_aggregation,
-        bt_summary, bt_table, alpha_text, data_info,
+        bt_summary, bt_table, alpha_text, data_info, extra,
     )
 
     full_prompt = SYSTEM_PROMPT + "\n\n" + user_prompt
@@ -164,14 +186,16 @@ def _generate_fallback_report(
     backtest_results: dict,
     alpha_stats: dict | None = None,
     data_range: str = "",
+    depth_factor: dict | None = None,
+    validation: dict | None = None,
+    fundamental_data: dict | None = None,
 ) -> str:
-    """生成回退报告（不依赖 LLM 的模板拼接方案）。"""
+    """生成完整中文分析报告（本地模板）。"""
     name = stock_info.get("name", "")
     code = stock_info.get("code", "")
     market = stock_info.get("market", "")
     industry = stock_info.get("industry", "")
     description = stock_info.get("description", "")
-
     news_text = news_aggregation.get("summary", "")
     top_news = news_aggregation.get("top_news", "")
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -180,17 +204,57 @@ def _generate_fallback_report(
     # 数据范围
     data_info = f"\n> 📅 回测数据范围：{data_range}" if data_range else ""
     if data_range:
-        data_info += "\n> ⚠️ 以上为实际回测使用的数据日期，可能因数据源限制与所选回测周期不完全一致"
+        data_info += "\n> ⚠️ 实际数据范围可能因数据源限制与所选周期不完全一致"
 
-    # Alpha 因子得分
+    # ── Alpha 因子统计 ──
     alpha_str = ""
     if alpha_stats:
         alpha_str = (
-            f"\n### 因子得分统计\n"
             f"- 最新 Final_Score: **{alpha_stats.get('latest', 0):.3f}**\n"
             f"- 回测期均值: {alpha_stats.get('mean', 0):.3f}\n"
             f"- 标准差: {alpha_stats.get('std', 0):.3f}\n"
-            f"- 得分范围: [-1, +1]，正值偏多，负值偏空\n"
+        )
+
+    # ── 因子有效性检验 ──
+    validation_str = ""
+    if validation:
+        rows = []
+        for col, v in validation.items():
+            grade = v.get("grade", "?")
+            mult = v.get("multiplier", 1.0)
+            status = "✓ 全权" if mult >= 1.0 else ("△ 半权" if mult >= 0.5 else "✗ 剔除")
+            rows.append(
+                f"| {col} | {v.get('samples', 0)} | {v.get('IC', 0):+.4f} | "
+                f"{v.get('IR', 0):+.2f} | {grade} | {status} |"
+            )
+        if rows:
+            validation_str = (
+                "\n### 因子有效性检验\n\n"
+                "| 因子 | 样本数 | IC | IR | 评级 | 处置 |\n"
+                "|------|--------|-----|------|------|------|\n"
+                + "\n".join(rows) + "\n"
+            )
+
+    # ── 基本面因子 ──
+    fund_str = ""
+    if fundamental_data and fundamental_data.get("style_factors"):
+        sf = fundamental_data["style_factors"]
+        ff = fundamental_data["fundamental_factors"]
+        from alpha.fundamental import score_style_factor, score_fundamental_factor
+        s_score = score_style_factor(sf["pe_percentile"], sf["pb_percentile"])
+        f_score = score_fundamental_factor(**ff)
+
+        fund_str = (
+            f"\n### 基本面与估值因子\n\n"
+            f"**风格因子**（估值分位，高=偏空，低=偏多）\n"
+            f"| PE(TTM) 分位 | PB 分位 | 风格得分 |\n"
+            f"|-------------|---------|----------|\n"
+            f"| {sf['pe_percentile']:.1%} | {sf['pb_percentile']:.1%} | {s_score:+.3f} |\n\n"
+            f"**基本面因子**（最新一期）\n"
+            f"| ROE | 毛利率 | 资产负债率 | 净利同比 | 营收同比 | 基本面得分 |\n"
+            f"|-----|--------|-----------|----------|----------|----------|\n"
+            f"| {ff['roe']:.1%} | {ff['gross_margin']:.1%} | {ff['debt_ratio']:.1%} | "
+            f"{ff['net_profit_yoy']:+.1%} | {ff['revenue_yoy']:+.1%} | {f_score:+.3f} |\n"
         )
 
     # 策略对比表
@@ -198,7 +262,20 @@ def _generate_fallback_report(
     bt_summary = _build_backtest_summary(backtest_results)
 
     # 综合建议
-    recommendation = _derive_recommendation(backtest_results, alpha_stats)
+    recommendation = _derive_recommendation(backtest_results, alpha_stats, depth_factor)
+
+    # 盘口信息
+    depth_str = ""
+    if depth_factor and depth_factor.get("available"):
+        d = depth_factor
+        depth_str = (
+            f"\n---\n\n## 实时盘口分析\n\n"
+            f"- 买盘总量：{d['bid_volume']:,.0f} 股\n"
+            f"- 卖盘总量：{d['ask_volume']:,.0f} 股\n"
+            f"- 买卖比：{d['imbalance']:.2f}"
+            f"（{'买盘占优' if d['imbalance'] > 1.05 else '卖盘占优' if d['imbalance'] < 0.95 else '基本平衡'}）\n"
+            f"- 盘口信号得分：{d['depth_score']:+.3f}\n"
+        )
 
     report = f"""# {name}（{code}）分析报告
 
@@ -215,8 +292,8 @@ def _generate_fallback_report(
 
 ## 二、Alpha 因子分析（多因子量化模型）
 
-本报告采用多因子打分模型，综合技术面（权重 60%）与新闻情感面（权重 40%），
-通过 Z-Score 标准化和 tanh 映射合成 Final_Score ∈ [-1, +1]。
+权重：技术 35% + 风格 15% + 基本面 25% + 新闻 25%（含基本面时）
+或无基本面时：技术 60% + 新闻 40%。因子经 IC/IR 检验，D 级剔除、C 级半权。
 
 {alpha_str}
 
@@ -245,6 +322,8 @@ def _generate_fallback_report(
 
 {bt_summary}
 
+{depth_str}
+
 ---
 
 ## 六、综合建议
@@ -259,22 +338,30 @@ def _generate_fallback_report(
     return report
 
 
-def _derive_recommendation(backtest_results: dict, alpha_stats: dict | None) -> str:
-    """基于回测结果和因子得分推导操作建议。"""
+def _derive_recommendation(backtest_results: dict, alpha_stats: dict | None,
+                           depth_factor: dict | None = None) -> str:
+    """基于回测结果、因子得分和盘口数据推导操作建议。"""
     if not backtest_results:
         return "数据不足，建议观望。"
 
-    # 统计正收益策略数量
     positive = sum(1 for r in backtest_results.values() if r.total_return > 0)
     total = len(backtest_results)
-
     latest_score = alpha_stats.get("latest", 0) if alpha_stats else 0
 
+    # 盘口信号
+    depth_note = ""
+    if depth_factor and depth_factor.get("available"):
+        d = depth_factor
+        if d["imbalance"] > 1.2:
+            depth_note = "，实时盘口买盘显著占优"
+        elif d["imbalance"] < 0.8:
+            depth_note = "，实时盘口卖盘显著占优"
+
     if positive == total and latest_score > 0.3:
-        return "多个策略回测表现正向，当前 Alpha 因子偏多，建议关注买入机会。"
+        return f"多个策略回测表现正向，当前 Alpha 因子偏多{depth_note}，建议关注买入机会。"
     elif positive >= total / 2:
-        return "部分策略表现正向，建议谨慎关注，等待更明确的趋势信号。"
+        return f"部分策略表现正向{depth_note}，建议谨慎关注，等待更明确的趋势信号。"
     elif latest_score < -0.3:
-        return "当前 Alpha 因子偏空，多数策略表现不佳，建议观望或减仓。"
+        return f"当前 Alpha 因子偏空，多数策略表现不佳{depth_note}，建议观望或减仓。"
     else:
-        return "策略表现分化，建议观望，等待趋势明朗后再做决策。"
+        return f"策略表现分化{depth_note}，建议观望，等待趋势明朗后再做决策。"

@@ -27,6 +27,8 @@ class AnalysisResult:
     comparison: dict                          # compare_strategies() 的输出
     rank_ic: dict                             # Rank IC 统计 {rank_ic_mean, ic_ir}
     benchmark_return: float = 0.0             # 买入持有基准收益
+    validation: dict = field(default_factory=dict)  # 因子 IC/IR 检验结果
+    fundamental_data: dict | None = None      # LLM 基本面数据
 
 
 def run_pipeline(
@@ -37,6 +39,7 @@ def run_pipeline(
     strategy_names: list[str] | None = None,
     w_tech: float = 0.6,
     w_news: float = 0.4,
+    fundamental_data: dict | None = None,
 ):
     """
     执行完整的量化分析计算管道（纯计算，无 I/O）。
@@ -76,7 +79,8 @@ def run_pipeline(
 
     # ---- ② Alpha 因子打分 ----
     logger.info(f"  [管道 2/4] Alpha 多因子打分 (w_tech={w_tech}, w_news={w_news})...")
-    df = calc_final_score(df, news_df, w_tech=w_tech, w_news=w_news)
+    df = calc_final_score(df, news_df, w_tech=w_tech, w_news=w_news,
+                          fundamental_data=fundamental_data)
 
     # ---- ③ Rank IC 计算 ----
     logger.info("  [管道 3/4] 计算 Rank IC（因子有效性）...")
@@ -125,10 +129,19 @@ def run_pipeline(
     logger.info(f"管道完成: 基准收益={benchmark_return*100:+.2f}%")
     logger.info("=" * 50)
 
+    # 提取因子检验结果
+    validation = {}
+    norm_cols = [c for c in df.columns if c.endswith("_norm")]
+    if norm_cols and "close" in df.columns and len(df) >= 100:
+        from alpha.validation import validate_factors
+        validation = validate_factors(df)
+
     return AnalysisResult(
         df=df,
         backtest=results,
         comparison=comparison,
         rank_ic=rank_ic,
         benchmark_return=benchmark_return,
+        validation=validation,
+        fundamental_data=fundamental_data,
     )
