@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
     "custom_api_endpoint": "",
     "custom_api_key": "",
     "paid_api_token": "",        # 付费数据源 token（如 itick）
+    "finnhub_api_key": "",       # Finnhub 美股新闻（免费档 60 次/分钟，https://finnhub.io）
     "proxy": "",
 }
 

@@ -93,6 +93,13 @@ def _get_pipeline():
     return _sentiment_pipeline
 
 
+def _news_text(item: NewsItem) -> str:
+    """拼接标题与正文摘要，供情感模型分析（截断至 512 字符）。"""
+    if item.content:
+        return f"{item.title} {item.content}"[:512]
+    return item.title[:512]
+
+
 class _SimpleFallbackAnalyzer:
     POSITIVE_WORDS = {
         "涨", "增长", "利好", "突破", "盈利", "升", "牛", "反弹",
@@ -134,7 +141,7 @@ def analyze(news_list: list[NewsItem]) -> list[NewsItem]:
     from indicators.constants import SENTIMENT_BATCH_SIZE
 
     pipeline = _get_pipeline()
-    texts = [n.title for n in news_list]
+    texts = [_news_text(n) for n in news_list]
 
     # 拆批推理，避免一次性传入过多文本卡死 UI 线程
     raw_results: list[dict] = []

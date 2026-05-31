@@ -134,6 +134,7 @@ class NewsItem:
       - date:       新闻发布日期
       - title:      新闻标题
       - source:     新闻来源（如"东方财富"、"Reuters"）
+      - content:    新闻正文摘要（LLM 返回，用于情感分析）
       - sentiment:  情感分类结果（"positive"/"negative"/"neutral"，分析后填充）
       - confidence: 情感分类置信度（0.0-1.0，分析后填充）
     """
@@ -141,6 +142,7 @@ class NewsItem:
     date: str
     title: str
     source: str = ""
+    content: str = ""
     sentiment: str = ""
     confidence: float = 0.0
 

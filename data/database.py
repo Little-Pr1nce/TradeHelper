@@ -101,7 +101,17 @@ CREATE TABLE IF NOT EXISTS news_sentiment (
 
 CREATE INDEX IF NOT EXISTS idx_news_code ON news_sentiment(code);
 CREATE INDEX IF NOT EXISTS idx_news_date ON news_sentiment(date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_news_unique ON news_sentiment(code, date, title);
 """
+
+
+def _dedupe_news(conn: sqlite3.Connection):
+    """合并历史重复新闻（同 code+date+title 保留 id 最小的一条）。"""
+    conn.execute("""
+        DELETE FROM news_sentiment WHERE id NOT IN (
+            SELECT MIN(id) FROM news_sentiment GROUP BY code, date, title
+        )
+    """)
 
 
 class Database:
@@ -157,8 +167,14 @@ class Database:
         conn.execute("PRAGMA journal_mode=WAL")    # Write-Ahead Logging
         conn.execute("PRAGMA foreign_keys=ON")      # 启用外键约束
         conn.executescript(CREATE_TABLES_SQL)       # 自动建表
-        # 老版本数据库 schema 迁移（chart_path 是后期新增字段）
+        # 老版本数据库 schema 迁移
         _ensure_column(conn, "reports", "chart_path", "TEXT", "''")
+        _ensure_column(conn, "news_sentiment", "content", "TEXT", "''")
+        _dedupe_news(conn)
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_news_unique "
+            "ON news_sentiment(code, date, title)"
+        )
         conn.commit()
         return conn
 
@@ -354,16 +370,22 @@ class Database:
 
     def insert_news(self, news_list: list[NewsItem]):
         """
-        批量插入新闻情感分析结果。
+        批量 upsert 新闻（按 code+date+title 去重，更新情感标签与正文）。
 
         Args:
             news_list: NewsItem 列表
         """
         if not news_list:
             return
-        sql = """INSERT OR REPLACE INTO news_sentiment (code, date, title, source, sentiment, confidence)
-                 VALUES (?, ?, ?, ?, ?, ?)"""
-        data = [(n.code, n.date, n.title, n.source, n.sentiment, n.confidence)
+        sql = """INSERT INTO news_sentiment (code, date, title, source, content, sentiment, confidence)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(code, date, title) DO UPDATE SET
+                   source=excluded.source,
+                   content=excluded.content,
+                   sentiment=excluded.sentiment,
+                   confidence=excluded.confidence"""
+        data = [(n.code, n.date, n.title, n.source, n.content or "",
+                 n.sentiment, n.confidence)
                 for n in news_list]
         self._executemany_write(sql, data)
 

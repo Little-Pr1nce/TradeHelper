@@ -306,12 +306,19 @@ class AnalysisService:
             model=settings.get("llm_model", ""),
             base_url=settings.get("llm_base_url", ""),
             api_key=settings.get("llm_api_key", ""),
+            finnhub_api_key=settings.get("finnhub_api_key", ""),
         )
         logger.info(f"新闻: {len(news_list)} 条")
 
         if news_list:
-            progress("正在进行新闻情感分析...")
-            news_list = analyze(news_list)
+            needs_analysis = [n for n in news_list if not n.sentiment]
+            if needs_analysis:
+                progress("正在进行新闻情感分析...")
+                analyzed = analyze(needs_analysis)
+                analyzed_map = {(n.date, n.title): n for n in analyzed}
+                news_list = [
+                    analyzed_map.get((n.date, n.title), n) for n in news_list
+                ]
             Database().insert_news(news_list)
 
         news_agg = aggregate(news_list)
