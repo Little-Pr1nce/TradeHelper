@@ -115,6 +115,13 @@ class SettingsPage(ft.Container):
             can_reveal_password=True,
             hint_text="输入付费数据源的 API Token",
         )
+        self._finnhub_key = ft.TextField(
+            label="Finnhub API Key（美股新闻）",
+            value=settings.get("finnhub_api_key", ""),
+            password=True,
+            can_reveal_password=True,
+            hint_text="免费注册 https://finnhub.io，60次/分钟",
+        )
 
         # ========== 代理配置 ==========
         self._proxy_input = ft.TextField(
@@ -167,6 +174,7 @@ class SettingsPage(ft.Container):
                 self._custom_api_endpoint,
                 self._custom_api_key,
                 self._paid_api_token,
+                self._finnhub_key,
                 ft.Text("付费数据源 token 用于 itick 等专业金融数据 API。\n"
                         "选择「免费数据源」时无需填写。",
                         size=12, color=ft.Colors.GREY_600),
@@ -223,6 +231,7 @@ class SettingsPage(ft.Container):
         settings.set("custom_api_endpoint", self._custom_api_endpoint.value)
         settings.set("custom_api_key", self._custom_api_key.value)
         settings.set("paid_api_token", self._paid_api_token.value)
+        settings.set("finnhub_api_key", self._finnhub_key.value)
         settings.set("proxy", self._proxy_input.value)
         settings.save()
 

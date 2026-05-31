@@ -100,8 +100,7 @@ def _fetch_pe_pb_akshare(code: str, market: str) -> list[dict] | None:
                 return None
             col_map = {"日期": "date", "PE(TTM)": "pe", "市净率": "pb"}
         else:
-            # 美股 PE/PB 历史：stock_us_valuation_baidu 不稳定，跳过
-            return None
+            return _fetch_pe_pb_us_baidu(code)
 
         df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
         if "date" not in df.columns:
@@ -122,6 +121,41 @@ def _fetch_pe_pb_akshare(code: str, market: str) -> list[dict] | None:
     except Exception as e:
         logger.warning(f"akshare PE/PB 获取失败 ({code}): {e}")
         return None
+
+
+def _fetch_pe_pb_us_baidu(code: str) -> list[dict] | None:
+    """美股 PE/PB：直接用 requests 调百度 API（绕过 akshare 不跟进 301 的 bug）。"""
+    import requests, urllib.parse
+
+    indicators = ["市盈率(TTM)", "市净率"]
+    result = {}
+    for indicator in indicators:
+        try:
+            params = {
+                "openapi": "1", "dspName": "iphone", "tn": "tangram",
+                "client": "app", "query": indicator, "code": code,
+                "resource_id": "51171", "market": "us", "tag": indicator,
+                "chart_select": "近三年", "skip_industry": "1", "finClientType": "pc",
+            }
+            url = f"https://gushitong.baidu.com/opendata?{urllib.parse.urlencode(params)}"
+            resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            data = resp.json()
+            body = data["Result"][0]["DisplayData"]["resultData"]["tplData"]["result"]["chartInfo"][0]["body"]
+            for row in body:
+                d = row[0]
+                if d not in result:
+                    result[d] = {}
+                result[d]["date"] = d
+                result[d]["pe" if indicator == "市盈率(TTM)" else "pb"] = row[1]
+        except Exception as e:
+            logger.warning(f"百度 {indicator} 获取失败 ({code}): {e}")
+
+    if not result:
+        return None
+    items = [v for v in result.values() if v.get("pe") and v.get("pb")]
+    items.sort(key=lambda x: str(x["date"]))
+    return items
 
 
 # ── 得分计算 ──
