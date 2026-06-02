@@ -181,6 +181,7 @@ class AnalysisService:
 
         # 盘口数据（实时信号，仅 itick）
         depth_factor = None
+        realtime_quote = None
         if Settings().get("stock_data_token", ""):
             try:
                 _progress("正在获取实时盘口...")
@@ -190,6 +191,12 @@ class AnalysisService:
                 )
             except Exception as e:
                 logger.warning(f"盘口数据获取失败: {e}")
+            try:
+                _progress("正在获取实时报价...")
+                fetcher = get_stock_fetcher()
+                realtime_quote = fetcher.fetch_quote(code) if hasattr(fetcher, 'fetch_quote') else None
+            except Exception as e:
+                logger.warning(f"实时报价获取失败: {e}")
 
         report_content = generate_report(
             info.to_dict(), tech, news_agg,
@@ -199,6 +206,7 @@ class AnalysisService:
             fundamental_data=pipeline_result.fundamental_data,
             rank_ic=pipeline_result.rank_ic,
             benchmark_return=pipeline_result.benchmark_return,
+            realtime_quote=realtime_quote,
         )
         if not report_content:
             report_content = "报告生成失败，请稍后重试。"

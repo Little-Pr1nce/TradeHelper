@@ -583,6 +583,69 @@ class ItickStockFetcher(BaseStockFetcher):
             logger.error(f"itick fetch_price_history 失败 ({code}): {e}")
             return []
 
+    # ── fetch_quote ──
+
+    def fetch_quote(self, code: str) -> dict | None:
+        """
+        通过 itick /stock/quote 获取实时报价。
+
+        Returns:
+            {
+                "code": str,       # 产品代码
+                "latest": float,   # 最新价
+                "open": float,     # 开盘价
+                "high": float,     # 最高价
+                "low": float,      # 最低价
+                "prev_close": float,  # 前日收盘价
+                "change": float,   # 涨跌额
+                "change_pct": float,  # 涨跌幅百分比
+                "volume": float,   # 成交量
+                "amount": float,   # 成交额
+                "timestamp": int,  # 时间戳（毫秒）
+                "status": int,     # 交易状态 0:正常 1:停牌 2:退市 3:熔断
+            }
+            失败返回 None
+        """
+        from utils.market import detect_market
+        market = detect_market(code)
+        region = self._a_stock_region(code) if market == "A" else "US"
+
+        try:
+            data = self._get("/stock/quote", {"region": region, "code": code})
+            d = data.get("data", {})
+            if not d:
+                return None
+
+            latest = d.get("ld", 0)
+            prev_close = d.get("p", 0)
+            chp = d.get("chp", 0)
+            # chp 可能是 0-100 的百分数或 0-1 的小数，归一化
+            if isinstance(chp, (int, float)) and abs(chp) > 1 and prev_close > 0:
+                chp = chp / 100
+
+            quote = {
+                "code": str(d.get("s", code)),
+                "latest": float(latest) if latest else 0.0,
+                "open": float(d.get("o", 0)),
+                "high": float(d.get("h", 0)),
+                "low": float(d.get("l", 0)),
+                "prev_close": float(prev_close) if prev_close else 0.0,
+                "change": float(d.get("ch", 0)),
+                "change_pct": round(float(chp) if chp else 0.0, 4),
+                "volume": float(d.get("v", 0)),
+                "amount": float(d.get("tu", 0)),
+                "timestamp": d.get("t", 0),
+                "status": d.get("ts", 0),
+            }
+            logger.info(
+                f"itick 实时报价 ({code}): "
+                f"最新价={quote['latest']:.2f}, 涨跌={quote['change_pct']:+.2%}"
+            )
+            return quote
+        except Exception as e:
+            logger.error(f"itick fetch_quote 失败 ({code}): {e}")
+            return None
+
 
 def get_stock_fetcher() -> BaseStockFetcher:
     """
