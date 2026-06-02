@@ -27,11 +27,9 @@ DEFAULT_CONFIG = {
     "llm_base_url": "https://api.openai.com/v1",
     "llm_api_key": "",
     "llm_model": "gpt-4o",
-    "data_source": "free",
-    "custom_api_endpoint": "",
-    "custom_api_key": "",
-    "paid_api_token": "",        # 付费数据源 token（如 itick）
-    "finnhub_api_key": "",       # Finnhub 美股新闻（免费档 60 次/分钟，https://finnhub.io）
+    "stock_data_token": "",      # 股票数据源 Token（如 itick）
+    "news_token_us": "",         # 美股新闻 Token（如 Finnhub）
+    "news_token_a": "",          # A 股新闻 Token（如 Tushare）
     "proxy": "",
 }
 

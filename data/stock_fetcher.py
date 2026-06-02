@@ -2,9 +2,14 @@
 股票数据获取模块
 
 采用策略模式提供多数据源支持：
-  - FreeStockFetcher: 免费数据源（A 股多源降级，美股 yfinance + akshare 兜底）
+  - FreeStockFetcher: 免费数据源（A 股 akshare 多源降级，美股 Finnhub 信息）
+  - ItickStockFetcher: itick 付费 API（美股 K 线 + 盘口）
   - CustomStockFetcher: 用户自定义付费 API（占位，待扩展）
 
+美股数据流：K 线 → itick（需 stock_data_token），信息/新闻/基本面 → Finnhub（需 news_token_us）。
+A 股数据流保持不变：akshare。
+
+数据源由 get_stock_fetcher() 自动选择：有 stock_data_token → itick，否则免费。
 【扩展点】添加新的数据源：继承 BaseStockFetcher，在 get_stock_fetcher() 中注册。
 """
 
@@ -199,7 +204,10 @@ def _us_akshare_symbol_candidates(code: str) -> list[str]:
 
 
 class FreeStockFetcher(BaseStockFetcher):
-    """免费数据源：A 股新浪/雪球/东财多源降级；美股 akshare + yfinance。"""
+    """免费数据源：A 股新浪/雪球/东财多源降级；美股仅 Finnhub（需 finnhub_token，无 itick 则不提供 K 线）。"""
+
+    def __init__(self, finnhub_token: str = ""):
+        self._finnhub_token = (finnhub_token or "").strip()
 
     def fetch_stock_info(self, code: str) -> Optional[StockInfo]:
         from utils.market import detect_market
@@ -208,7 +216,6 @@ class FreeStockFetcher(BaseStockFetcher):
             if market == "A":
                 return self._fetch_a_stock_info(code)
             elif market == "US":
-                _apply_proxy()
                 return self._fetch_us_stock_info(code)
         except Exception as e:
             logger.error(f"Failed to fetch stock info for {code}: {e}")
@@ -257,31 +264,33 @@ class FreeStockFetcher(BaseStockFetcher):
         )
 
     def _fetch_us_stock_info(self, code: str) -> Optional[StockInfo]:
-        try:
-            import yfinance as yf
-            info = _retry(lambda: yf.Ticker(code).info, max_retries=2, label="yf.info")
-            if info and (info.get("shortName") or info.get("longName")):
-                name = info.get("shortName") or info.get("longName") or code
-                industry = info.get("industry") or info.get("sector") or ""
-                description = (info.get("longBusinessSummary") or "")[:2000]
-                return StockInfo(
-                    code=code, name=name, market="US",
-                    industry=industry, description=description,
-                    update_time=datetime.now().isoformat(),
-                )
-        except Exception as e:
-            logger.warning(f"yfinance info failed for US {code}: {e}")
-
-        with _without_system_proxy():
+        # ── 唯一来源：Finnhub /stock/profile2 ──
+        if self._finnhub_token:
             try:
-                import akshare as ak
-                df = ak.stock_individual_basic_info_us_xq(symbol=code.upper())
-                if df is not None and not df.empty:
-                    info = _stock_info_from_xq(df, code, "US")
-                    logger.info(f"US stock info for {code} via xueqiu")
-                    return info
+                from data.finnhub_client import fetch_company_profile
+                profile = fetch_company_profile(self._finnhub_token, code)
+                if profile:
+                    name = profile.get("name") or code
+                    industry = profile.get("industry") or profile.get("finnhubIndustry") or ""
+                    market_cap = profile.get("marketCapitalization", 0)
+                    description_parts = []
+                    for key in ("exchange", "country", "currency"):
+                        val = profile.get(key)
+                        if val:
+                            description_parts.append(f"{key}:{val}")
+                    if market_cap:
+                        description_parts.append(f"marketCap:{market_cap:.0f}")
+                    logger.info(f"US stock info for {code} via Finnhub ({name})")
+                    return StockInfo(
+                        code=code, name=name, market="US",
+                        industry=industry,
+                        description="; ".join(description_parts)[:2000],
+                        update_time=datetime.now().isoformat(),
+                    )
             except Exception as e:
-                logger.warning(f"xueqiu US info failed for {code}: {e}")
+                logger.warning(f"Finnhub stock info failed for US {code}: {e}")
+
+        logger.warning(f"No US stock info for {code} (no finnhub token or request failed)")
         return None
 
     def fetch_price_history(self, code: str, start_date: str, end_date: str) -> list[PriceData]:
@@ -292,12 +301,10 @@ class FreeStockFetcher(BaseStockFetcher):
             if market == "A":
                 df = self._fetch_a_price_history(code, start_date, end_date)
             elif market == "US":
-                _apply_proxy()
-                with _without_system_proxy():
-                    df = self._fetch_us_price_akshare(code, start_date, end_date)
-                if df is None or df.empty:
-                    logger.info(f"akshare failed, trying yfinance for US stock {code}...")
-                    df = self._fetch_us_price_history(code, start_date, end_date)
+                raise RuntimeError(
+                    f"美股 {code} 未配置股票数据源 Token（itick）。"
+                    f"请在设置中填入 stock_data_token。"
+                )
         except Exception as e:
             logger.error(f"Failed to fetch price history for {code}: {e}")
             return []
@@ -577,28 +584,28 @@ class ItickStockFetcher(BaseStockFetcher):
             return []
 
 
-def get_stock_fetcher(data_source: str = "free") -> BaseStockFetcher:
+def get_stock_fetcher() -> BaseStockFetcher:
     """
-    根据配置返回数据源实例。
+    根据 Settings 中的 stock_data_token 返回数据源实例。
 
-    Args:
-        data_source: "free"（免费 akshare+yfinance）/ "custom"（付费 itick 等）
+    有 stock_data_token → ItickStockFetcher（付费）
+    无 stock_data_token → FreeStockFetcher（免费，含 Finnhub 辅助）
 
     Returns:
         BaseStockFetcher 实例
     """
     from config.settings import Settings
     settings = Settings()
-    if data_source == "custom":
-        token = settings.get("paid_api_token", "")
-        if token:
-            logger.info("使用付费数据源: itick")
-            return ItickStockFetcher(token)
-        # 有 custom_api_endpoint 的旧逻辑兼容
-        if settings.get("custom_api_endpoint", ""):
-            return CustomStockFetcher(
-                api_endpoint=settings.get("custom_api_endpoint", ""),
-                api_key=settings.get("custom_api_key", ""),
-            )
-        logger.warning("付费数据源已选择但未配置 token，降级为免费数据源")
-    return FreeStockFetcher()
+    token = settings.get("stock_data_token", "")
+    if token:
+        logger.info("使用付费数据源: itick")
+        return ItickStockFetcher(token)
+    finnhub_token = settings.get("news_token_us", "")
+    logger.info("使用免费数据源: akshare"
+                f"{' + Finnhub' if finnhub_token else ''}")
+    return FreeStockFetcher(finnhub_token=finnhub_token)
+
+
+# ============================================================
+# 以下函数仅用于 A 股（akshare），美股已全量迁至 itick + Finnhub
+# ============================================================

@@ -88,16 +88,6 @@ class MainPage(ft.Container):
             border_radius=8,
         )
 
-        # ── 数据源 ──
-        self._source_dd = ft.Dropdown(
-            label="数据源", width=130, value="custom",
-            options=[
-                ft.dropdown.Option("free", "免费数据"),
-                ft.dropdown.Option("custom", "付费数据"),
-            ],
-            border_radius=8,
-        )
-
         # ── 按钮 ──
         self._start_btn = ft.ElevatedButton(
             content=ft.Row(spacing=8, controls=[
@@ -156,13 +146,12 @@ class MainPage(ft.Container):
                 ),
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
 
-                # 第一行：市场 + 数据源 + 周期（dropdown 自带 label，无需外层标题）
+                # 第一行：市场 + 周期（dropdown 自带 label，无需外层标题）
                 ft.Row(
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     spacing=16,
                     controls=[
                         self._market_dd,
-                        self._source_dd,
                         self._period_dd,
                     ],
                 ),
@@ -276,7 +265,7 @@ class MainPage(ft.Container):
 
         thread = threading.Thread(
             target=self._run_analysis,
-            args=(raw, self._market_dd.value, self._period_dd.value, self._source_dd.value),
+            args=(raw, self._market_dd.value, self._period_dd.value),
             daemon=True,
         )
         thread.start()
@@ -307,10 +296,9 @@ class MainPage(ft.Container):
 
     # ======================== 后台分析线程 ========================
 
-    def _run_analysis(self, raw: str, market: str, period: str, data_source: str):
+    def _run_analysis(self, raw: str, market: str, period: str):
         """后台线程：调用 Service 执行分析。"""
-        request = AnalysisRequest(raw_input=raw, market=market, period=period,
-                                  data_source=data_source)
+        request = AnalysisRequest(raw_input=raw, market=market, period=period)
         self._service = AnalysisService()  # 新实例，重置取消状态
 
         def on_progress(msg: str):

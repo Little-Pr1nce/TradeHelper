@@ -5,7 +5,6 @@
 
   A 股：akshare 东方财富 stock_news_em（免费，项目已有依赖）
   美股：Finnhub company-news（可选，需 API Key）
-        → yfinance Ticker.news（免费，易限流，需代理）
   兜底：LLM 生成（news_fetcher 层调用）
 """
 
@@ -79,7 +78,7 @@ class AkshareEastMoneyProvider(BaseNewsProvider):
 
 
 class YfinanceNewsProvider(BaseNewsProvider):
-    """美股 yfinance Ticker.news。"""
+    """美股 yfinance Ticker.news（已废弃—不再注册到美股新闻列表，仅保留类定义供测试引用）。"""
 
     @property
     def name(self) -> str:
@@ -165,14 +164,16 @@ class FinnhubNewsProvider(BaseNewsProvider):
         return items
 
 
-def get_news_providers(market: str, finnhub_api_key: str = "") -> list[BaseNewsProvider]:
+def get_news_providers(market: str, news_token_us: str = "", news_token_a: str = "") -> list[BaseNewsProvider]:
     """按市场返回优先级排序的新闻源列表。"""
     if market == "A":
-        return [AkshareEastMoneyProvider()]
+        providers: list[BaseNewsProvider] = [AkshareEastMoneyProvider()]
+        # A 股新闻如有额外 Token（如 Tushare），在这里添加新 Provider
+        return providers
     providers: list[BaseNewsProvider] = []
-    if finnhub_api_key:
-        providers.append(FinnhubNewsProvider(finnhub_api_key))
-    providers.append(YfinanceNewsProvider())
+    if news_token_us:
+        providers.append(FinnhubNewsProvider(news_token_us))
+    # 美股不再用 yfinance 新闻兜底，交由 news_fetcher 层 LLM 补充
     return providers
 
 

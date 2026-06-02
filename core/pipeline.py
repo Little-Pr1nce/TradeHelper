@@ -132,7 +132,7 @@ def run_pipeline(
     # 提取因子检验结果
     validation = {}
     norm_cols = [c for c in df.columns if c.endswith("_norm")]
-    if norm_cols and "close" in df.columns and len(df) >= 100:
+    if norm_cols and "close" in df.columns:
         from alpha.validation import validate_factors
         validation = validate_factors(df)
 

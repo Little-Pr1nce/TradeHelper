@@ -3,8 +3,7 @@
 
 股票数据源：
   - A 股：akshare stock_value_em（PE/PB 3年历史）+ stock_financial_analysis_indicator（财务）
-  - 美股：akshare stock_financial_us_analysis_indicator_em（财务）
-          PE/PB 历史通过 LLM 补充（akshare stock_us_valuation_baidu 不稳定）
+  - 美股：Finnhub /stock/metric（优先）→ akshare（兜底）→ LLM 估算
 """
 
 import logging
@@ -19,14 +18,33 @@ logger = logging.getLogger(__name__)
 def fetch_fundamental_factors(
     name: str, code: str, market: str,
     model: str = "", base_url: str = "", api_key: str = "",
+    finnhub_token: str = "",
 ) -> dict:
     """
-    获取估值和基本面因子。akshare 优先，LLM 兜底。
+    获取估值和基本面因子。美股优先 Finnhub，A 股 akshare，LLM 兜底。
 
     Returns:
         {style_factors, fundamental_factors, source}
     """
-    # 先尝试 akshare
+    # ── 美股：优先 Finnhub /stock/metric ──
+    if market == "US" and finnhub_token:
+        try:
+            from data.finnhub_client import fetch_basic_metrics
+            metrics = fetch_basic_metrics(finnhub_token, code)
+            if metrics:
+                fin = _extract_financials_from_finnhub(metrics)
+                pe_pb = _extract_pe_pb_from_finnhub(metrics)
+                if fin and pe_pb:
+                    style = _calc_style_factors(pe_pb)
+                    logger.info(
+                        f"基本面(Finnhub): PE分位={style['pe_percentile']:.1%}, "
+                        f"PB分位={style['pb_percentile']:.1%}, ROE={fin['roe']:.1%}"
+                    )
+                    return {"style_factors": style, "fundamental_factors": fin, "source": "finnhub"}
+        except Exception as e:
+            logger.warning(f"Finnhub 基本面获取失败 ({code}): {e}")
+
+    # ── akshare 优先 ──
     financials = _fetch_financials_akshare(code, market)
     pe_pb = _fetch_pe_pb_akshare(code, market)
 
@@ -40,7 +58,7 @@ def fetch_fundamental_factors(
 
     # 部分缺失 → LLM 兜底
     if api_key:
-        logger.info(f"akshare 数据不全(fin={bool(financials)}, pe_pb={bool(pe_pb)})，LLM 兜底")
+        logger.info(f"数据不全(fin={bool(financials)}, pe_pb={bool(pe_pb)})，LLM 兜底")
         from alpha.fundamental_llm import fetch_fundamental_factors_llm
         return fetch_fundamental_factors_llm(name, code, market, model, base_url, api_key)
 
@@ -50,6 +68,125 @@ def fetch_fundamental_factors(
                          "net_profit_yoy": 0, "revenue_yoy": 0}
     logger.warning("基本面数据部分缺失，使用默认值")
     return {"style_factors": style, "fundamental_factors": fin, "source": "partial"}
+
+
+# ── Finnhub /stock/metric 解析 ──
+
+
+def _extract_financials_from_finnhub(metrics: dict) -> dict | None:
+    """
+    从 Finnhub /stock/metric?metric=all 提取财务指标。
+
+    metric 字段常用 key（Finnhub 命名规范）：
+      - roeRfy              → ROE
+      - grossMarginTTM      → 毛利率
+      - totalDebt/totalEquity → 负债比率（需计算）
+      - roaRfy              → ROA（备用）
+      - revenueGrowthTTMYoy → 营收增速（可能不存在，需从 series 算）
+      - epsGrowthTTMYoy     → 利润增速（替代 net_profit_yoy）
+
+    返回 None 表示关键字段缺失过多。
+    """
+    m = metrics.get("metric", {})
+    if not m:
+        return None
+
+    roe = _safe_float(m.get("roeRfy"))
+    gross_margin = _safe_float(m.get("grossMarginTTM"))
+
+    # Finnhub 返回的 ROE/grossMargin 等百分比字段是"数值百分数"（如 76.33 = 76.33%），
+    # 需要除以 100 转为小数（0.7633），以便跟 akshare 的数据格式保持一致。
+    if roe > 1:
+        roe = roe / 100
+    if gross_margin > 1:
+        gross_margin = gross_margin / 100
+
+    # 资产负债比率：totalDebt / totalEquity
+    debt = _safe_float(m.get("totalDebt"))
+    equity = _safe_float(m.get("totalEquity"))
+    debt_ratio = debt / equity if equity and equity > 0 else 0.0
+
+    # 增速 — Finnhub 不直接提供 YoY，尝试从 series 推算或用 eps 增长
+    net_profit_yoy = _safe_float(m.get("epsGrowthTTMYoy"))
+    revenue_yoy = _safe_float(m.get("revenueGrowthTTMYoy"))
+
+    # Finnhub 百分比字段归一化
+    if net_profit_yoy > 1:
+        net_profit_yoy = net_profit_yoy / 100
+    if revenue_yoy > 1:
+        revenue_yoy = revenue_yoy / 100
+
+    if roe == 0 and gross_margin == 0:
+        return None
+
+    logger.info(
+        f"Finnhub 财务: ROE={roe:.1%}, margin={gross_margin:.1%}, "
+        f"debt={debt_ratio:.1%}, np_yoy={net_profit_yoy:.1%}, rev_yoy={revenue_yoy:.1%}"
+    )
+    return {
+        "roe": roe,
+        "gross_margin": gross_margin,
+        "debt_ratio": debt_ratio,
+        "net_profit_yoy": net_profit_yoy,
+        "revenue_yoy": revenue_yoy,
+    }
+
+
+def _extract_pe_pb_from_finnhub(metrics: dict) -> list[dict] | None:
+    """
+    从 Finnhub /stock/metric?metric=all 提取 PE/PB 历史。
+
+    series 字段结构：
+      {
+        "annual": {
+          "peBasicExclExtraTTM": [
+            {"period": "2024-12-31", "v": 32.5},
+            {"period": "2023-12-31", "v": 28.1},
+            ...
+          ],
+          "pbAnnual": [...]
+        }
+      }
+
+    构造为 [{"date": "2024-12-31", "pe": 32.5, "pb": 3.2}, ...] 格式。
+    """
+    m = metrics.get("metric", {})
+    series = metrics.get("series", {})
+
+    pe_series = series.get("annual", {}).get("peBasicExclExtraTTM", [])
+    pb_series = series.get("annual", {}).get("pbAnnual", [])
+
+    if not pe_series and not pb_series:
+        # 只有当前值，构造单条记录
+        pe_current = _safe_float(m.get("peBasicExclExtraTTM"))
+        pb_current = _safe_float(m.get("pbAnnual"))
+        if pe_current > 0 or pb_current > 0:
+            return [{"date": date.today().isoformat(), "pe": pe_current, "pb": pb_current}]
+        return None
+
+    # 对齐日期
+    pe_map = {item["period"][:10]: item["v"] for item in pe_series if item.get("v")}
+    pb_map = {item["period"][:10]: item["v"] for item in pb_series if item.get("v")}
+
+    all_dates = sorted(set(list(pe_map.keys()) + list(pb_map.keys())))
+    result = []
+    for d in all_dates:
+        pe = pe_map.get(d, np.nan)
+        pb = pb_map.get(d, np.nan)
+        if not (np.isnan(pe) and np.isnan(pb)):
+            result.append({"date": d, "pe": pe, "pb": pb})
+
+    return result if result else None
+
+
+def _safe_float(val) -> float:
+    """安全转换浮点数。"""
+    if val is None:
+        return 0.0
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 # ── akshare 数据获取 ──
@@ -162,7 +299,9 @@ def _fetch_pe_pb_us_baidu(code: str) -> list[dict] | None:
 
 
 def _calc_style_factors(pe_pb_history: list[dict]) -> dict:
-    if not pe_pb_history or len(pe_pb_history) < 12:
+    # 最低 3 条（Finnhub 年数据）或 12 条（akshare 月数据）
+    min_entries = 3
+    if not pe_pb_history or len(pe_pb_history) < min_entries:
         return {"pe_percentile": 0.5, "pb_percentile": 0.5}
     pes = [d["pe"] for d in pe_pb_history if d.get("pe") and not np.isnan(d["pe"])]
     pbs = [d["pb"] for d in pe_pb_history if d.get("pb") and not np.isnan(d["pb"])]

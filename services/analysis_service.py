@@ -39,7 +39,6 @@ class AnalysisRequest:
     raw_input: str         # 用户原始输入（代码或名称）
     market: str            # "A" / "US"
     period: str            # "3m" / "6m" / "1y" / "3y"
-    data_source: str = "free"  # "free" / "custom"（付费数据源）
 
 
 @dataclass
@@ -113,12 +112,12 @@ class AnalysisService:
 
         # ---- 2. 获取股票信息 ----
         _progress("正在获取股票信息...")
-        info = self._fetch_stock_info(code, request.market, request.data_source)
+        info = self._fetch_stock_info(code, request.market)
         if _stop(): return self._empty_response(code)
 
         # ---- 3. 获取股价数据（含缓存） ----
         _progress("正在获取股价数据...")
-        df = self._fetch_prices(code, request.period, request.data_source)
+        df = self._fetch_prices(code, request.period)
         if df is None or df.empty:
             raise RuntimeError(f"无法获取 {code} 的股价数据")
         if _stop(): return self._empty_response(code)
@@ -149,6 +148,7 @@ class AnalysisService:
                 model=settings.get("llm_model", ""),
                 base_url=settings.get("llm_base_url", ""),
                 api_key=settings.get("llm_api_key", ""),
+                finnhub_token=settings.get("news_token_us", ""),
             )
         except Exception as e:
             logger.warning(f"基本面数据获取失败: {e}")
@@ -181,13 +181,12 @@ class AnalysisService:
 
         # 盘口数据（实时信号，仅 itick）
         depth_factor = None
-        if request.data_source == "custom":
+        if Settings().get("stock_data_token", ""):
             try:
                 _progress("正在获取实时盘口...")
                 from alpha.depth_factor import fetch_depth_factor
-                from config.settings import Settings as _S
                 depth_factor = fetch_depth_factor(
-                    code, request.market, _S().get("paid_api_token", ""),
+                    code, request.market, Settings().get("stock_data_token", ""),
                 )
             except Exception as e:
                 logger.warning(f"盘口数据获取失败: {e}")
@@ -198,6 +197,8 @@ class AnalysisService:
             data_range=data_range, depth_factor=depth_factor,
             validation=pipeline_result.validation,
             fundamental_data=pipeline_result.fundamental_data,
+            rank_ic=pipeline_result.rank_ic,
+            benchmark_return=pipeline_result.benchmark_return,
         )
         if not report_content:
             report_content = "报告生成失败，请稍后重试。"
@@ -244,8 +245,8 @@ class AnalysisService:
                 code = results[0]["code"]
         return code
 
-    def _fetch_stock_info(self, code: str, market: str, data_source: str) -> StockInfo:
-        fetcher = get_stock_fetcher(data_source)
+    def _fetch_stock_info(self, code: str, market: str) -> StockInfo:
+        fetcher = get_stock_fetcher()
         info = fetcher.fetch_stock_info(code)
         if info:
             Database().upsert_stock(info)
@@ -254,25 +255,39 @@ class AnalysisService:
         logger.warning(f"未获取到 {code} 的股票信息，使用默认名")
         return StockInfo(code=code, name=code, market=market)
 
-    def _fetch_prices(self, code: str, period: str, data_source: str = "free") -> pd.DataFrame | None:
+    def _fetch_prices(self, code: str, period: str) -> pd.DataFrame | None:
         start, end = get_backtest_dates(period)
         prices = Database().get_prices(code, start, end)
-        if prices:
-            logger.info(f"缓存数据: {len(prices)} 条 ({prices[0].date}~{prices[-1].date})")
-        else:
-            logger.info(f"缓存数据: 0 条")
 
-        if self._cache_needs_refresh(prices, start, end):
-            logger.info(f"缓存不足，联网拉取")
-            fetcher = get_stock_fetcher(data_source)
+        if not prices:
+            # 缓存为空 → 全量拉取
+            logger.info(f"缓存为空，联网拉取 {start}~{end}")
+            fetcher = get_stock_fetcher()
             new_prices = fetcher.fetch_price_history(code, start, end)
             if new_prices:
                 Database().insert_prices(new_prices)
-                prices = Database().get_prices(code, start, end)
-                logger.info(f"联网获取 {len(new_prices)} 条，合计 {len(prices)} 条")
+            prices = Database().get_prices(code, start, end)
         else:
-            if prices:
-                logger.info(f"使用缓存（最新 {prices[-1].date}）")
+            last_date = prices[-1].date
+            logger.info(f"缓存: {len(prices)} 条 ({prices[0].date}~{last_date})")
+
+            # 增量拉取（itick 按 limit 返回最近 N 条，不会因周末/节假日返回空列表）
+            from datetime import date as dt_date, timedelta
+            next_day = (dt_date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
+            today_str = dt_date.today().isoformat()
+            logger.info(f"检查增量 {next_day}~{today_str}")
+            fetcher = get_stock_fetcher()
+            new_prices = fetcher.fetch_price_history(code, next_day, today_str)
+            # 不能仅靠 new_prices 是否空判断——itick 按 limit 取最近 N 条，
+            # 不会因为区间内无交易日就返回空列表。必须比较最新一条的日期。
+            latest_new_date = max((p.date for p in new_prices), default="")
+            if latest_new_date > last_date:
+                Database().insert_prices(new_prices)
+                prices = Database().get_prices(code, start, end)
+                new_count = sum(1 for p in new_prices if p.date > last_date)
+                logger.info(f"增量获取 {new_count} 条新数据（最新 {latest_new_date}）")
+            else:
+                logger.info(f"无增量数据（缓存最新 {last_date}，itick 最新 {latest_new_date or '无'}）")
 
         if not prices:
             return None
@@ -280,21 +295,6 @@ class AnalysisService:
         df = pd.DataFrame([p.to_dict() for p in prices])
         df["date"] = pd.to_datetime(df["date"])
         return df.sort_values("date").reset_index(drop=True)
-
-    @staticmethod
-    def _cache_needs_refresh(prices, start: str, end: str) -> bool:
-        """判断缓存是否需要刷新。仅数据量极少或过旧时刷新。"""
-        from datetime import date, timedelta
-        if len(prices) < 100:
-            logger.info(f"缓存刷新原因: 数据量 {len(prices)} < 100")
-            return True
-        last_date = prices[-1].date
-        week_ago = (date.today() - timedelta(days=7)).isoformat()
-        if last_date < week_ago:
-            logger.info(f"缓存刷新原因: 最新数据 {last_date} < {week_ago} (7天前)")
-            return True
-        logger.info(f"缓存命中: {len(prices)} 条 ({prices[0].date}~{last_date}), 无需刷新")
-        return False
 
     def _fetch_news(self, code: str, market: str, progress,
                     name: str = "") -> dict:
@@ -306,7 +306,8 @@ class AnalysisService:
             model=settings.get("llm_model", ""),
             base_url=settings.get("llm_base_url", ""),
             api_key=settings.get("llm_api_key", ""),
-            finnhub_api_key=settings.get("finnhub_api_key", ""),
+            news_token_us=settings.get("news_token_us", ""),
+            news_token_a=settings.get("news_token_a", ""),
         )
         logger.info(f"新闻: {len(news_list)} 条")
 

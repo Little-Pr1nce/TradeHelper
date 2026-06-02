@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.pipeline import run_pipeline
 from backtest.analytics import compare_strategies, plot_comparison
-from data.stock_fetcher import FreeStockFetcher
+from data.stock_fetcher import FreeStockFetcher, get_stock_fetcher
 from utils.market import detect_market
 
 logger = logging.getLogger("run_backtest")
@@ -71,14 +71,23 @@ def main():
     code = args.code.strip().upper()
     market = detect_market(code) or "A"
 
+    # 初始化 Settings（get_stock_fetcher 需要读取配置）
+    from config.settings import Settings
+    from pathlib import Path
+    Settings.init(Path.home() / ".tradehelper" / "config.json")
+
     print_header(f"回测 {code} | {args.start} → {args.end}")
 
     # ── 1. 拉取股价数据（跳过缓存，直接获取指定日期范围） ──
     print("  正在获取股价数据...")
-    fetcher = FreeStockFetcher()
+    from config.settings import Settings
+    fetcher = get_stock_fetcher()
     prices = fetcher.fetch_price_history(code, args.start, args.end)
     if not prices:
-        print(f"  错误: 无法获取 {code} 的股价数据，请检查代码或网络")
+        if market == "US":
+            print(f"  错误: 美股需要配置 stock_data_token（itick）。请在设置中填写。")
+        else:
+            print(f"  错误: 无法获取 {code} 的股价数据，请检查代码或网络")
         sys.exit(1)
 
     df = pd.DataFrame([p.to_dict() for p in prices])

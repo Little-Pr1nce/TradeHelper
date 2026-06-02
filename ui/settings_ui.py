@@ -84,43 +84,26 @@ class SettingsPage(ft.Container):
         )
 
         # ========== 数据源配置 ==========
-        self._data_source_dd = ft.Dropdown(
-            label="数据源",
-            value=settings.get("data_source", "free"),
-            options=[
-                ft.dropdown.Option("free", "免费数据源（akshare + yfinance）"),
-                ft.dropdown.Option("custom", "自定义 API"),
-            ],
-            on_select=self._on_data_source_change,
-        )
-
-        # 自定义 API 字段（仅在选择"自定义 API"时可见）
-        custom_visible = settings.get("data_source", "free") == "custom"
-        self._custom_api_endpoint = ft.TextField(
-            label="自定义 API 地址",
-            value=settings.get("custom_api_endpoint", ""),
-            visible=custom_visible,
-        )
-        self._custom_api_key = ft.TextField(
-            label="自定义 API Key",
-            value=settings.get("custom_api_key", ""),
+        self._stock_data_token = ft.TextField(
+            label="股票数据源 Token（如 itick）",
+            value=settings.get("stock_data_token", ""),
             password=True,
             can_reveal_password=True,
-            visible=custom_visible,
+            hint_text="输入付费股票数据源的 API Token，留空则使用免费数据源",
         )
-        self._paid_api_token = ft.TextField(
-            label="付费数据源 Token（如 itick）",
-            value=settings.get("paid_api_token", ""),
+        self._news_token_us = ft.TextField(
+            label="新闻数据源 Token - 美股（如 Finnhub）",
+            value=settings.get("news_token_us", ""),
             password=True,
             can_reveal_password=True,
-            hint_text="输入付费数据源的 API Token",
+            hint_text="输入美股新闻数据源的 API Token，留空则使用免费数据源",
         )
-        self._finnhub_key = ft.TextField(
-            label="Finnhub API Key（美股新闻）",
-            value=settings.get("finnhub_api_key", ""),
+        self._news_token_a = ft.TextField(
+            label="新闻数据源 Token - A 股（如 Tushare）",
+            value=settings.get("news_token_a", ""),
             password=True,
             can_reveal_password=True,
-            hint_text="免费注册 https://finnhub.io，60次/分钟",
+            hint_text="输入 A 股新闻数据源的 API Token，留空则使用免费数据源",
         )
 
         # ========== 代理配置 ==========
@@ -170,20 +153,20 @@ class SettingsPage(ft.Container):
 
                 # 数据源区域
                 ft.Text("数据源配置", size=16, weight=ft.FontWeight.W_600),
-                self._data_source_dd,
-                self._custom_api_endpoint,
-                self._custom_api_key,
-                self._paid_api_token,
-                self._finnhub_key,
-                ft.Text("付费数据源 token 用于 itick 等专业金融数据 API。\n"
-                        "选择「免费数据源」时无需填写。",
+                self._stock_data_token,
+                self._news_token_us,
+                self._news_token_a,
+                ft.Text("「股票数据源 Token」用于付费股票行情 API（如 itick）。\n"
+                        "「新闻数据源 Token - 美股」用于美股新闻 API（如 Finnhub）。\n"
+                        "「新闻数据源 Token - A 股」用于 A 股新闻 API（如 Tushare）。\n"
+                        "留空的字段将自动使用免费数据源。",
                         size=12, color=ft.Colors.GREY_600),
 
                 ft.Divider(),
 
                 ft.Text("代理配置", size=16, weight=ft.FontWeight.W_600),
                 self._proxy_input,
-                ft.Text("用于 yfinance 访问 Yahoo Finance（美股数据/新闻）。\n"
+                ft.Text("用于访问 Yahoo Finance（美股搜索）。\n"
                         "若已开启 MonoProxy 等系统代理，可留空自动检测；否则填本地 HTTP 代理地址。",
                         size=12, color=ft.Colors.GREY_600),
 
@@ -212,14 +195,6 @@ class SettingsPage(ft.Container):
                 self._work_dir_input.update()
         self.page.run_task(handle)
 
-    def _on_data_source_change(self, e):
-        """数据源下拉切换 → 显示/隐藏自定义 API 字段。"""
-        is_custom = self._data_source_dd.value == "custom"
-        self._custom_api_endpoint.visible = is_custom
-        self._custom_api_key.visible = is_custom
-        self._custom_api_endpoint.update()
-        self._custom_api_key.update()
-
     def _save_settings(self, e):
         """保存所有设置到 JSON 配置文件。"""
         settings = Settings()
@@ -227,11 +202,9 @@ class SettingsPage(ft.Container):
         settings.set("llm_base_url", self._llm_base_url.value)
         settings.set("llm_api_key", self._llm_api_key.value)
         settings.set("llm_model", self._llm_model.value)
-        settings.set("data_source", self._data_source_dd.value)
-        settings.set("custom_api_endpoint", self._custom_api_endpoint.value)
-        settings.set("custom_api_key", self._custom_api_key.value)
-        settings.set("paid_api_token", self._paid_api_token.value)
-        settings.set("finnhub_api_key", self._finnhub_key.value)
+        settings.set("stock_data_token", self._stock_data_token.value)
+        settings.set("news_token_us", self._news_token_us.value)
+        settings.set("news_token_a", self._news_token_a.value)
         settings.set("proxy", self._proxy_input.value)
         settings.save()
 

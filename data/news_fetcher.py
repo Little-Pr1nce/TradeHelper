@@ -3,7 +3,7 @@
 
 流程：
   1. 查数据库 → 24h 内已有 >= limit 条带情感标签的新闻 → 直接用缓存
-  2. 否则 → 真实新闻 API（A 股东财 / 美股 Finnhub→yfinance）→ 不足时用 LLM 补充
+  2. 否则 → 真实新闻 API（A 股东财 / 美股 Finnhub）→ 不足时用 LLM 补充
   3. LLM 也失败 → 降级使用历史缓存
 """
 
@@ -46,7 +46,8 @@ def fetch_news(
     name: str, code: str, market: str,
     model: str, base_url: str, api_key: str,
     limit: int = 5,
-    finnhub_api_key: str = "",
+    news_token_us: str = "",
+    news_token_a: str = "",
 ) -> list[NewsItem]:
     """
     获取股票新闻（缓存优先 → 真实 API → LLM 补充 → 历史降级）。
@@ -57,7 +58,8 @@ def fetch_news(
         market: 市场 (A/US)
         model/base_url/api_key: LLM 配置
         limit: 最大条数
-        finnhub_api_key: Finnhub API Key（美股可选，见 config finnhub_api_key）
+        news_token_us: 美股新闻数据源 Token（如 Finnhub）
+        news_token_a: A 股新闻数据源 Token（如 Tushare）
 
     Returns:
         NewsItem 列表（情感标签由上层 analyze() 填充后入库）
@@ -71,7 +73,7 @@ def fetch_news(
         return cached[:limit]
 
     # 2. 真实新闻 API
-    providers = get_news_providers(market, finnhub_api_key)
+    providers = get_news_providers(market, news_token_us, news_token_a)
     items = fetch_from_providers(providers, code, name, market, limit)
     if items:
         logger.info(f"真实新闻 API 合计: {len(items)} 条")

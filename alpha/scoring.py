@@ -64,6 +64,11 @@ def compute_technical_normalized(
 
 
 def align_finbert_scores(price_df, news_df, date_col="date", score_col="finbert_score"):
+    """将新闻情感得分按日期对齐到价格 DataFrame。
+
+    策略：当天有新闻 → 用当天得分；当天无新闻 → 向前填充最近一天的得分。
+    这确保每个交易日都有 FinBERT_Score，不会因为新闻日期稀疏而全部为 0。
+    """
     if news_df is None or news_df.empty:
         logger.info("  [Alpha] 无新闻数据，FinBERT 得分全部置 0")
         return pd.Series(0.0, index=price_df.index, name="FinBERT_Score")
@@ -73,18 +78,23 @@ def align_finbert_scores(price_df, news_df, date_col="date", score_col="finbert_
 
     news_scores = news_df[[date_col, score_col]].copy()
     news_scores[date_col] = pd.to_datetime(news_scores[date_col]).dt.strftime("%Y-%m-%d")
+    # 按日期聚合：同一天多条新闻取均值
+    news_scores = news_scores.groupby(date_col)[score_col].mean().reset_index()
+
     if date_col in price_df.columns:
         price_dates = pd.to_datetime(price_df[date_col]).dt.strftime("%Y-%m-%d")
     else:
         price_dates = pd.to_datetime(pd.Series(price_df.index)).dt.strftime("%Y-%m-%d")
 
+    # 构建日期 → 得分映射，然后对价格日期做前向填充
     score_map = dict(zip(news_scores[date_col], news_scores[score_col]))
-    result = pd.Series(
-        [score_map.get(d, 0.0) for d in price_dates],
-        index=price_df.index, name="FinBERT_Score",
-    )
-    logger.info(f"  [Alpha] 新闻对齐：{(result != 0.0).sum()}/{len(result)} 天有新闻数据")
-    return result
+    raw = [score_map.get(d, np.nan) for d in price_dates]
+    # 前向填充：NaN 用最近一个非 NaN 值填充；开头无数据则填 0
+    filled = pd.Series(raw, index=price_df.index, name="FinBERT_Score").ffill().fillna(0.0)
+
+    non_zero = (filled != 0.0).sum()
+    logger.info(f"  [Alpha] 新闻对齐（含前向填充）：{non_zero}/{len(filled)} 天有新闻数据")
+    return filled
 
 
 def calc_final_score(

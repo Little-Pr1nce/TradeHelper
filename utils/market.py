@@ -98,44 +98,14 @@ def search_a_stock_fallback(keyword: str) -> list[dict]:
 
 
 def search_us_stock_online(keyword: str) -> list[dict]:
-    """通过 Yahoo Finance 在线搜索美股。"""
-    from data.stock_fetcher import _apply_proxy, _without_system_proxy
-    results = []
-    _apply_proxy()
-    try:
-        import yfinance as yf
-        search = yf.Search(keyword)
-        for quote in search.quotes[:10]:
-            symbol = quote.get("symbol", "")
-            if not symbol or "." in symbol:
-                continue
-            name = quote.get("shortname") or quote.get("longname") or symbol
-            results.append({"code": symbol, "name": name, "market": "US"})
-    except Exception:
-        try:
-            import requests
-            with _without_system_proxy():
-                session = requests.Session()
-                session.trust_env = False
-                from data.stock_fetcher import _resolve_proxy_url
-                proxy = _resolve_proxy_url()
-                if proxy:
-                    session.proxies = {"http": proxy, "https": proxy}
-                resp = session.get(
-                    "https://query1.finance.yahoo.com/v1/finance/search",
-                    params={"q": keyword, "lang": "en-US", "quotesCount": 10},
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    timeout=10,
-                )
-            for quote in resp.json().get("quotes", []):
-                symbol = quote.get("symbol", "")
-                if not symbol or "." in symbol:
-                    continue
-                name = quote.get("shortname") or quote.get("longname") or symbol
-                results.append({"code": symbol, "name": name, "market": "US"})
-        except Exception:
-            pass
-    return results
+    """通过 Finnhub /search 在线搜索美股（需 news_token_us）。"""
+    from config.settings import Settings
+    token = (Settings().get("news_token_us", "") or "").strip()
+    if not token:
+        logger.warning("未配置 news_token_us，跳过 Finnhub 在线搜索")
+        return []
+    from data.finnhub_client import search_stock
+    return search_stock(token, keyword)
 
 
 def search_us_stock_fallback(keyword: str) -> list[dict]:
