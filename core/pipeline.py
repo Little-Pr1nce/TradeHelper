@@ -535,25 +535,29 @@ def compute_premarket_snapshot(
     nq = futures_data.get("NQ", {})
     es = futures_data.get("ES", {})
 
-    nq_change = nq.get("change_pct", 0) if nq else 0
+    nq_change = nq.get("change_pct", 0) if nq else 0  # 小数：0.0069 = 0.69%
     es_change = es.get("change_pct", 0) if es else 0
 
-    def _future_assess(change_pct: float, name: str) -> str:
-        """对期货涨跌给出宏观情绪解读。"""
-        if change_pct > 1.0:
-            return f"🟢 {name}涨{change_pct:+.2f}%，宏观情绪显著偏暖，利好开盘"
-        elif change_pct > 0.5:
-            return f"▸ {name}涨{change_pct:+.2f}%，情绪偏暖"
-        elif change_pct > 0.1:
-            return f"▸ {name}微涨{change_pct:+.2f}%，方向不明确"
-        elif change_pct > -0.1:
-            return f"▸ {name}基本持平{change_pct:+.2f}%，无明显方向"
-        elif change_pct > -0.5:
-            return f"▸ {name}微跌{change_pct:+.2f}%，情绪偏冷"
-        elif change_pct > -1.0:
-            return f"⚠️ {name}跌{change_pct:+.2f}%，宏观情绪偏冷，谨慎开盘"
+    def _pct_str(val: float) -> str:
+        """小数 → 百分数显示字符串，如 0.0069 → '+0.69%'。"""
+        return f"{val * 100:+.2f}%"
+
+    def _future_assess(chg: float, name: str) -> str:
+        """对期货涨跌给出宏观情绪解读。chg 为小数（0.01 = 1%）。"""
+        if chg > 0.01:
+            return f"🟢 {name}涨{_pct_str(chg)}，宏观情绪显著偏暖，利好开盘"
+        elif chg > 0.005:
+            return f"▸ {name}涨{_pct_str(chg)}，情绪偏暖"
+        elif chg > 0.001:
+            return f"▸ {name}微涨{_pct_str(chg)}，方向不明确"
+        elif chg > -0.001:
+            return f"▸ {name}基本持平{_pct_str(chg)}，无明显方向"
+        elif chg > -0.005:
+            return f"▸ {name}微跌{_pct_str(chg)}，情绪偏冷"
+        elif chg > -0.01:
+            return f"⚠️ {name}跌{_pct_str(chg)}，宏观情绪偏冷，谨慎开盘"
         else:
-            return f"🔴 {name}跌{change_pct:+.2f}%，宏观情绪显著偏空"
+            return f"🔴 {name}跌{_pct_str(chg)}，宏观情绪显著偏空"
 
     def _describe_kline_trend(kline_list: list | None, label: str) -> str:
         """分析分时 K 线的短期走势形态。"""
@@ -598,19 +602,23 @@ def compute_premarket_snapshot(
     es_kline = (es or {}).get("kline_5min", [])
 
     # ── 个股盘前解读 ──
-    def _pre_stock_assess(change_pct: float, nq_chg: float, es_chg: float) -> str:
-        """评估个股盘前表现相对于期货强弱。"""
+    def _pre_stock_assess(chg: float, nq_chg: float, es_chg: float) -> str:
+        """评估个股盘前表现相对于期货强弱。chg 均为小数（0.01 = 1%）。"""
         avg_future = (nq_chg + es_chg) / 2 if nq_chg and es_chg else 0
-        if change_pct > avg_future + 1.0:
-            return f"盘前涨幅{change_pct:+.2f}%，显著强于期货整体（{avg_future:+.2f}%），表明资金对该股有独立买入意愿，非被动跟涨"
-        elif change_pct > avg_future + 0.3:
-            return f"盘前涨幅{change_pct:+.2f}%，略强于期货（{avg_future:+.2f}%），属于偏强跟随"
-        elif change_pct > avg_future - 0.3:
-            return f"盘前涨跌{change_pct:+.2f}%，与期货整体（{avg_future:+.2f}%）基本同步，无独立方向"
-        elif change_pct > avg_future - 1.0:
-            return f"盘前跌幅{change_pct:+.2f}%，弱于期货整体（{avg_future:+.2f}%），可能有独立利空或资金减仓"
+        diff = chg - avg_future
+        if diff > 0.01:
+            return (f"盘前涨跌{_pct_str(chg)}，显著强于期货整体（{_pct_str(avg_future)}），"
+                    f"表明资金对该股有独立买入意愿，非被动跟涨")
+        elif diff > 0.003:
+            return f"盘前涨跌{_pct_str(chg)}，略强于期货（{_pct_str(avg_future)}），属于偏强跟随"
+        elif diff > -0.003:
+            return f"盘前涨跌{_pct_str(chg)}，与期货整体（{_pct_str(avg_future)}）基本同步，无独立方向"
+        elif diff > -0.01:
+            return (f"盘前涨跌{_pct_str(chg)}，弱于期货整体（{_pct_str(avg_future)}），"
+                    f"可能有独立利空或资金减仓")
         else:
-            return f"盘前跌幅{change_pct:+.2f}%，显著弱于期货（{avg_future:+.2f}%），需警惕独立利空"
+            return (f"盘前涨跌{_pct_str(chg)}，显著弱于期货（{_pct_str(avg_future)}），"
+                    f"需警惕独立利空")
 
     # ── T-1 日关键信号 ──
     last = df.iloc[-1] if len(df) > 0 else None
@@ -650,7 +658,7 @@ def compute_premarket_snapshot(
     if nq:
         lines.append(
             f"| 纳指期货(NQ) | {nq.get('latest', 0):.2f} | "
-            f"{nq_change:+.2f}% | {nq.get('volume', 0):,.0f} | "
+            f"{_pct_str(nq_change)} | {nq.get('volume', 0):,.0f} | "
             f"{_future_assess(nq_change, '纳指期货')} |"
         )
     else:
@@ -659,7 +667,7 @@ def compute_premarket_snapshot(
     if es:
         lines.append(
             f"| 标普期货(ES) | {es.get('latest', 0):.2f} | "
-            f"{es_change:+.2f}% | {es.get('volume', 0):,.0f} | "
+            f"{_pct_str(es_change)} | {es.get('volume', 0):,.0f} | "
             f"{_future_assess(es_change, '标普期货')} |"
         )
     else:
@@ -678,7 +686,7 @@ def compute_premarket_snapshot(
     lines.append(f"")
     lines.append(f"| 项目 | 数值 | 解读 |")
     lines.append(f"|------|------|------|")
-    lines.append(f"| 盘前价格 | {pre_price:.2f}（{pre_change_pct:+.2%}） | {_pre_stock_assess(pre_change_pct, nq_change, es_change)} |")
+    lines.append(f"| 盘前价格 | {pre_price:.2f}（{_pct_str(pre_change_pct)}） | {_pre_stock_assess(pre_change_pct, nq_change, es_change)} |")
     pre_vol = stock_tick.get("volume", 0)
     vol_label = "较活跃" if pre_vol > 100000 else ("有成交" if pre_vol > 10000 else "极低")
     lines.append(f"| 盘前成交量 | {pre_vol:,.0f} 股（{vol_label}） | 盘前量越大，开盘方向可信度越高 |")

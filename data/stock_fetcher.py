@@ -622,10 +622,12 @@ class ItickStockFetcher(BaseStockFetcher):
 
             latest = d.get("ld", 0)
             prev_close = d.get("p", 0)
-            chp = d.get("chp", 0)
-            # chp 可能是 0-100 的百分数或 0-1 的小数，归一化
-            if isinstance(chp, (int, float)) and abs(chp) > 1 and prev_close > 0:
-                chp = chp / 100
+            # 自己计算涨跌幅：不依赖 API 返回的 chp
+            # （chp 的格式不稳定，有时是百分数 -73.0 有时是小数 -0.0073）
+            if latest and prev_close and prev_close > 0:
+                own_chp = (float(latest) - float(prev_close)) / float(prev_close)  # 小数
+            else:
+                own_chp = 0.0
 
             quote = {
                 "code": str(d.get("s", code)),
@@ -635,7 +637,7 @@ class ItickStockFetcher(BaseStockFetcher):
                 "low": float(d.get("l", 0)),
                 "prev_close": float(prev_close) if prev_close else 0.0,
                 "change": float(d.get("ch", 0)),
-                "change_pct": round(float(chp) if chp else 0.0, 4),
+                "change_pct": round(own_chp, 6),  # 小数：0.0069 = 0.69%
                 "volume": float(d.get("v", 0)),
                 "amount": float(d.get("tu", 0)),
                 "timestamp": d.get("t", 0),
