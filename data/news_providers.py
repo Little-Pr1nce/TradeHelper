@@ -153,9 +153,9 @@ class FinnhubNewsProvider(BaseNewsProvider):
             return []
 
         items: list[NewsItem] = []
-        for entry in raw[:limit * 2]:
+        for entry in raw[:limit * 3]:  # 多取一些以应对相关性过滤
             item = _parse_finnhub_entry(entry, code)
-            if item:
+            if item and _is_company_relevant(item.title, item.content, name, code):
                 items.append(item)
             if len(items) >= limit:
                 break
@@ -243,3 +243,19 @@ def _parse_finnhub_entry(entry: dict, code: str) -> NewsItem | None:
         source=str(entry.get("source", "Finnhub")).strip() or "Finnhub",
         content=str(entry.get("summary", "")).strip()[:500],
     )
+
+
+def _is_company_relevant(title: str, content: str, name: str, code: str) -> bool:
+    """检查新闻是否与目标公司相关。"""
+    text = (title + " " + content).lower()
+    code_lower = code.lower()
+    # 公司代码出现在标题或正文中
+    if code_lower in text:
+        return True
+    # 公司名称的至少一个关键词出现在标题中（标题是强信号）
+    keywords = name.lower().split()
+    title_lower = title.lower()
+    for kw in keywords:
+        if len(kw) > 2 and kw in title_lower:
+            return True
+    return False

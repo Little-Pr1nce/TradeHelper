@@ -311,11 +311,9 @@ class AnalysisService:
         settings = Settings()
         news_list = fetch_news(
             name=name, code=code, market=market,
-            model=settings.get("llm_model", ""),
-            base_url=settings.get("llm_base_url", ""),
-            api_key=settings.get("llm_api_key", ""),
             news_token_us=settings.get("news_token_us", ""),
             news_token_a=settings.get("news_token_a", ""),
+            limit=5,
         )
         logger.info(f"新闻: {len(news_list)} 条")
 

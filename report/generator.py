@@ -179,9 +179,14 @@ def generate_report(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=4000,
+            max_tokens=16000,
         )
         choice = response.choices[0]
+        finish = choice.finish_reason
+        if finish and finish != "stop":
+            logger.warning(f"LLM 输出提前结束，finish_reason={finish}，报告可能不完整")
+        else:
+            logger.info(f"LLM 输出完成，finish_reason={finish}")
         report = _clean_llm_output(choice.message.content)
         if not report:
             logger.warning("LLM returned empty response, falling back to template")
