@@ -88,6 +88,25 @@ class MainPage(ft.Container):
             border_radius=8,
         )
 
+        # ── 分析模式（盘后/盘中/盘前） ──
+        has_itick = bool(Settings().get("stock_data_token", ""))
+        self._mode_dd = ft.Dropdown(
+            label="分析模式", width=140, value="eod",
+            options=[
+                ft.dropdown.Option("eod", "📊 盘后分析"),
+                ft.dropdown.Option(
+                    "intraday", "⏱ 盘中分析",
+                    disabled=not has_itick,
+                ),
+                ft.dropdown.Option(
+                    "pre", "🌅 盘前分析",
+                    disabled=not has_itick,
+                ),
+            ],
+            border_radius=8,
+        )
+        self._mode_dd.on_change = self._on_mode_change
+
         # ── 按钮 ──
         self._start_btn = ft.ElevatedButton(
             content=ft.Row(spacing=8, controls=[
@@ -146,13 +165,14 @@ class MainPage(ft.Container):
                 ),
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
 
-                # 第一行：市场 + 周期（dropdown 自带 label，无需外层标题）
+                # 第一行：市场 + 周期 + 分析模式
                 ft.Row(
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     spacing=16,
                     controls=[
                         self._market_dd,
                         self._period_dd,
+                        self._mode_dd,
                     ],
                 ),
 
@@ -246,6 +266,19 @@ class MainPage(ft.Container):
 
     # ======================== 事件处理 ========================
 
+    def _on_mode_change(self, e):
+        """分析模式切换时，自动调整市场选择。"""
+        mode = self._mode_dd.value
+        if mode == "pre":
+            # 盘前分析目前仅支持美股
+            self._market_dd.value = "US"
+            self._market_dd.disabled = True
+            self._market_dd.update()
+            self._show_error("💡 盘前分析目前仅支持美股。已自动切换为美股市场。")
+        else:
+            self._market_dd.disabled = False
+            self._market_dd.update()
+
     def _on_start(self, e):
         raw = self._code_input.value.strip()
         if not raw:
@@ -253,6 +286,14 @@ class MainPage(ft.Container):
             return
         if not Settings().get("work_dir", ""):
             self._show_error("请先在设置中配置工作目录")
+            return
+
+        mode = self._mode_dd.value
+        if mode in ("intraday", "pre") and not Settings().get("stock_data_token", ""):
+            self._show_error(
+                f"「{self._mode_name(mode)}」需要配置 itick stock_data_token，\n"
+                f"请在设置页面填写 token 后再试。"
+            )
             return
 
         self._show_error("")
@@ -265,7 +306,7 @@ class MainPage(ft.Container):
 
         thread = threading.Thread(
             target=self._run_analysis,
-            args=(raw, self._market_dd.value, self._period_dd.value),
+            args=(raw, self._market_dd.value, self._period_dd.value, mode),
             daemon=True,
         )
         thread.start()
@@ -296,9 +337,13 @@ class MainPage(ft.Container):
 
     # ======================== 后台分析线程 ========================
 
-    def _run_analysis(self, raw: str, market: str, period: str):
+    @staticmethod
+    def _mode_name(mode: str) -> str:
+        return {"eod": "盘后分析", "intraday": "盘中分析", "pre": "盘前分析"}.get(mode, mode)
+
+    def _run_analysis(self, raw: str, market: str, period: str, mode: str = "eod"):
         """后台线程：调用 Service 执行分析。"""
-        request = AnalysisRequest(raw_input=raw, market=market, period=period)
+        request = AnalysisRequest(raw_input=raw, market=market, period=period, mode=mode)
         self._service = AnalysisService()  # 新实例，重置取消状态
 
         def on_progress(msg: str):
@@ -308,7 +353,12 @@ class MainPage(ft.Container):
                 pass
 
         try:
-            response = self._service.analyze(request, on_progress=on_progress)
+            if mode == "intraday":
+                response = self._service.analyze_intraday(request, on_progress=on_progress)
+            elif mode == "pre":
+                response = self._service.analyze_premarket(request, on_progress=on_progress)
+            else:
+                response = self._service.analyze(request, on_progress=on_progress)
             self._on_analysis_done(response)
         except ValueError as e:
             self._show_result_error(str(e))

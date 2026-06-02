@@ -432,6 +432,10 @@ class ItickStockFetcher(BaseStockFetcher):
     接口:
       - GET /stock/info    → 股票基本信息
       - GET /stock/kline   → 历史 K 线（日线 kType=8）
+      - GET /stock/quote   → 实时报价
+      - GET /stock/tick    → 实时成交（含交易时段标识 te）
+      - GET /future/quote  → 期货实时报价（盘前分析用）
+      - GET /future/kline  → 期货历史 K 线（盘前分析用）
     """
 
     BASE_URL = "https://api0.itick.org"
@@ -645,6 +649,166 @@ class ItickStockFetcher(BaseStockFetcher):
         except Exception as e:
             logger.error(f"itick fetch_quote 失败 ({code}): {e}")
             return None
+
+    # ── fetch_stock_tick ──
+
+    def fetch_stock_tick(self, code: str) -> dict | None:
+        """
+        通过 itick /stock/tick 获取实时成交数据（含交易时段标识）。
+
+        Returns:
+            {
+                "latest": float,         # 最新价
+                "volume": float,         # 成交数量
+                "timestamp": int,        # 时间戳（毫秒）
+                "trading_phase": int,    # 0:常规交易 1:盘前交易 2:盘后交易
+            }
+            失败返回 None
+        """
+        from utils.market import detect_market
+        market = detect_market(code)
+        region = self._a_stock_region(code) if market == "A" else "US"
+
+        try:
+            data = self._get("/stock/tick", {"region": region, "code": code})
+            d = data.get("data", {})
+            if not d:
+                return None
+
+            tick = {
+                "latest": float(d.get("ld", 0)),
+                "volume": float(d.get("v", 0)),
+                "timestamp": d.get("t", 0),
+                "trading_phase": d.get("te", 0),  # 0:常规 1:盘前 2:盘后
+            }
+            phase_labels = {0: "常规交易", 1: "盘前交易", 2: "盘后交易"}
+            logger.info(
+                f"itick 实时成交 ({code}): "
+                f"最新价={tick['latest']:.2f}, "
+                f"交易时段={phase_labels.get(tick['trading_phase'], '未知')}"
+            )
+            return tick
+        except Exception as e:
+            logger.error(f"itick fetch_stock_tick 失败 ({code}): {e}")
+            return None
+
+    # ── fetch_future_quote ──
+
+    def fetch_future_quote(self, region: str, code: str) -> dict | None:
+        """
+        通过 itick /future/quote 获取期货实时报价。
+
+        Args:
+            region: 市场代码（US/HK/CN）
+            code:   期货代码（NQ=纳指, ES=标普）
+
+        Returns:
+            {
+                "code": str,           # 产品代码
+                "latest": float,       # 最新价
+                "open": float,         # 开盘价
+                "high": float,         # 最高价
+                "low": float,          # 最低价
+                "prev_close": float,   # 前日收盘价
+                "change": float,       # 涨跌额
+                "change_pct": float,   # 涨跌幅百分比（已归一化为小数）
+                "volume": float,       # 成交量
+                "amount": float,       # 成交额
+                "timestamp": int,      # 时间戳（毫秒）
+                "status": int,         # 交易状态
+            }
+            失败返回 None
+        """
+        try:
+            data = self._get("/future/quote", {"region": region, "code": code})
+            d = data.get("data", {})
+            if not d:
+                return None
+
+            latest = d.get("ld", 0)
+            prev_close = d.get("p", 0)
+            chp = d.get("chp", 0)
+            # chp 可能是百分数或小数，归一化到 0-1
+            if isinstance(chp, (int, float)) and abs(chp) > 1 and prev_close > 0:
+                chp = chp / 100
+
+            quote = {
+                "code": str(d.get("s", code)),
+                "latest": float(latest) if latest else 0.0,
+                "open": float(d.get("o", 0)),
+                "high": float(d.get("h", 0)),
+                "low": float(d.get("l", 0)),
+                "prev_close": float(prev_close) if prev_close else 0.0,
+                "change": float(d.get("ch", 0)),
+                "change_pct": round(float(chp) if chp else 0.0, 4),
+                "volume": float(d.get("v", 0)),
+                "amount": float(d.get("tu", 0)),
+                "timestamp": d.get("t", 0),
+                "status": d.get("ts", 0),
+            }
+            logger.info(
+                f"itick 期货报价 ({code}): "
+                f"最新价={quote['latest']:.2f}, 涨跌={quote['change_pct']:+.2%}"
+            )
+            return quote
+        except Exception as e:
+            logger.error(f"itick fetch_future_quote 失败 ({region}:{code}): {e}")
+            return None
+
+    # ── fetch_future_kline ──
+
+    def fetch_future_kline(
+        self, region: str, code: str,
+        kType: int = 1, limit: int = 60,
+    ) -> list[dict]:
+        """
+        通过 itick /future/kline 获取期货历史 K 线。
+
+        Args:
+            region: 市场代码（US/HK/CN）
+            code:   期货代码（NQ=纳指, ES=标普）
+            kType:  K线类型
+                    1=1分钟, 2=5分钟, 3=15分钟, 4=30分钟,
+                    5=1小时, 6=2小时, 7=4小时, 8=日K, 9=周K, 10=月K
+            limit:  K线数量（默认 60）
+
+        Returns:
+            list[dict]: 每个 bar 含 {t, o, h, l, c, v, tu}
+            失败返回空列表
+        """
+        try:
+            data = self._get("/future/kline", {
+                "region": region, "code": code,
+                "kType": kType, "limit": limit,
+            })
+            bars = data.get("data", [])
+            if not bars:
+                logger.warning(f"itick 期货 K 线为空 ({region}:{code})")
+                return []
+
+            result = []
+            for bar in bars:
+                try:
+                    result.append({
+                        "t": bar.get("t", 0),      # 时间戳（毫秒）
+                        "o": float(bar["o"]),       # 开盘价
+                        "h": float(bar["h"]),       # 最高价
+                        "l": float(bar["l"]),       # 最低价
+                        "c": float(bar["c"]),       # 收盘价
+                        "v": float(bar.get("v", 0)),  # 成交量
+                        "tu": float(bar.get("tu", 0)), # 成交额
+                    })
+                except (KeyError, ValueError, TypeError):
+                    continue
+
+            logger.info(
+                f"itick 期货 K 线 ({region}:{code}): "
+                f"{len(result)} 条 (kType={kType})"
+            )
+            return result
+        except Exception as e:
+            logger.error(f"itick fetch_future_kline 失败 ({region}:{code}): {e}")
+            return []
 
 
 def get_stock_fetcher() -> BaseStockFetcher:

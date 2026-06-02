@@ -3,14 +3,27 @@
 
 负责将各分析模块的输出整合为完整的分析报告。
 
+三种分析模式的报告生成：
+  1. 盘后（eod）：
+     - generate_report() — LLM 全新生成 8 章（现有逻辑）
+     - _generate_fallback_report() — 本地模板兜底
+
+  2. 盘中（intraday）：
+     - generate_intraday_report() — T-1 报告 1-7 章复用 + LLM 重写第 8 章
+     - _build_intraday_fallback_ch8() — 本地模板兜底
+
+  3. 盘前（pre）：
+     - generate_premarket_report() — T-1 报告 1-7 章复用 + LLM 重写第 8 章
+     - _build_premarket_fallback_ch8() — 本地模板兜底
+
 两种生成方式：
   1. LLM 生成（推荐）：
-     - 调用 OpenAI 兼容 API，将技术面/新闻面/Alpha因子/多策略回测数据传给大模型
+     - 调用 OpenAI 兼容 API
      - 通过 SYSTEM_PROMPT 约束模型仅基于提供数据分析
      - 输出结构化 Markdown 报告
 
   2. 回退生成（无 API 时）：
-     - 使用 Python 字符串模板拼接各模块结果
+     - 使用 Python 字符串模板拼接
      - 保证在大模型不可用时功能仍正常
 """
 
@@ -19,7 +32,11 @@ import re
 from datetime import datetime
 
 from config.settings import Settings
-from report.prompts import SYSTEM_PROMPT, build_user_prompt
+from report.prompts import (
+    SYSTEM_PROMPT, build_user_prompt,
+    INTRADAY_SYSTEM_PROMPT, build_intraday_user_prompt,
+    PREMARKET_SYSTEM_PROMPT, build_premarket_user_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -442,3 +459,293 @@ def _derive_recommendation(backtest_results: dict, alpha_stats: dict | None,
         parts.append(depth_note.strip("，"))
 
     return "，".join(parts) + "，建议观望。"
+
+
+# ============================================================
+# T-1 报告章节分割
+# ============================================================
+
+def _split_t1_report(report_content: str) -> tuple[str, str]:
+    """
+    将 T-1 日完整报告分割为 (前7章, 第8章后的内容)。
+
+    正则匹配 `## 八、` 作为分割点，前面是第 1-7 章，后面是第 8 章（将被替换）。
+    如果找不到分割点，则整个报告视为前 7 章。
+    """
+    # 匹配「## 八、」或「## 8、」或「## 八.」
+    pattern = r'\n(?=##\s*八[、.．\s])'
+    parts = re.split(pattern, report_content, maxsplit=1)
+    if len(parts) == 2:
+        return parts[0].strip(), parts[1].strip()
+    # 也尝试匹配「## 8、综合建议」
+    pattern2 = r'\n(?=##\s*8[、.．\s])'
+    parts2 = re.split(pattern2, report_content, maxsplit=1)
+    if len(parts2) == 2:
+        return parts2[0].strip(), parts2[1].strip()
+    # 找不到 → 返回完整报告
+    return report_content.strip(), ""
+
+
+def _strip_ch8_header(ch8_content: str) -> str:
+    """移除 LLM 可能重复输出的「## 八、...」标题行，避免报告中出现重复标题。"""
+    # LLM 输出时可能已经带了 ## 八、... 标题，先检查
+    ch8 = ch8_content.strip()
+    # 如果 LLM 输出以 ## 八 开头，保留它；否则需要拼接
+    return ch8
+
+
+# ============================================================
+# 盘中报告生成
+# ============================================================
+
+def generate_intraday_report(
+    t1_report_content: str,
+    snapshot_text: str,
+    stock_info: dict,
+) -> str:
+    """
+    生成盘中分析报告。
+
+    结构：
+      ⚡ 盘中实时快照（纯计算，已格式化）
+      → T-1 日报告第 1-7 章（复用）
+      → 第八章：盘中操作参考（LLM 重新生成）
+
+    Args:
+        t1_report_content: T-1 日完整报告的 Markdown 全文
+        snapshot_text:     compute_intraday_snapshot() 返回的 Markdown 文本
+        stock_info:        股票基本信息字典
+
+    Returns:
+        完整的盘中分析报告 Markdown 文本
+    """
+    name = stock_info.get("name", "")
+    code = stock_info.get("code", "")
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 分割 T-1 报告
+    t1_body, _ = _split_t1_report(t1_report_content)
+
+    settings = Settings()
+    api_key = settings.get("llm_api_key", "")
+    base_url = settings.get("llm_base_url", "https://api.openai.com/v1")
+    model = settings.get("llm_model", "gpt-4o")
+
+    # 尝试 LLM 生成第八章
+    chapter_8 = None
+    if api_key or "localhost" in base_url or "127.0.0.1" in base_url:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=300.0)
+            user_prompt = build_intraday_user_prompt(t1_report_content, snapshot_text, stock_info)
+            logger.info(f"调用 LLM 生成盘中操作参考: model={model}")
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": INTRADAY_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=8000,
+            )
+            choice = response.choices[0]
+            finish = choice.finish_reason
+            if finish and finish != "stop":
+                logger.warning(f"LLM 盘中报告输出提前结束，finish_reason={finish}")
+            chapter_8 = _clean_llm_output(choice.message.content)
+            if chapter_8:
+                logger.info(f"LLM 盘中第 8 章: {len(chapter_8)} chars")
+        except Exception as e:
+            logger.error(f"LLM 盘中报告生成失败: {e}")
+
+    if not chapter_8:
+        logger.warning("LLM 盘中第 8 章为空，使用回退模板")
+        chapter_8 = _build_intraday_fallback_ch8(stock_info, snapshot_text)
+
+    # 拼接完整报告
+    report_title = f"# {name}（{code}）盘中分析报告"
+    header = (
+        f"{report_title}\n\n"
+        f"> ⏰ 盘中实时 | 更新时间：{now_str}\n"
+        f"> 📊 分析基底：T-1 日收盘后完整分析\n\n"
+    )
+
+    report = (
+        f"{header}"
+        f"---\n\n"
+        f"{snapshot_text}\n\n"
+        f"---\n\n"
+        f"{t1_body}\n\n"
+        f"---\n\n"
+        f"{chapter_8}\n\n"
+        f"---\n\n"
+        f"> ⚠️ **免责声明**：以上分析仅供参考，不构成任何投资建议。股市有风险，投资需谨慎。\n"
+        f"> ⏰ 本报告基于 T-1 日收盘后的完整分析 + 盘中实时数据叠加生成。\n"
+        f"> 盘中价格和盘口数据实时变化，报告中的操作参考价位仅反映生成时刻（{now_str}）的状态。\n"
+    )
+
+    logger.info(f"盘中报告生成完成: {len(report)} chars")
+    return report
+
+
+def _build_intraday_fallback_ch8(
+    stock_info: dict,
+    snapshot_text: str,
+) -> str:
+    """盘中报告第八章的本地回退模板（无 LLM 时使用）。"""
+    name = stock_info.get("name", "")
+    code = stock_info.get("code", "")
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    return f"""## 八、盘中操作参考（AI实时分析）
+
+> ⚠️ 当前未配置 LLM API Key，以下为基于数据的本地分析摘要。
+
+### 8.1 数据综合分析
+
+盘中快照数据已在上方展示。核心观察要点：
+
+1. **价格位置**：查看上方「盘中实时快照」表格中的「实时价格位置」部分，关注最新价相对于 MA5/MA10/MA20/MA60 的偏离百分比。偏离越大，短期回归均值的概率越高。
+2. **盘口信号**：买卖比大于 1.2 表示买盘占优，小于 0.8 表示卖盘占优。盘口信号得分（depth_score）为正表示偏多，为负表示偏空。
+3. **T-1 日趋势框架**：综合 Alpha Final_Score、MACD 金叉/死叉状态、RSI 区域判断中期方向。
+4. **交叉验证**：如果 T-1 日趋势偏多 + 盘口买盘占优 + 价格站上关键均线，则短期方向确认。如果出现矛盾（如 T-1 偏多但盘口卖盘占优），则需要谨慎。
+
+### 8.2 操作建议
+
+建议综合 T-1 日 Alpha 得分、技术指标和盘中实时数据中的价格位置、盘口信号来做决策。
+
+### 8.3 短期走势
+
+请配置 LLM API Key 以获取完整的 AI 分析。以上本地摘要仅供参考。
+
+> ⏰ 快照时间：{now_str}"""
+
+
+# ============================================================
+# 盘前报告生成
+# ============================================================
+
+def generate_premarket_report(
+    t1_report_content: str,
+    snapshot_text: str,
+    stock_info: dict,
+) -> str:
+    """
+    生成盘前分析报告。
+
+    结构：
+      ⚡ 盘前快照（期货 + 盘前价格 + 隔夜新闻）
+      → T-1 日报告第 1-7 章（复用）
+      → 第八章：盘前策略参考（LLM 重新生成）
+
+    Args:
+        t1_report_content: T-1 日完整报告的 Markdown 全文
+        snapshot_text:     compute_premarket_snapshot() 返回的 Markdown 文本
+        stock_info:        股票基本信息字典
+
+    Returns:
+        完整的盘前分析报告 Markdown 文本
+    """
+    name = stock_info.get("name", "")
+    code = stock_info.get("code", "")
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 分割 T-1 报告
+    t1_body, _ = _split_t1_report(t1_report_content)
+
+    settings = Settings()
+    api_key = settings.get("llm_api_key", "")
+    base_url = settings.get("llm_base_url", "https://api.openai.com/v1")
+    model = settings.get("llm_model", "gpt-4o")
+
+    # 尝试 LLM 生成第八章
+    chapter_8 = None
+    if api_key or "localhost" in base_url or "127.0.0.1" in base_url:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key, base_url=base_url, timeout=300.0)
+            user_prompt = build_premarket_user_prompt(t1_report_content, snapshot_text, stock_info)
+            logger.info(f"调用 LLM 生成盘前策略参考: model={model}")
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": PREMARKET_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.3,
+                max_tokens=10000,
+            )
+            choice = response.choices[0]
+            finish = choice.finish_reason
+            if finish and finish != "stop":
+                logger.warning(f"LLM 盘前报告输出提前结束，finish_reason={finish}")
+            chapter_8 = _clean_llm_output(choice.message.content)
+            if chapter_8:
+                logger.info(f"LLM 盘前第 8 章: {len(chapter_8)} chars")
+        except Exception as e:
+            logger.error(f"LLM 盘前报告生成失败: {e}")
+
+    if not chapter_8:
+        logger.warning("LLM 盘前第 8 章为空，使用回退模板")
+        chapter_8 = _build_premarket_fallback_ch8(stock_info, snapshot_text)
+
+    # 拼接完整报告
+    report_title = f"# {name}（{code}）盘前分析报告"
+    header = (
+        f"{report_title}\n\n"
+        f"> 🌅 盘前分析 | 生成时间：{now_str}\n"
+        f"> 📊 分析基底：T-1 日收盘后完整分析\n\n"
+    )
+
+    report = (
+        f"{header}"
+        f"---\n\n"
+        f"{snapshot_text}\n\n"
+        f"---\n\n"
+        f"{t1_body}\n\n"
+        f"---\n\n"
+        f"{chapter_8}\n\n"
+        f"---\n\n"
+        f"> ⚠️ **免责声明**：以上分析仅供参考，不构成任何投资建议。股市有风险，投资需谨慎。\n"
+        f"> 🌅 本报告基于 T-1 日收盘后的完整分析 + 盘前数据叠加生成。\n"
+        f"> 盘前流动性较低，开盘后可能因流动性改善而出现价格跳变。报告中的策略参考价位基于生成时刻（{now_str}）的数据。\n"
+    )
+
+    logger.info(f"盘前报告生成完成: {len(report)} chars")
+    return report
+
+
+def _build_premarket_fallback_ch8(
+    stock_info: dict,
+    snapshot_text: str,
+) -> str:
+    """盘前报告第八章的本地回退模板（无 LLM 时使用）。"""
+    name = stock_info.get("name", "")
+    code = stock_info.get("code", "")
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    return f"""## 八、盘前策略参考（AI分析）
+
+> ⚠️ 当前未配置 LLM API Key，以下为基于数据的本地分析摘要。
+
+### 8.1 盘前多维分析
+
+盘前快照数据已在上方展示。核心观察要点：
+
+1. **期货风向标**：纳指期货(NQ)和标普期货(ES)的涨跌幅是判断开盘方向最重要的宏观信号。期货大幅上涨（>+0.5%）预示偏暖开盘，期货大幅下跌（<-0.5%）预示偏冷开盘。
+2. **期货走势形态**：5分钟 K 线处于稳步上行还是持续走低，反映机构资金的盘前布局方向。
+3. **个股盘前相对强弱**：如果个股盘前涨跌幅显著强于或弱于期货整体，说明有独立资金行为，需要关注。
+4. **T-1 日趋势框架**：综合 Alpha Final_Score 方向、MACD 金叉/死叉状态和技术指标位置，判断中长期趋势方向是否支持今日的操作方向。
+
+### 8.2 开盘情景推演
+
+综合期货走势 + 盘前价格 + T-1 技术框架，做以下三种情景推演：
+- **高开**：如果期货走强且盘前价格强势，开盘可能高开。关注是否有持续买盘支撑、是否在关键压力位遇阻。
+- **平开**：如果期货方向不明确，开盘大概率平开。等待方向确认后再操作。
+- **低开**：如果期货走弱或有个股利空，开盘可能低开。关注关键支撑位是否有效。
+
+### 8.3 今日操作策略
+
+请综合上方盘前快照中的具体数据来做决策。建议配置 LLM API Key 以获取完整的 AI 策略分析。
+
+> 🌅 快照时间：{now_str}"""

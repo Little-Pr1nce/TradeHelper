@@ -12,7 +12,7 @@ UI 层仅需调用 AnalysisService.analyze() 并处理返回结果，
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable
 
 import pandas as pd
@@ -24,11 +24,13 @@ from data.models import StockInfo, PriceData, AnalysisReport
 from indicators.technical import calc_all_indicators, summarize
 from indicators.sentiment import analyze, aggregate
 from core.pipeline import run_pipeline, AnalysisResult as PipelineResult
+from core.pipeline import compute_intraday_snapshot, compute_premarket_snapshot
 from report.chart import generate_kline_chart
-from report.generator import generate_report
+from report.generator import generate_report, generate_intraday_report, generate_premarket_report
 from utils.dates import get_backtest_dates
 from utils.market import detect_market, search_a_stock, search_a_stock_fallback
 from utils.market import search_us_stock_online, search_us_stock_fallback
+from utils.session import detect_session
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,7 @@ class AnalysisRequest:
     raw_input: str         # 用户原始输入（代码或名称）
     market: str            # "A" / "US"
     period: str            # "3m" / "6m" / "1y" / "3y"
+    mode: str = "eod"      # "eod" / "intraday" / "pre"
 
 
 @dataclass
@@ -402,3 +405,437 @@ class AnalysisService:
             report_content="",
             backtest_results={},
         )
+
+    # ======================== 盘中分析 ========================
+
+    def analyze_intraday(
+        self,
+        request: AnalysisRequest,
+        on_progress: Callable[[str], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> AnalysisResponse:
+        """
+        执行盘中快速分析。
+
+        流程：
+          1. 获取 T-1 日完整分析结果（DB 缓存 or 即时计算）
+          2. 并行拉取实时数据（报价 + 盘口 + 增量新闻）
+          3. 计算盘中快照
+          4. 生成盘中报告（复用 T-1 报告第 1-7 章 + LLM 重写第 8 章）
+
+        要求：配置 itick stock_data_token。
+        """
+        from config.settings import Settings
+        settings = Settings()
+        token = settings.get("stock_data_token", "")
+        if not token:
+            raise RuntimeError("盘中分析需要配置 itick stock_data_token，请在设置中填写。")
+
+        self._cancelled = False
+
+        def _progress(msg: str):
+            if on_progress:
+                on_progress(msg)
+
+        def _stop() -> bool:
+            if self._cancelled:
+                return True
+            if should_stop and should_stop():
+                return True
+            return False
+
+        # ---- 1. 搜索股票代码 ----
+        code = self._resolve_code(request.raw_input, request.market, _progress)
+        if _stop(): return self._empty_response(code)
+
+        # ---- 2. 获取股票信息 ----
+        _progress("正在获取股票信息...")
+        info = self._fetch_stock_info(code, request.market)
+        if _stop(): return self._empty_response(code)
+
+        # ---- 3. 获取 T-1 日完整分析结果 ----
+        t1_report_content, t1_pipeline_result = self._get_t1_analysis(
+            code, request, _progress, _stop,
+        )
+        if _stop(): return self._empty_response(code)
+
+        # ---- 4. 并行拉取实时数据 ----
+        _progress("正在获取盘中实时数据...")
+        fetcher = get_stock_fetcher()
+
+        realtime_quote = None
+        depth_factor = None
+        stock_tick = None
+        today_news_list = None
+
+        # 实时报价
+        try:
+            realtime_quote = fetcher.fetch_quote(code)
+        except Exception as e:
+            logger.warning(f"实时报价获取失败: {e}")
+
+        # 盘口数据
+        try:
+            from alpha.depth_factor import fetch_depth_factor
+            depth_factor = fetch_depth_factor(code, request.market, token)
+        except Exception as e:
+            logger.warning(f"盘口数据获取失败: {e}")
+
+        # 实时成交（校验交易时段）
+        try:
+            stock_tick = fetcher.fetch_stock_tick(code)
+        except Exception as e:
+            logger.warning(f"实时成交数据获取失败: {e}")
+
+        # 增量新闻（今日）
+        try:
+            today_news_list = fetch_news(
+                name=info.name, code=code, market=request.market,
+                news_token_us=settings.get("news_token_us", ""),
+                news_token_a=settings.get("news_token_a", ""),
+                limit=5,
+            )
+        except Exception as e:
+            logger.warning(f"增量新闻获取失败: {e}")
+
+        if _stop(): return self._empty_response(code)
+
+        if not realtime_quote or realtime_quote.get("latest", 0) <= 0:
+            raise RuntimeError(f"无法获取 {code} 的实时报价，盘中分析不可用。")
+
+        # 校验交易时段
+        session = detect_session(request.market, stock_tick=stock_tick, stock_quote=realtime_quote)
+        logger.info(f"当前交易时段: {session}")
+
+        # ---- 5. 计算盘中快照 ----
+        _progress("正在计算盘中快照...")
+        if t1_pipeline_result is None:
+            # 没有 T-1 pipeline result → 跑一次简化版分析到 T-1 日
+            _progress("正在计算 T-1 日分析...")
+            t1_pipeline_result = self._run_eod_to_t1(code, request, _progress, _stop)
+            if _stop(): return self._empty_response(code)
+            # 也生成 T-1 报告文本
+            if not t1_report_content:
+                t1_report_content = self._generate_t1_report_text(
+                    code, info, t1_pipeline_result, request.period,
+                )
+
+        snapshot = compute_intraday_snapshot(
+            t1_pipeline_result,
+            realtime_quote=realtime_quote,
+            depth_factor=depth_factor,
+            today_news=today_news_list,
+            session=session,
+        )
+        if _stop(): return self._empty_response(code)
+
+        # ---- 6. 生成盘中报告 ----
+        _progress("正在生成盘中分析报告...")
+        if not t1_report_content:
+            t1_report_content = self._generate_t1_report_text(
+                code, info, t1_pipeline_result, request.period,
+            )
+
+        report_content = generate_intraday_report(
+            t1_report_content=t1_report_content,
+            snapshot_text=snapshot.markdown,
+            stock_info=info.to_dict(),
+        )
+        if not report_content:
+            report_content = "盘中报告生成失败，请稍后重试。"
+
+        _progress("盘中分析完成")
+        return AnalysisResponse(
+            stock_info=info,
+            chart_path="",
+            report_content=report_content,
+            backtest_results=t1_pipeline_result.backtest if t1_pipeline_result else {},
+            alpha_stats=self._extract_alpha_stats(t1_pipeline_result) if t1_pipeline_result else {},
+            pipeline_result=t1_pipeline_result,
+        )
+
+    # ======================== 盘前分析 ========================
+
+    def analyze_premarket(
+        self,
+        request: AnalysisRequest,
+        on_progress: Callable[[str], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> AnalysisResponse:
+        """
+        执行盘前分析（美股）。
+
+        流程：
+          1. 获取 T-1 日完整分析结果
+          2. 并行拉取盘前数据（stock tick + 期货 quote + 期货 kline + 隔夜新闻）
+          3. 计算盘前快照
+          4. 生成盘前报告
+
+        要求：
+          - 配置 itick stock_data_token
+          - 当前仅支持美股（US）
+        """
+        from config.settings import Settings
+        settings = Settings()
+        token = settings.get("stock_data_token", "")
+        if not token:
+            raise RuntimeError("盘前分析需要配置 itick stock_data_token，请在设置中填写。")
+
+        self._cancelled = False
+
+        def _progress(msg: str):
+            if on_progress:
+                on_progress(msg)
+
+        def _stop() -> bool:
+            if self._cancelled:
+                return True
+            if should_stop and should_stop():
+                return True
+            return False
+
+        # ---- 1. 搜索股票代码 ----
+        code = self._resolve_code(request.raw_input, request.market, _progress)
+        if _stop(): return self._empty_response(code)
+
+        # ---- 2. 获取股票信息 ----
+        _progress("正在获取股票信息...")
+        info = self._fetch_stock_info(code, request.market)
+        if _stop(): return self._empty_response(code)
+
+        # ---- 3. 获取 T-1 日完整分析结果 ----
+        t1_report_content, t1_pipeline_result = self._get_t1_analysis(
+            code, request, _progress, _stop,
+        )
+        if _stop(): return self._empty_response(code)
+
+        # ---- 4. 并行拉取盘前数据 ----
+        _progress("正在获取盘前数据...")
+        fetcher = get_stock_fetcher()
+
+        stock_tick = None
+        nq_quote = None
+        es_quote = None
+        nq_kline = None
+        es_kline = None
+        overnight_news_list = None
+
+        # 股票 tick（盘前价格 + 交易时段）
+        try:
+            stock_tick = fetcher.fetch_stock_tick(code)
+        except Exception as e:
+            logger.warning(f"股票 tick 获取失败: {e}")
+
+        # 验证盘前时段
+        if stock_tick and stock_tick.get("trading_phase") != 1:
+            logger.warning(
+                f"当前不在盘前交易时段（te={stock_tick.get('trading_phase')}），"
+                f"盘前分析可能不准确"
+            )
+
+        # 纳指期货报价
+        try:
+            nq_quote = fetcher.fetch_future_quote("US", "NQ")
+        except Exception as e:
+            logger.warning(f"纳指期货报价获取失败: {e}")
+
+        # 标普期货报价
+        try:
+            es_quote = fetcher.fetch_future_quote("US", "ES")
+        except Exception as e:
+            logger.warning(f"标普期货报价获取失败: {e}")
+
+        # 纳指期货 5 分钟 K 线（最近 12 根 = 1 小时）
+        try:
+            nq_kline = fetcher.fetch_future_kline("US", "NQ", kType=2, limit=12)
+        except Exception as e:
+            logger.warning(f"纳指期货 K 线获取失败: {e}")
+
+        # 标普期货 5 分钟 K 线
+        try:
+            es_kline = fetcher.fetch_future_kline("US", "ES", kType=2, limit=12)
+        except Exception as e:
+            logger.warning(f"标普期货 K 线获取失败: {e}")
+
+        # 隔夜新闻
+        try:
+            overnight_news_list = fetch_news(
+                name=info.name, code=code, market=request.market,
+                news_token_us=settings.get("news_token_us", ""),
+                news_token_a=settings.get("news_token_a", ""),
+                limit=8,
+            )
+        except Exception as e:
+            logger.warning(f"隔夜新闻获取失败: {e}")
+
+        if _stop(): return self._empty_response(code)
+
+        # 构建期货数据
+        futures_data = {}
+        if nq_quote:
+            nq_quote["kline_5min"] = nq_kline or []
+        futures_data["NQ"] = nq_quote or {}
+        if es_quote:
+            es_quote["kline_5min"] = es_kline or []
+        futures_data["ES"] = es_quote or {}
+
+        # ---- 5. 确保有 T-1 pipeline result ----
+        if t1_pipeline_result is None:
+            _progress("正在计算 T-1 日分析...")
+            t1_pipeline_result = self._run_eod_to_t1(code, request, _progress, _stop)
+            if _stop(): return self._empty_response(code)
+            if not t1_report_content:
+                t1_report_content = self._generate_t1_report_text(
+                    code, info, t1_pipeline_result, request.period,
+                )
+
+        # ---- 6. 计算盘前快照 ----
+        _progress("正在计算盘前快照...")
+        snapshot = compute_premarket_snapshot(
+            t1_pipeline_result,
+            stock_tick=stock_tick or {},
+            futures_data=futures_data,
+            overnight_news=overnight_news_list,
+            session="pre",
+        )
+        if _stop(): return self._empty_response(code)
+
+        # ---- 7. 生成盘前报告 ----
+        _progress("正在生成盘前分析报告...")
+        if not t1_report_content:
+            t1_report_content = self._generate_t1_report_text(
+                code, info, t1_pipeline_result, request.period,
+            )
+
+        report_content = generate_premarket_report(
+            t1_report_content=t1_report_content,
+            snapshot_text=snapshot.markdown,
+            stock_info=info.to_dict(),
+        )
+        if not report_content:
+            report_content = "盘前报告生成失败，请稍后重试。"
+
+        _progress("盘前分析完成")
+        return AnalysisResponse(
+            stock_info=info,
+            chart_path="",
+            report_content=report_content,
+            backtest_results=t1_pipeline_result.backtest if t1_pipeline_result else {},
+            alpha_stats=self._extract_alpha_stats(t1_pipeline_result) if t1_pipeline_result else {},
+            pipeline_result=t1_pipeline_result,
+        )
+
+    # ======================== T-1 日分析缓存与获取 ========================
+
+    def _get_t1_analysis(
+        self, code: str, request: AnalysisRequest,
+        progress, stop,
+    ) -> tuple[str | None, PipelineResult | None]:
+        """
+        尝试从 DB 缓存读取最近 24 小时内的盘后分析报告。
+
+        Returns:
+            (report_content, pipeline_result) — 可能为 None（无缓存）
+        """
+        try:
+            reports = Database().get_reports_by_code(code)
+            if reports:
+                latest = reports[0]
+                created = None
+                if latest.create_time:
+                    try:
+                        created = datetime.fromisoformat(latest.create_time)
+                    except Exception:
+                        pass
+                if created and (datetime.now() - created) < timedelta(hours=24):
+                    logger.info(
+                        f"复用 T-1 日缓存报告: {latest.create_time}, {len(latest.content)} chars"
+                    )
+                    return latest.content, None  # pipeline_result 不可从 content 恢复，传 None
+        except Exception as e:
+            logger.warning(f"读取 T-1 缓存报告失败: {e}")
+
+        return None, None
+
+    def _run_eod_to_t1(
+        self, code: str, request: AnalysisRequest,
+        progress, stop,
+    ) -> PipelineResult | None:
+        """
+        执行一次简化的盘后分析管道到 T-1 日（不含报告生成）。
+        用于盘中/盘前分析时，如果没有 T-1 缓存则即时计算。
+        """
+        try:
+            from utils.dates import get_backtest_dates
+            start, end = get_backtest_dates(request.period)
+            # 如果 end 包含今天，截断到昨天（T-1）
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if end >= today_str:
+                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                end = yesterday
+
+            prices = Database().get_prices(code, start, end)
+            if not prices:
+                fetcher = get_stock_fetcher()
+                new_prices = fetcher.fetch_price_history(code, start, end)
+                if new_prices:
+                    Database().insert_prices(new_prices)
+                prices = Database().get_prices(code, start, end)
+
+            if not prices:
+                logger.warning("T-1 日数据为空")
+                return None
+
+            df = pd.DataFrame([p.to_dict() for p in prices])
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.sort_values("date").reset_index(drop=True)
+
+            news_df = self._build_news_df(code)
+            if news_df is None or news_df.empty:
+                w_tech, w_news = 1.0, 0.0
+            else:
+                w_tech, w_news = 0.6, 0.4
+
+            market_type = detect_market(code) or request.market
+            pipeline_result = run_pipeline(
+                df, news_df, market=market_type,
+                w_tech=w_tech, w_news=w_news,
+            )
+            return pipeline_result
+        except Exception as e:
+            logger.error(f"T-1 日分析管道执行失败: {e}")
+            return None
+
+    def _generate_t1_report_text(
+        self, code: str, info: StockInfo,
+        pipeline_result: PipelineResult, period: str,
+    ) -> str:
+        """基于 pipeline_result 生成 T-1 日报告文本（调用完整报告生成流程）。"""
+        try:
+            tech = summarize(pipeline_result.df, info.name)
+            dates = pipeline_result.df["date"]
+            data_range = f"{dates.iloc[0].strftime('%Y-%m-%d')} ~ {dates.iloc[-1].strftime('%Y-%m-%d')}"
+            alpha_stats = self._extract_alpha_stats(pipeline_result)
+
+            # 新闻汇总
+            news_agg = {"summary": "暂无新闻数据", "top_news": "", "sentiment_score": 0.0}
+            try:
+                news_list = Database().get_news(code, limit=5)
+                if news_list:
+                    news_agg = aggregate(news_list)
+            except Exception:
+                pass
+
+            content = generate_report(
+                info.to_dict(), tech, news_agg,
+                pipeline_result.backtest, alpha_stats,
+                data_range=data_range,
+                validation=pipeline_result.validation,
+                fundamental_data=pipeline_result.fundamental_data,
+                rank_ic=pipeline_result.rank_ic,
+                benchmark_return=pipeline_result.benchmark_return,
+            )
+            return content or ""
+        except Exception as e:
+            logger.error(f"生成 T-1 报告文本失败: {e}")
+            return ""
