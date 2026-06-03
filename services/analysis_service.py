@@ -126,7 +126,7 @@ class AnalysisService:
         if _stop(): return self._empty_response(code)
 
         # ---- 4. 获取新闻情感数据 ----
-        news_agg = self._fetch_news(code, request.market, _progress, info.name)
+        news_agg = self._fetch_news(code, request.market, _progress, info.name, include_macro=(request.market == "US"))
         if _stop(): return self._empty_response(code)
 
         news_df = self._build_news_df(code)
@@ -208,6 +208,8 @@ class AnalysisService:
             validation=pipeline_result.validation,
             fundamental_data=pipeline_result.fundamental_data,
             rank_ic=pipeline_result.rank_ic,
+            rank_ic_5d=pipeline_result.rank_ic_5d,
+            rank_ic_10d=pipeline_result.rank_ic_10d,
             benchmark_return=pipeline_result.benchmark_return,
             realtime_quote=realtime_quote,
         )
@@ -308,7 +310,7 @@ class AnalysisService:
         return df.sort_values("date").reset_index(drop=True)
 
     def _fetch_news(self, code: str, market: str, progress,
-                    name: str = "") -> dict:
+                    name: str = "", include_macro: bool = False) -> dict:
         progress("正在加载新闻...")
         from config.settings import Settings
         settings = Settings()
@@ -317,6 +319,7 @@ class AnalysisService:
             news_token_us=settings.get("news_token_us", ""),
             news_token_a=settings.get("news_token_a", ""),
             limit=5,
+            include_macro=include_macro,
         )
         logger.info(f"新闻: {len(news_list)} 条")
 
@@ -526,6 +529,7 @@ class AnalysisService:
             depth_factor=depth_factor,
             today_news=today_news_list,
             session=session,
+            market=request.market,
         )
         if _stop(): return self._empty_response(code)
 
@@ -697,6 +701,7 @@ class AnalysisService:
             futures_data=futures_data,
             overnight_news=overnight_news_list,
             session="pre",
+            market=request.market,
         )
         if _stop(): return self._empty_response(code)
 
@@ -833,6 +838,8 @@ class AnalysisService:
                 validation=pipeline_result.validation,
                 fundamental_data=pipeline_result.fundamental_data,
                 rank_ic=pipeline_result.rank_ic,
+                rank_ic_5d=pipeline_result.rank_ic_5d,
+                rank_ic_10d=pipeline_result.rank_ic_10d,
                 benchmark_return=pipeline_result.benchmark_return,
             )
             return content or ""

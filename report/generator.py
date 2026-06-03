@@ -98,6 +98,8 @@ def generate_report(
     validation: dict | None = None,
     fundamental_data: dict | None = None,
     rank_ic: dict | None = None,
+    rank_ic_5d: dict | None = None,
+    rank_ic_10d: dict | None = None,
     benchmark_return: float = 0.0,
     realtime_quote: dict | None = None,
 ) -> str:
@@ -160,10 +162,26 @@ def generate_report(
         d = depth_factor
         extra += f"\n## 实时盘口数据\n- 买盘总量: {d['bid_volume']:,.0f}\n- 卖盘总量: {d['ask_volume']:,.0f}\n- 买卖比: {d['imbalance']:.2f}\n- 盘口信号得分: {d['depth_score']:+.3f}\n"
     if rank_ic:
-        extra += f"\n## 因子模型整体有效性（Rank IC）\n" \
-                 f"- 最终得分 Rank IC（对未来收益的预测力）: {rank_ic.get('rank_ic_mean', 0):+.4f}\n" \
-                 f"- IC_IR（预测稳定性）: {rank_ic.get('ic_ir', 0):+.4f}\n" \
-                 f"注：Rank IC > 0 表示因子有效；IC_IR > 0.5 表示预测能力稳定。\n"
+        extra += f"\n## 因子模型整体有效性（Rank IC — 多周期）\n" \
+                 f"| 周期 | Rank IC 均值 | IC_IR | 解读 |\n" \
+                 f"|------|-------------|-------|------|\n" \
+                 f"| 1 日 | {rank_ic.get('rank_ic_mean', 0):+.4f} | {rank_ic.get('ic_ir', 0):+.2f} | "
+        ic1 = rank_ic.get('rank_ic_mean', 0)
+        extra += ("短期预测力偏多" if ic1 > 0.05 else ("短期预测力偏空" if ic1 < -0.05 else "短期预测力中性")) + " |\n"
+        if rank_ic_5d:
+            extra += f"| 5 日 | {rank_ic_5d.get('rank_ic_mean', 0):+.4f} | {rank_ic_5d.get('ic_ir', 0):+.2f} | "
+            ic5 = rank_ic_5d.get('rank_ic_mean', 0)
+            extra += ("中期预测力偏多" if ic5 > 0.05 else ("中期预测力偏空" if ic5 < -0.05 else "中期预测力中性")) + " |\n"
+        if rank_ic_10d:
+            extra += f"| 10 日 | {rank_ic_10d.get('rank_ic_mean', 0):+.4f} | {rank_ic_10d.get('ic_ir', 0):+.2f} | "
+            ic10 = rank_ic_10d.get('rank_ic_mean', 0)
+            extra += ("中长期预测力偏多" if ic10 > 0.05 else ("中长期预测力偏空" if ic10 < -0.05 else "中长期预测力中性")) + " |\n"
+        extra += (
+            f"\n注：Rank IC > 0.05 表示因子在该周期有正向预测力；"
+            f"< -0.05 表示有反向预测力（短期可能为均值回归）；"
+            f"IC_IR > 0.5 表示预测能力稳定。\n"
+            f"不同周期的 IC 符号可能不同——短期均值回归（IC 为负）与中长期趋势跟随（IC 为正）可同时存在。\n"
+        )
     if benchmark_return:
         extra += f"\n## 基准收益\n" \
                  f"- 买入持有收益（同期）: {benchmark_return*100:+.2f}%\n" \
@@ -212,6 +230,7 @@ def generate_report(
                 backtest_results, alpha_stats, data_range,
                 depth_factor=depth_factor, validation=validation,
                 fundamental_data=fundamental_data, rank_ic=rank_ic,
+                rank_ic_5d=rank_ic_5d, rank_ic_10d=rank_ic_10d,
                 benchmark_return=benchmark_return,
                 realtime_quote=realtime_quote,
             )
@@ -225,6 +244,7 @@ def generate_report(
             backtest_results, alpha_stats, data_range,
             depth_factor=depth_factor, validation=validation,
             fundamental_data=fundamental_data, rank_ic=rank_ic,
+            rank_ic_5d=rank_ic_5d, rank_ic_10d=rank_ic_10d,
             benchmark_return=benchmark_return,
             realtime_quote=realtime_quote,
         )
@@ -241,6 +261,8 @@ def _generate_fallback_report(
     validation: dict | None = None,
     fundamental_data: dict | None = None,
     rank_ic: dict | None = None,
+    rank_ic_5d: dict | None = None,
+    rank_ic_10d: dict | None = None,
     benchmark_return: float = 0.0,
     realtime_quote: dict | None = None,
 ) -> str:

@@ -27,10 +27,12 @@ class AnalysisResult:
     df: pd.DataFrame                          # 含技术指标 + Final_Score 的完整 DataFrame
     backtest: dict                            # key=策略名, value=BacktestResult
     comparison: dict                          # compare_strategies() 的输出
-    rank_ic: dict                             # Rank IC 统计 {rank_ic_mean, ic_ir}
-    benchmark_return: float = 0.0             # 买入持有基准收益
-    validation: dict = field(default_factory=dict)  # 因子 IC/IR 检验结果
-    fundamental_data: dict | None = None      # LLM 基本面数据
+    rank_ic: dict                             # 1日 Rank IC 统计
+    rank_ic_5d: dict = field(default_factory=lambda: {"rank_ic_mean": 0.0, "ic_ir": 0.0})
+    rank_ic_10d: dict = field(default_factory=lambda: {"rank_ic_mean": 0.0, "ic_ir": 0.0})
+    benchmark_return: float = 0.0
+    validation: dict = field(default_factory=dict)
+    fundamental_data: dict | None = None
 
 
 def run_pipeline(
@@ -67,7 +69,7 @@ def run_pipeline(
         AnalysisResult 包含全部计算结果
     """
     if strategy_names is None:
-        strategy_names = ["A", "B", "C"]
+        strategy_names = ["A", "B", "C", "D", "E", "F"]
 
     logger.info("=" * 50)
     logger.info(f"管道启动: {len(df)} 条K线, 市场={market}, 策略={strategy_names}")
@@ -84,17 +86,32 @@ def run_pipeline(
     df = calc_final_score(df, news_df, w_tech=w_tech, w_news=w_news,
                           fundamental_data=fundamental_data)
 
-    # ---- ③ Rank IC 计算 ----
-    logger.info("  [管道 3/4] 计算 Rank IC（因子有效性）...")
+    # ---- ③ Rank IC 计算（多周期：1/5/10 日远期收益） ----
+    logger.info("  [管道 3/4] 计算多周期 Rank IC（因子有效性）...")
     rank_ic = {"rank_ic_mean": 0.0, "ic_ir": 0.0}
+    rank_ic_5d = {"rank_ic_mean": 0.0, "ic_ir": 0.0}
+    rank_ic_10d = {"rank_ic_mean": 0.0, "ic_ir": 0.0}
+
     if "close" in df.columns:
-        forward_returns = df["close"].pct_change().shift(-1)
-        scores_aligned = df["Final_Score"].iloc[:-1]
-        returns_aligned = forward_returns.iloc[:-1]
-        rank_ic = compute_rank_ic(scores_aligned, returns_aligned)
+        scores_aligned = df["Final_Score"].iloc[:-10]  # 最短对齐到 10 日
+
+        # 1 日 Rank IC
+        fwd_1d = df["close"].pct_change().shift(-1).iloc[:-10]
+        rank_ic = compute_rank_ic(scores_aligned, fwd_1d)
+
+        # 5 日 Rank IC
+        fwd_5d = (df["close"].shift(-5) / df["close"] - 1).iloc[:-10]
+        rank_ic_5d = compute_rank_ic(scores_aligned, fwd_5d)
+
+        # 10 日 Rank IC
+        fwd_10d = (df["close"].shift(-10) / df["close"] - 1).iloc[:-10]
+        rank_ic_10d = compute_rank_ic(scores_aligned, fwd_10d)
+
         logger.info(
-            f"  [管道 3/4] Rank IC 均值={rank_ic['rank_ic_mean']:.4f}, "
-            f"IC_IR={rank_ic['ic_ir']:.4f}"
+            f"  [管道 3/4] Rank IC: "
+            f"1日={rank_ic['rank_ic_mean']:+.4f} "
+            f"5日={rank_ic_5d['rank_ic_mean']:+.4f} "
+            f"10日={rank_ic_10d['rank_ic_mean']:+.4f}"
         )
     else:
         logger.warning("  [管道 3/4] 缺少 close 列，跳过 Rank IC 计算")
@@ -143,6 +160,8 @@ def run_pipeline(
         backtest=results,
         comparison=comparison,
         rank_ic=rank_ic,
+        rank_ic_5d=rank_ic_5d,
+        rank_ic_10d=rank_ic_10d,
         benchmark_return=benchmark_return,
         validation=validation,
         fundamental_data=fundamental_data,
@@ -193,23 +212,17 @@ def compute_intraday_snapshot(
     depth_factor: dict | None = None,
     today_news: list | None = None,
     session: str = "intraday",
+    market: str = "US",
 ) -> IntradaySnapshot:
     """
-    计算盘中实时位置快照。
+    计算盘中实时位置快照（美股专属差异化解读）。
 
-    输入：
-      pipeline_result: T-1 日完整分析结果（含 df、backtest 等）
-      realtime_quote:  itick /stock/quote 返回值
-      depth_factor:    alpha/depth_factor.py fetch_depth_factor() 返回值
-      today_news:      今日增量新闻列表（NewsItem）
-      session:         当前交易时段
-
-    输出：
-      IntradaySnapshot — 包含结构化数据和 Markdown 文本
-
-    计算逻辑：
-      取 T-1 日 DataFrame 最后一行（iloc[-1]）的指标值，
-      用当前实时价映射到各指标的位置百分比，并给出解读。
+    美股 24 小时交易，盘中数据具备完整参考价值：
+      - 实时价 vs T-1 均线：当下多空力量对比的直接体现
+      - 盘口买卖比：实时博弈信号，>1.2 买盘主导，<0.8 卖盘主导
+      - 成交量（量比）：>1.5 资金活跃，<0.5 观望
+      - 盘口与价格背离时需特别标注（如买盘大但价格跌=托盘非进攻）
+      - 日内走势形态：高开低走/低开高走/窄幅震荡
     """
     df = pipeline_result.df
     if df.empty or len(df) < 20:
@@ -322,7 +335,7 @@ def compute_intraday_snapshot(
             else:
                 vol_ratio_str = f"{vol_ratio:.2f}x（极度缩量，观望浓厚）"
 
-    # ── 盘口 ──
+    # ── 盘口 ──（美股专属：增加背离分析）
     depth_imbalance = 1.0
     depth_score = 0.0
     depth_str = "数据不可用"
@@ -331,10 +344,21 @@ def compute_intraday_snapshot(
         depth_score = depth_factor.get("depth_score", 0.0)
         bid_v = depth_factor.get("bid_volume", 0)
         ask_v = depth_factor.get("ask_volume", 0)
-        if depth_imbalance > 1.5:
-            depth_str = f"🟢 买盘显著占优（{depth_imbalance:.2f}:1），买方主动性强"
+
+        # 背离检测：盘口方向 vs 价格方向
+        divergence = ""
+        if market == "US":
+            if depth_imbalance > 1.2 and change_pct < -0.003:
+                divergence = " ⚠️ 盘口与价格背离：挂单买盘占优但价格下跌，说明托盘非进攻，主动性卖单仍在成交价上占优"
+            elif depth_imbalance < 0.8 and change_pct > 0.003:
+                divergence = " ⚠️ 盘口与价格背离：卖盘挂单占优但价格上涨，说明被动卖单被主动买盘消化，偏多信号"
+
+        if depth_imbalance > 3.0:
+            depth_str = f"🟢 极端买盘占优（{depth_imbalance:.2f}:1）{divergence}"
+        elif depth_imbalance > 1.5:
+            depth_str = f"🟢 买盘显著占优（{depth_imbalance:.2f}:1），买方主动性强{divergence}"
         elif depth_imbalance > 1.2:
-            depth_str = f"▸ 买盘占优（{depth_imbalance:.2f}:1），偏多信号"
+            depth_str = f"▸ 买盘占优（{depth_imbalance:.2f}:1），偏多信号{divergence}"
         elif depth_imbalance > 1.05:
             depth_str = f"▸ 微幅偏买（{depth_imbalance:.2f}:1），倾向不够强"
         elif depth_imbalance > 0.95:
@@ -342,9 +366,11 @@ def compute_intraday_snapshot(
         elif depth_imbalance > 0.80:
             depth_str = f"▸ 微幅偏卖（{depth_imbalance:.2f}:1），卖方略主动"
         elif depth_imbalance > 0.67:
-            depth_str = f"⚠️ 卖盘占优（{depth_imbalance:.2f}:1），偏空信号"
+            depth_str = f"⚠️ 卖盘占优（{depth_imbalance:.2f}:1），偏空信号{divergence}"
+        elif depth_imbalance > 0.33:
+            depth_str = f"🔴 卖盘显著占优（{depth_imbalance:.2f}:1），卖方主导{divergence}"
         else:
-            depth_str = f"🔴 卖盘显著占优（{depth_imbalance:.2f}:1），卖方主导"
+            depth_str = f"🔴 极端卖盘占优（{depth_imbalance:.2f}:1）{divergence}"
 
     # ── T-1 日关键信号 ──
     t1_final_score = float(last.get("Final_Score", 0)) if pd.notna(last.get("Final_Score")) else 0.0
@@ -451,6 +477,41 @@ def compute_intraday_snapshot(
         lines.append(f"| 盘口买卖比 | 买 {depth_factor.get('bid_volume', 0):,.0f} / 卖 {depth_factor.get('ask_volume', 0):,.0f} = {depth_imbalance:.2f} | {depth_str} |")
 
     lines.append(f"")
+
+    # ── 盘中走势形态（美股专属：从当天开盘→最新价推断） ──
+    if market == "US" and realtime_quote.get("open", 0) > 0:
+        open_price = realtime_quote["open"]
+        high_price = realtime_quote.get("high", 0)
+        low_price = realtime_quote.get("low", 0)
+        prev_close = realtime_quote.get("prev_close", 1)
+
+        open_gap = (open_price - prev_close) / prev_close * 100 if prev_close > 0 else 0
+        range_from_open = (latest - open_price) / open_price * 100 if open_price > 0 else 0
+
+        # 形态判断
+        if open_gap > 1.0 and range_from_open < -0.5:
+            pattern = f"高开低走——开盘跳涨{open_gap:+.1f}%后持续回落至{range_from_open:+.1f}%，典型「利好兑现」或「冲高遇阻」格局"
+        elif open_gap > 1.0 and range_from_open > 0:
+            pattern = f"高开高走——开盘跳涨{open_gap:+.1f}%，日内继续走强至{range_from_open:+.1f}%，强势确认"
+        elif open_gap < -1.0 and range_from_open > 0.5:
+            pattern = f"低开高走——开盘跳跌{open_gap:+.1f}%后反弹{range_from_open:+.1f}%，有资金逢低吸纳"
+        elif open_gap < -1.0 and range_from_open < -0.5:
+            pattern = f"低开低走——开盘跳跌{open_gap:+.1f}%，日内持续走弱至{range_from_open:+.1f}%，空方主导"
+        elif abs(open_gap) < 0.5 and abs(range_from_open) < 0.5:
+            pattern = f"窄幅震荡——开盘基本平开，日内振幅仅{abs(range_from_open):.1f}%，方向不明确"
+        else:
+            pattern = f"开盘涨跌{open_gap:+.1f}%，当前偏离开盘{range_from_open:+.1f}%"
+
+        high_low_range = (high_price - low_price) / prev_close * 100 if prev_close > 0 and high_price > 0 and low_price > 0 else 0
+        pattern += f"，日内振幅{high_low_range:.1f}%"
+
+        lines.append(f"### 盘中走势形态")
+        lines.append(f"")
+        lines.append(f"开盘 {open_price:.2f}（{open_gap:+.1f}%）→ 最高 {high_price:.2f} → 最低 {low_price:.2f} → 最新 {latest:.2f}")
+        lines.append(f"")
+        lines.append(f"**形态：{pattern}**")
+        lines.append(f"")
+
     lines.append(f"### T-1 日关键信号回顾")
     lines.append(f"")
     lines.append(f"| 指标 | T-1 日数值 | 信号解读 |")
@@ -504,20 +565,17 @@ def compute_premarket_snapshot(
     futures_data: dict[str, dict],
     overnight_news: list | None = None,
     session: str = "pre",
+    market: str = "US",
 ) -> PremarketSnapshot:
     """
-    计算盘前快照。
+    计算盘前快照（美股专属）。
 
-    输入：
-      pipeline_result: T-1 日完整分析结果
-      stock_tick:      itick /stock/tick 返回值（盘前价格 + te 确认）
-      futures_data:    {"NQ": {...quote...}, "ES": {...quote...}} 格式的期货数据
-                       每个 quote 可附带 kline 列表（key "kline_5min"）
-      overnight_news:  隔夜新闻列表
-      session:         当前交易时段
-
-    输出：
-      PremarketSnapshot — 包含结构化数据和 Markdown 文本
+    美股 24 小时交易，盘前数据具备参考价值：
+      - 盘前价格 + 成交量反映隔夜资金意图
+      - 盘口买卖比方向（非绝对值）反映隔夜挂单方向
+      - 期货是盘前最重要的方向锚——期货走势是判断开盘方向最可靠的信号
+      - 盘前价格与期货相对强弱判断是否有独立资金行为
+      - 距均线的跳空幅度预示开盘后回踩/延续概率
     """
     df = pipeline_result.df
     pre_price = stock_tick.get("latest", 0)
@@ -684,12 +742,35 @@ def compute_premarket_snapshot(
     lines.append(f"")
     lines.append(f"### 个股盘前")
     lines.append(f"")
-    lines.append(f"| 项目 | 数值 | 解读 |")
-    lines.append(f"|------|------|------|")
+    lines.append(f"| 项目 | 数值 | 盘前解读 |")
+    lines.append(f"|------|------|---------|")
     lines.append(f"| 盘前价格 | {pre_price:.2f}（{_pct_str(pre_change_pct)}） | {_pre_stock_assess(pre_change_pct, nq_change, es_change)} |")
     pre_vol = stock_tick.get("volume", 0)
-    vol_label = "较活跃" if pre_vol > 100000 else ("有成交" if pre_vol > 10000 else "极低")
-    lines.append(f"| 盘前成交量 | {pre_vol:,.0f} 股（{vol_label}） | 盘前量越大，开盘方向可信度越高 |")
+    if pre_vol > 200000:
+        vol_label = "高度活跃——开盘波动可能剧烈"
+    elif pre_vol > 100000:
+        vol_label = "较活跃——盘前方向可信度较高"
+    elif pre_vol > 10000:
+        vol_label = "有成交——盘前方向有参考意义但需盘中确认"
+    else:
+        vol_label = "极低——盘前价格方向信号偏弱"
+    lines.append(f"| 盘前成交量 | {pre_vol:,.0f} 股（{vol_label}） | — |")
+
+    # 跳空均线分析
+    if last is not None:
+        for ma_col, ma_name in [("ma_5", "MA5"), ("ma_10", "MA10"), ("ma_20", "MA20")]:
+            ma_val = last.get(ma_col)
+            if ma_val is not None and pd.notna(ma_val) and ma_val > 0:
+                gap = (pre_price - float(ma_val)) / float(ma_val) * 100
+                if abs(gap) > 2:
+                    interpretation = f"大幅跳空（{gap:+.1f}%），开盘后回踩/测试均线的概率较高"
+                elif abs(gap) > 1:
+                    interpretation = f"跳空{ma_name}（{gap:+.1f}%），开盘后需观察能否站稳"
+                else:
+                    interpretation = f"贴近{ma_name}（{gap:+.1f}%），均线将提供开盘支撑/压力参考"
+                lines.append(f"| 距 {ma_name}（T-1 日 {float(ma_val):.2f}） | {gap:+.1f}% | {interpretation} |")
+                break  # 只显示最关键的一条（MA5）避免表格过长
+
     te = stock_tick.get("trading_phase", -1)
     te_label = {0: "常规交易", 1: "盘前交易", 2: "盘后交易"}.get(te, f"未知({te})")
     lines.append(f"| 交易时段 | {te_label} | itick tick 数据直接标注 |")

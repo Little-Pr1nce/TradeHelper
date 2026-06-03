@@ -190,6 +190,7 @@ class Database:
         # 老版本数据库 schema 迁移
         _ensure_column(conn, "reports", "chart_path", "TEXT", "''")
         _ensure_column(conn, "news_sentiment", "content", "TEXT", "''")
+        _ensure_column(conn, "news_sentiment", "is_macro", "INTEGER", "0")
         _ensure_unique_news_index(conn)
         conn.commit()
         return conn
@@ -393,15 +394,16 @@ class Database:
         """
         if not news_list:
             return
-        sql = """INSERT INTO news_sentiment (code, date, title, source, content, sentiment, confidence)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)
+        sql = """INSERT INTO news_sentiment (code, date, title, source, content, sentiment, confidence, is_macro)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(code, date, title) DO UPDATE SET
                    source=excluded.source,
                    content=excluded.content,
                    sentiment=excluded.sentiment,
-                   confidence=excluded.confidence"""
+                   confidence=excluded.confidence,
+                   is_macro=excluded.is_macro"""
         data = [(n.code, n.date, n.title, n.source, n.content or "",
-                 n.sentiment, n.confidence)
+                 n.sentiment, n.confidence, 1 if getattr(n, 'is_macro', False) else 0)
                 for n in news_list]
         self._executemany_write(sql, data)
 

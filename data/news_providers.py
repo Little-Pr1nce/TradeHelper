@@ -5,6 +5,7 @@
 
   A 股：akshare 东方财富 stock_news_em（免费，项目已有依赖）
   美股：Finnhub company-news（可选，需 API Key）
+        Finnhub market-news（宏观新闻，与个股新闻一起做情感分析）
   兜底：LLM 生成（news_fetcher 层调用）
 """
 
@@ -259,3 +260,99 @@ def _is_company_relevant(title: str, content: str, name: str, code: str) -> bool
         if len(kw) > 2 and kw in title_lower:
             return True
     return False
+
+
+# ============================================================
+# 美股宏观新闻（Finnhub general news）
+# ============================================================
+
+class FinnhubMarketNewsProvider(BaseNewsProvider):
+    """美股宏观新闻 — Finnhub /news?category=general。
+
+    获取全市场宏观新闻（利率决议、CPI、地缘政治、行业政策等），
+    作为个股新闻的补充，让新闻面分析不只依赖公司层面消息。
+    """
+
+    @property
+    def name(self) -> str:
+        return "Finnhub宏观"
+
+    def __init__(self, api_key: str):
+        self._api_key = (api_key or "").strip()
+
+    def fetch(self, code: str, name: str, market: str, limit: int) -> list[NewsItem]:
+        if market != "US" or not self._api_key:
+            return []
+
+        url = "https://finnhub.io/api/v1/news"
+        params = {
+            "category": "general",
+            "token": self._api_key,
+        }
+
+        def _call():
+            import requests
+            resp = requests.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, list):
+                raise ValueError(f"unexpected response: {type(data).__name__}")
+            return data
+
+        try:
+            raw = _retry(_call, max_retries=2, label=self.name)
+        except Exception as e:
+            logger.warning(f"{self.name} 获取失败: {e}")
+            return []
+
+        items: list[NewsItem] = []
+        for entry in raw[:limit * 2]:
+            title = str(entry.get("headline", "")).strip()
+            if not title:
+                continue
+            ts = entry.get("datetime")
+            if isinstance(ts, (int, float)) and ts > 0:
+                news_date = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+            else:
+                news_date = date.today().isoformat()
+
+            items.append(NewsItem(
+                code=code,
+                date=news_date,
+                title=title,
+                source=str(entry.get("source", "Finnhub")).strip() or "Finnhub",
+                content=str(entry.get("summary", "")).strip()[:500],
+                is_macro=True,
+            ))
+            if len(items) >= limit:
+                break
+
+        logger.info(f"{self.name}: 获取 {len(items)} 条宏观新闻")
+        return items
+
+
+def fetch_macro_news(
+    market: str,
+    news_token_us: str = "",
+    limit: int = 5,
+) -> list[NewsItem]:
+    """
+    获取宏观新闻（仅美股启用）。
+
+    Args:
+        market: 市场 (A/US)
+        news_token_us: Finnhub API Key
+        limit: 最大条数
+
+    Returns:
+        NewsItem 列表（is_macro=True），A 股返回空列表
+    """
+    if market != "US" or not news_token_us:
+        return []
+    provider = FinnhubMarketNewsProvider(news_token_us)
+    # 宏观新闻与具体股票无关，传空 code/name
+    try:
+        return provider.fetch(code="", name="", market=market, limit=limit)
+    except Exception as e:
+        logger.warning(f"宏观新闻获取失败: {e}")
+        return []

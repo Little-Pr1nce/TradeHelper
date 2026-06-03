@@ -39,17 +39,30 @@ def fetch_depth_factor(
     region = _a_stock_region(code) if market_type == "A" else "US"
 
     try:
+        import time as _time
         import requests
-        resp = requests.get(
-            "https://api0.itick.org/stock/depth",
-            params={"region": region, "code": code},
-            headers={"accept": "application/json", "token": token},
-            timeout=15,
-        )
-        data = resp.json()
-        if data.get("code") != 0:
-            logger.warning(f"itick depth API 错误: {data.get('msg')}")
-            return _empty_result()
+        last_error = None
+        for attempt in range(3):
+            try:
+                resp = requests.get(
+                    "https://api0.itick.org/stock/depth",
+                    params={"region": region, "code": code},
+                    headers={"accept": "application/json", "token": token},
+                    timeout=15,
+                )
+                data = resp.json()
+                if data.get("code") != 0:
+                    logger.warning(f"itick depth API 错误: {data.get('msg')}")
+                    return _empty_result()
+                break  # 成功，跳出重试循环
+            except Exception as e:
+                last_error = e
+                if attempt < 2:
+                    delay = 1.5 * (attempt + 1)
+                    logger.debug(f"盘口请求重试 {attempt+1}/3 in {delay}s: {e}")
+                    _time.sleep(delay)
+        else:
+            raise last_error
 
         depth = data.get("data", {})
         bids = depth.get("b", [])

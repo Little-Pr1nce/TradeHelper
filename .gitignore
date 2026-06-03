@@ -25,3 +25,4 @@ Thumbs.db
 # macOS
 *.dmg
 CLAUDE.md
+/AGENTS.md

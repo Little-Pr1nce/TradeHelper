@@ -348,6 +348,9 @@ class BacktestEngine:
             "ThresholdTrendStrategy": 3,
             "MeanReversionStrategy": 5,
             "MomentumNewsStrategy": 2,
+            "BollingerBreakoutStrategy": 3,
+            "DualThrustStrategy": 3,
+            "TurtleATRStrategy": 5,
         }
         cls_name = type(strategy).__name__
         bars = cooldown_map.get(cls_name, 3)

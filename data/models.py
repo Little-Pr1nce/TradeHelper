@@ -145,6 +145,7 @@ class NewsItem:
     content: str = ""
     sentiment: str = ""
     confidence: float = 0.0
+    is_macro: bool = False  # 是否为宏观新闻（非个股新闻）
 
     def to_dict(self) -> dict:
         return asdict(self)

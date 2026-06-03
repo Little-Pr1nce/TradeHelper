@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import pandas as pd
+import numpy as np
 
 
 @dataclass
@@ -56,6 +57,7 @@ class Position:
     highest_close: float = 0.0   # 持仓期间最高收盘价（移动止盈用）
     stop_loss: float = 0.0       # 当前硬止损价
     added_position: bool = False # 是否已加仓（策略C用）
+    additions_count: int = 0     # 已加仓次数（策略F用）
 
 
 @dataclass
@@ -117,6 +119,40 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> "pd.Series":
         [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
     ).max(axis=1)
     return tr.ewm(alpha=1 / period, adjust=False).mean()
+
+
+def compute_percentile_score(
+    df: pd.DataFrame, window: int = 252, min_periods: int = 60,
+) -> "pd.Series":
+    """
+    将 Final_Score 映射到其滚动窗口内的百分位 [0, 1]。
+
+    解决 7 因子合成得分在单边行情中偏离 [-1,+1] 全区间的问题。
+    百分位模式使得阈值（如 entry > 0.8）在任何行情下都能合理触发。
+
+    Args:
+        df: 含 Final_Score 列的 DataFrame
+        window: 滚动窗口（默认 252 个交易日 ≈ 1 年）
+        min_periods: 最少样本数
+
+    Returns:
+        百分位 Series（0~1），长度与 df 相同
+    """
+    scores = df["Final_Score"].astype(float)
+    result = pd.Series(np.nan, index=scores.index, dtype=float)
+    for i in range(len(scores)):
+        start = max(0, i - window + 1)
+        hist = scores.iloc[start:i + 1].dropna()
+        if len(hist) < min_periods:
+            result.iloc[i] = np.nan
+        else:
+            result.iloc[i] = (hist < scores.iloc[i]).mean()
+    return result
+
+
+def _empty_result_dict() -> dict:
+    """helper for strategies returning empty signal."""
+    return {"score": 0.0, "percentile": np.nan, "signal": ""}
 
 
 
