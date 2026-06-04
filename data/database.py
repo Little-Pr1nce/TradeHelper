@@ -189,6 +189,8 @@ class Database:
         conn.executescript(CREATE_TABLES_SQL)       # 自动建表
         # 老版本数据库 schema 迁移
         _ensure_column(conn, "reports", "chart_path", "TEXT", "''")
+        _ensure_column(conn, "reports", "mode", "TEXT", "'eod'")
+        _ensure_column(conn, "reports", "prediction_data", "TEXT", "''")
         _ensure_column(conn, "news_sentiment", "content", "TEXT", "''")
         _ensure_column(conn, "news_sentiment", "is_macro", "INTEGER", "0")
         _ensure_unique_news_index(conn)
@@ -301,13 +303,14 @@ class Database:
         """
         sql = """INSERT INTO reports
                  (code, name, market, backtest_period, create_time, content,
-                  chart_path, pdf_path, rating, rated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+                  chart_path, pdf_path, rating, rated_at, mode, prediction_data)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
         cursor = self._execute_write(sql, (
             report.code, report.name, report.market, report.backtest_period,
             report.create_time, report.content,
             report.chart_path or "", report.pdf_path or "",
-            report.rating, report.rated_at or ""
+            report.rating, report.rated_at or "",
+            report.mode or "eod", report.prediction_data or ""
         ))
         return cursor.lastrowid
 
@@ -327,18 +330,35 @@ class Database:
         ).fetchall()
         return [AnalysisReport.from_dict(dict(r)) for r in rows]
 
-    def get_reports_by_code(self, code: str) -> list[AnalysisReport]:
+    def get_reports_by_code(self, code: str, mode: str | None = None,
+                            since_hours: int | None = None) -> list[AnalysisReport]:
         """
         按股票代码筛选报告。
 
         Args:
             code: 股票代码
+            mode: 可选，过滤分析模式（"eod"/"intraday"/"pre"）
+            since_hours: 可选，仅返回最近 N 小时内的报告
 
         Returns:
-            该股票的所有报告（时间倒序）
+            该股票的报告列表（时间倒序）
         """
+        conditions = ["code = ?"]
+        params: list = [code]
+
+        if mode:
+            conditions.append("mode = ?")
+            params.append(mode)
+
+        if since_hours is not None:
+            from datetime import datetime, timedelta
+            cutoff = (datetime.now() - timedelta(hours=since_hours)).isoformat()
+            conditions.append("create_time >= ?")
+            params.append(cutoff)
+
+        where = " AND ".join(conditions)
         rows = self.execute(
-            "SELECT * FROM reports WHERE code = ? ORDER BY create_time DESC", (code,)
+            f"SELECT * FROM reports WHERE {where} ORDER BY create_time DESC", tuple(params)
         ).fetchall()
         return [AnalysisReport.from_dict(dict(r)) for r in rows]
 

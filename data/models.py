@@ -110,6 +110,8 @@ class AnalysisReport:
     pdf_path: str = ""
     rating: Optional[int] = None
     rated_at: str = ""
+    mode: str = "eod"              # 分析模式: "eod" / "intraday" / "pre"
+    prediction_data: str = ""      # JSON 格式的结构化预测数据（盘前报告使用）
 
     def to_dict(self) -> dict:
         return asdict(self)

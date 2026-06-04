@@ -2,7 +2,7 @@
 因子有效性检验 — 单股时序 IC + 滚动 IR。
 
 对 Alpha 模型的 7 个技术指标逐个做有效性检验：
-  - ts-IC: 因子序列与 5 日远期收益的 Spearman 秩相关
+  - ts-IC: 因子序列与 N 日远期收益的 Spearman 秩相关
   - 滚动 IR: 60 日滚动 IC 的 mean/std（衡量因子稳定性）
 
 分档 → 动态调权：
@@ -12,15 +12,24 @@
   D 级 (都不达标)               → 剔除 ×0.0
   ? 级 (样本不足)               → 原权重保留
 
+V2 更新：
+  - 支持按分析模式选择前瞻窗口（eod→5日, intraday/pre→1日）
+  - 内存缓存避免同一股票相同数据重复计算
+
 源自 stock-analyst 的 factor_validation 设计。
 """
 
 import logging
+import hashlib
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# ── 内存缓存：避免同一股票相同数据重复计算 ──
+_validation_cache: dict[str, dict] = {}
+_CACHE_MAX_SIZE = 32  # 最多缓存 32 只股票的检验结果
 
 # 阈值
 IC_THRESHOLD = 0.06
@@ -35,10 +44,15 @@ GRADE_MULTIPLIER = {"A": 1.0, "B": 1.0, "C": 0.5, "D": 0.0, "?": 1.0}
 INDICATOR_COLUMNS = ["rsi", "dif", "macd_bar", "bb_pct", "k", "d", "j"]
 
 
+# 分析模式 → 默认前瞻窗口映射
+MODE_FWD_DAYS = {"eod": 5, "intraday": 1, "pre": 1}
+
+
 def validate_factors(
     df: pd.DataFrame,
     close_col: str = "close",
-    fwd_days: int = 5,
+    fwd_days: int | None = None,
+    mode: str = "eod",
     rolling_window: int = 60,
     min_samples: int = 100,
 ) -> dict[str, dict]:
@@ -48,16 +62,26 @@ def validate_factors(
     Args:
         df: 包含原始指标列 + close 列的 DataFrame（需有足够行数）
         close_col: 收盘价列名
-        fwd_days: 远期收益窗口（默认 5 个交易日）
+        fwd_days: 远期收益窗口（显式指定时优先，否则由 mode 决定）
+        mode: 分析模式 "eod"→5日, "intraday"/"pre"→1日前瞻
         rolling_window: IC 滚动窗口
         min_samples: 最少样本数
 
     Returns:
         {指标名: {IC, IR, grade, multiplier, direction_correct, samples}}
     """
+    if fwd_days is None:
+        fwd_days = MODE_FWD_DAYS.get(mode, 5)
+
     if close_col not in df.columns:
         logger.warning("因子检验: 缺少 close 列，无法计算远期收益")
         return _all_unknown()
+
+    # ── 缓存检查 ──
+    cache_key = _make_cache_key(df, close_col, fwd_days)
+    if cache_key in _validation_cache:
+        logger.debug(f"因子检验缓存命中 ({cache_key[:12]}...)，跳过重复计算")
+        return _validation_cache[cache_key]
 
     close = df[close_col].astype(float)
     fwd_ret = close.shift(-fwd_days) / close - 1
@@ -107,42 +131,72 @@ def validate_factors(
             f"评级={grade}  multiplier={multiplier}  samples={n}"
         )
 
+    # ── 存入缓存（LRU 淘汰） ──
+    if len(_validation_cache) >= _CACHE_MAX_SIZE:
+        # 淘汰最早的一个 key
+        oldest = next(iter(_validation_cache))
+        del _validation_cache[oldest]
+    _validation_cache[cache_key] = results
+
     return results
 
 
 def apply_factor_weights(
     indicator_values: dict[str, pd.Series],
     validation: dict[str, dict],
+    regime_weights: dict[str, float] | None = None,
 ) -> pd.Series:
     """
-    应用因子检验结果：D 级剔除，C 级半权，A/B 级全权，等权平均。
+    应用因子检验结果 + 市场状态权重，加权合成技术面得分。
+
+    综合两层权重：
+      1. 检验权重（multiplier）：D 级剔除 ×0.0，C 级半权 ×0.5，A/B 级全权 ×1.0
+      2. 市场状态权重（regime）：趋势市 MACD/ADX 高权重，震荡市 RSI/KDJ 高权重
 
     Args:
         indicator_values: {列名: 归一化后的 Series（已 tanh）}
         validation: validate_factors 返回的检验结果
+        regime_weights: 市场状态权重 {col: weight}，None 则等权
 
     Returns:
         加权平均后的 Tech_Normalized_Score
     """
+    if regime_weights is None:
+        n = len(indicator_values)
+        regime_weights = {col: 1.0 / n for col in indicator_values}
+
     weighted = []
+    total_weight = 0.0
     for col, series in indicator_values.items():
         v = validation.get(col, {})
         mult = v.get("multiplier", 1.0)
         if mult == 0.0:
             logger.debug(f"  因子 {col} D 级剔除，不参与打分")
             continue
-        weighted.append(series * mult)
+        rw = regime_weights.get(col, 1.0 / len(indicator_values))
+        combined_weight = mult * rw
+        weighted.append(series * combined_weight)
+        total_weight += combined_weight
 
-    if not weighted:
+    if not weighted or total_weight == 0:
         logger.warning("所有因子均被剔除，Tech_Normalized_Score 置 0")
         return pd.Series(0.0, index=next(iter(indicator_values.values())).index)
 
-    # 等权平均（权重已在 multiplier 中体现）
-    result = pd.concat(weighted, axis=1).mean(axis=1)
+    # 加权平均
+    result = pd.concat(weighted, axis=1).sum(axis=1) / total_weight
     return result
 
 
 # ── 内部函数 ──
+
+
+def _make_cache_key(df: pd.DataFrame, close_col: str, fwd_days: int) -> str:
+    """生成因子检验的缓存键（基于 close 列的数据指纹 + 前瞻天数）。"""
+    close = df[close_col].astype(float)
+    # 用 close 列的关键统计量 + 尾值做轻量指纹
+    fingerprint = f"{close.mean():.6f}_{close.std():.6f}_{close.iloc[-1]:.4f}_{len(close)}"
+    hash_hex = hashlib.md5(fingerprint.encode()).hexdigest()[:12]
+    return f"{hash_hex}_fwd{fwd_days}"
 
 
 def _all_unknown() -> dict:

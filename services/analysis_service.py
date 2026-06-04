@@ -156,13 +156,29 @@ class AnalysisService:
         except Exception as e:
             logger.warning(f"基本面数据获取失败: {e}")
 
+        # ---- 4.6. 获取盘口数据（实时信号，仅 itick，需在管道前获取以入评分） ----
+        depth_factor = None
+        if Settings().get("stock_data_token", ""):
+            try:
+                _progress("正在获取实时盘口...")
+                from alpha.depth_factor import fetch_depth_factor
+                depth_factor = fetch_depth_factor(
+                    code, request.market, Settings().get("stock_data_token", ""),
+                )
+            except Exception as e:
+                logger.warning(f"盘口数据获取失败: {e}")
+
         # ---- 5. 执行分析管道 ----
         _progress("正在执行量化分析...")
         market_type = detect_market(code) or request.market
+        depth_score = depth_factor.get("depth_score", 0.0) if depth_factor else 0.0
+        depth_avail = depth_factor.get("available", False) if depth_factor else False
         pipeline_result = run_pipeline(
             df, news_df, market=market_type,
             w_tech=w_tech, w_news=w_news,
             fundamental_data=fundamental_data,
+            depth_score=depth_score,
+            depth_available=depth_avail,
         )
         if _stop(): return self._empty_response(code)
 
@@ -182,18 +198,9 @@ class AnalysisService:
         dates = pipeline_result.df["date"]
         data_range = f"{dates.iloc[0].strftime('%Y-%m-%d')} ~ {dates.iloc[-1].strftime('%Y-%m-%d')}"
 
-        # 盘口数据（实时信号，仅 itick）
-        depth_factor = None
+        # 实时报价（用于报告展示）
         realtime_quote = None
         if Settings().get("stock_data_token", ""):
-            try:
-                _progress("正在获取实时盘口...")
-                from alpha.depth_factor import fetch_depth_factor
-                depth_factor = fetch_depth_factor(
-                    code, request.market, Settings().get("stock_data_token", ""),
-                )
-            except Exception as e:
-                logger.warning(f"盘口数据获取失败: {e}")
             try:
                 _progress("正在获取实时报价...")
                 fetcher = get_stock_fetcher()
@@ -390,13 +397,17 @@ class AnalysisService:
 
     @staticmethod
     def _persist_report(info: StockInfo, market: str, period: str,
-                        content: str, chart_path: str) -> int | None:
+                        content: str, chart_path: str,
+                        mode: str = "eod",
+                        prediction_data: str = "") -> int | None:
         report = AnalysisReport(
             code=info.code, name=info.name, market=market,
             backtest_period=period,
             create_time=datetime.now().isoformat(),
             content=content,
             chart_path=chart_path or "",
+            mode=mode,
+            prediction_data=prediction_data,
         )
         return Database().insert_report(report)
 
@@ -456,10 +467,9 @@ class AnalysisService:
         info = self._fetch_stock_info(code, request.market)
         if _stop(): return self._empty_response(code)
 
-        # ---- 3. 获取 T-1 日完整分析结果 ----
-        t1_report_content, t1_pipeline_result = self._get_t1_analysis(
-            code, request, _progress, _stop,
-        )
+        # ---- 3. 获取 T-1 日完整分析结果 + 盘前报告 ----
+        t1_report_content, pre_report_content, pre_prediction_data, t1_pipeline_result = \
+            self._get_recent_analyses(code, _progress, _stop)
         if _stop(): return self._empty_response(code)
 
         # ---- 4. 并行拉取实时数据 ----
@@ -490,7 +500,7 @@ class AnalysisService:
         except Exception as e:
             logger.warning(f"实时成交数据获取失败: {e}")
 
-        # 增量新闻（今日）
+        # 增量新闻（今日，含情感分析）
         try:
             today_news_list = fetch_news(
                 name=info.name, code=code, market=request.market,
@@ -498,6 +508,16 @@ class AnalysisService:
                 news_token_a=settings.get("news_token_a", ""),
                 limit=5,
             )
+            if today_news_list:
+                needs_analysis = [n for n in today_news_list if not n.sentiment]
+                if needs_analysis:
+                    from indicators.sentiment import analyze
+                    analyzed = analyze(needs_analysis)
+                    analyzed_map = {(n.date, n.title): n for n in analyzed}
+                    today_news_list = [
+                        analyzed_map.get((n.date, n.title), n)
+                        for n in today_news_list
+                    ]
         except Exception as e:
             logger.warning(f"增量新闻获取失败: {e}")
 
@@ -530,6 +550,7 @@ class AnalysisService:
             today_news=today_news_list,
             session=session,
             market=request.market,
+            premarket_prediction_json=pre_prediction_data,
         )
         if _stop(): return self._empty_response(code)
 
@@ -608,8 +629,8 @@ class AnalysisService:
         if _stop(): return self._empty_response(code)
 
         # ---- 3. 获取 T-1 日完整分析结果 ----
-        t1_report_content, t1_pipeline_result = self._get_t1_analysis(
-            code, request, _progress, _stop,
+        t1_report_content, _, _, t1_pipeline_result = self._get_recent_analyses(
+            code, _progress, _stop,
         )
         if _stop(): return self._empty_response(code)
 
@@ -661,7 +682,7 @@ class AnalysisService:
         except Exception as e:
             logger.warning(f"标普期货 K 线获取失败: {e}")
 
-        # 隔夜新闻
+        # 隔夜新闻（含情感分析）
         try:
             overnight_news_list = fetch_news(
                 name=info.name, code=code, market=request.market,
@@ -669,6 +690,16 @@ class AnalysisService:
                 news_token_a=settings.get("news_token_a", ""),
                 limit=8,
             )
+            if overnight_news_list:
+                needs_analysis = [n for n in overnight_news_list if not n.sentiment]
+                if needs_analysis:
+                    from indicators.sentiment import analyze
+                    analyzed = analyze(needs_analysis)
+                    analyzed_map = {(n.date, n.title): n for n in analyzed}
+                    overnight_news_list = [
+                        analyzed_map.get((n.date, n.title), n)
+                        for n in overnight_news_list
+                    ]
         except Exception as e:
             logger.warning(f"隔夜新闻获取失败: {e}")
 
@@ -720,6 +751,22 @@ class AnalysisService:
         if not report_content:
             report_content = "盘前报告生成失败，请稍后重试。"
 
+        # 存储盘前预测数据（供盘中分析时做预测验证）
+        import json
+        prediction_data = json.dumps({
+            "pre_price": snapshot.pre_price,
+            "pre_change_pct": snapshot.pre_change_pct,
+            "nq_change_pct": snapshot.nq_change_pct,
+            "es_change_pct": snapshot.es_change_pct,
+            "futures_score": snapshot.futures_score,
+            "t1_final_score": snapshot.t1_final_score,
+            "t1_date": str(t1_pipeline_result.df["date"].iloc[-1])[:10] if t1_pipeline_result and "date" in t1_pipeline_result.df.columns else "",
+            "generated_at": datetime.now().isoformat(),
+        }, ensure_ascii=False)
+        self._persist_report(info, request.market, request.period,
+                            report_content, "", mode="pre",
+                            prediction_data=prediction_data)
+
         _progress("盘前分析完成")
         return AnalysisResponse(
             stock_info=info,
@@ -732,35 +779,53 @@ class AnalysisService:
 
     # ======================== T-1 日分析缓存与获取 ========================
 
-    def _get_t1_analysis(
-        self, code: str, request: AnalysisRequest,
+    def _get_recent_analyses(
+        self, code: str,
         progress, stop,
-    ) -> tuple[str | None, PipelineResult | None]:
+    ) -> tuple[str | None, str | None, str | None, PipelineResult | None]:
         """
-        尝试从 DB 缓存读取最近 24 小时内的盘后分析报告。
+        从 DB 缓存读取最近的盘后和盘前分析报告。
+
+        缓存策略：
+          - 盘后(eod)报告：最近 7 天内最新的一份
+          - 盘前(pre)报告：最近 12 小时内最新的一份
 
         Returns:
-            (report_content, pipeline_result) — 可能为 None（无缓存）
+            (eod_report_content, pre_report_content, pre_prediction_data, pipeline_result)
+            — 各元素可能为 None（无缓存）
+            — pre_prediction_data: JSON 字符串，盘前报告的结构化预测数据
+            — pipeline_result 不可从 content 恢复，始终为 None
         """
+        eod_report = None
+        pre_report = None
+        pre_prediction = None
         try:
-            reports = Database().get_reports_by_code(code)
-            if reports:
-                latest = reports[0]
-                created = None
-                if latest.create_time:
-                    try:
-                        created = datetime.fromisoformat(latest.create_time)
-                    except Exception:
-                        pass
-                if created and (datetime.now() - created) < timedelta(hours=24):
-                    logger.info(
-                        f"复用 T-1 日缓存报告: {latest.create_time}, {len(latest.content)} chars"
-                    )
-                    return latest.content, None  # pipeline_result 不可从 content 恢复，传 None
-        except Exception as e:
-            logger.warning(f"读取 T-1 缓存报告失败: {e}")
+            # 查询最近的盘后报告（7 天内）
+            eod_reports = Database().get_reports_by_code(
+                code, mode="eod", since_hours=168,  # 7 天
+            )
+            if eod_reports:
+                eod_report = eod_reports[0].content
+                logger.info(
+                    f"复用 T-1 盘后缓存报告: {eod_reports[0].create_time}, "
+                    f"{len(eod_report)} chars"
+                )
 
-        return None, None
+            # 查询最近的盘前报告（12 小时内）
+            pre_reports = Database().get_reports_by_code(
+                code, mode="pre", since_hours=12,
+            )
+            if pre_reports:
+                pre_report = pre_reports[0].content
+                pre_prediction = pre_reports[0].prediction_data or None
+                logger.info(
+                    f"复用盘前缓存报告: {pre_reports[0].create_time}, "
+                    f"{len(pre_report)} chars, prediction={'有' if pre_prediction else '无'}"
+                )
+        except Exception as e:
+            logger.warning(f"读取近期缓存报告失败: {e}")
+
+        return eod_report, pre_report, pre_prediction, None
 
     def _run_eod_to_t1(
         self, code: str, request: AnalysisRequest,
@@ -802,9 +867,12 @@ class AnalysisService:
                 w_tech, w_news = 0.6, 0.4
 
             market_type = detect_market(code) or request.market
+            # 盘中/盘前模式使用更短的因子验证窗口（1 日而非 5 日）
+            validation_mode = request.mode if request.mode in ("intraday", "pre") else "eod"
             pipeline_result = run_pipeline(
                 df, news_df, market=market_type,
                 w_tech=w_tech, w_news=w_news,
+                validation_mode=validation_mode,
             )
             return pipeline_result
         except Exception as e:
