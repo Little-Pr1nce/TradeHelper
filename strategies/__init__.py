@@ -25,6 +25,7 @@ from strategies.momentum_news import MomentumNewsStrategy
 from strategies.bollinger_breakout import BollingerBreakoutStrategy
 from strategies.dual_thrust import DualThrustStrategy
 from strategies.turtle_atr import TurtleATRStrategy
+from strategies.ma_crossover import MACrossoverStrategy
 
 # 策略注册表
 _STRATEGY_REGISTRY: dict[str, type[BaseExecutionStrategy]] = {
@@ -34,6 +35,7 @@ _STRATEGY_REGISTRY: dict[str, type[BaseExecutionStrategy]] = {
     "D": BollingerBreakoutStrategy,
     "E": DualThrustStrategy,
     "F": TurtleATRStrategy,
+    "G": MACrossoverStrategy,
     # 别名
     "threshold_trend": ThresholdTrendStrategy,
     "mean_reversion": MeanReversionStrategy,
@@ -41,6 +43,7 @@ _STRATEGY_REGISTRY: dict[str, type[BaseExecutionStrategy]] = {
     "bollinger_breakout": BollingerBreakoutStrategy,
     "dual_thrust": DualThrustStrategy,
     "turtle_atr": TurtleATRStrategy,
+    "ma_crossover": MACrossoverStrategy,
 }
 
 
@@ -67,13 +70,13 @@ def get_execution_strategy(name: str, **kwargs) -> BaseExecutionStrategy:
 
 def get_available_strategies() -> list[str]:
     """返回可用策略标识列表。"""
-    return ["A", "B", "C", "D", "E", "F"]
+    return ["A", "B", "C", "D", "E", "F", "G"]
 
 
 def get_strategy_info() -> dict[str, dict]:
     """返回所有策略的名称和描述。"""
     result = {}
-    for key in ("A", "B", "C", "D", "E", "F"):
+    for key in ("A", "B", "C", "D", "E", "F", "G"):
         s = get_execution_strategy(key)
         result[key] = {"name": s.name, "description": s.description}
     return result

@@ -274,11 +274,11 @@ cache(24h) → API Provider → LLM 补充 → 历史缓存兜底
 
 ## 十、配置说明
 
-`~/.tradehelper/config.json`：
+`系统标准应用配置目录/TradeHelper/config.json`：
 
 ```json
 {
-  "work_dir": "~/TradeHelperData",
+  "work_dir": "~/TradeHelper",
   "llm_base_url": "https://api.deepseek.com",
   "llm_api_key": "sk-...",
   "llm_model": "deepseek-v4-flash",
@@ -331,3 +331,60 @@ cache(24h) → API Provider → LLM 补充 → 历史缓存兜底
 | 新增 UI 页面 | 继承 `ft.Container`，在 `main.py` Stack 注册 |
 | 接入实时数据 | `data_adapters/__init__.py` → 实现 `DataAdapter` 接口 |
 | 调整报告提示词 | `report/prompts.py` → 修改 `SYSTEM_PROMPT` 或 `build_user_prompt()` |
+
+---
+
+## 第十三章：优化历史
+
+### 2026-06 优化批次
+
+#### 1. 三时段联动闭环
+盘前报告存储结构化预测数据（pre_price, futures_score 等），盘中分析自动读取并生成「盘前预测验证」小节，比较预测方向 vs 实际开盘方向，标注「预测正确/部分正确/偏差」。LLM 在第八章中交叉解读验证结果，调整置信度。
+
+#### 2. 盘口/期货数据量化入评分
+- **盘口因子**：depth_score 以 10% 权重入 Final_Score（无盘口时自动回退）
+- **期货情绪**：futures_score = 0.7 × tanh(涨跌幅 × 30) + 0.3 × K 线趋势得分
+
+#### 3. 盘中动量信号
+新增 VWAP 偏离（价格 vs 成交量加权均价）和日内动量（开盘→最新、距高低点），这些是机构交易者的关键参考指标。
+
+#### 4. 新闻情感时间衰减
+半衰期 1 天指数衰减：`weight = exp(-ln(2) × days_ago / 1.0)`。同一天多条新闻加权平均，近期新闻比旧新闻更有影响力。
+
+#### 5. 代码层去除解读
+快照函数 (`compute_intraday_snapshot`, `compute_premarket_snapshot`) 中所有硬编码的 if/else 解读文本（如「短期强势」「买盘显著占优」等）全部移除。表格从 3 列（项目/数值/解读）改为 2 列（项目/数值），全部解读由 LLM 完成。瘦身 ~200 行。
+
+#### 6. 市场状态自适应策略选择
+- `detect_market_regime()` 从 3 种扩展为 5 种行情（trending_volatile / trending_steady / ranging / transitional / unknown）
+- 7 个策略各标注 `suitable_regimes`，回测时自动过滤不适配策略
+- 新增策略 G（MA 交叉确认），覆盖慢涨行情缺口
+- 报告中展示行情判断 + 策略适配表
+
+#### 7. 首次配置引导
+- 4 项必填（工作目录/LLM URL/Key/模型），红色 * 标注
+- 首次启动强制跳设置页，分析/历史 tab 灰色禁用
+- 保存时验证必填项，缺失具体提示
+- 分析时按市场校验数据源 Token（美股需 stock_token_us + news_token_us，A 股需 stock_token_a）
+
+#### 8. 配置文件跨平台
+- macOS: `~/Library/Application Support/TradeHelper/config.json`
+- Windows: `%APPDATA%/TradeHelper/config.json`
+- Linux: `~/.config/TradeHelper/config.json`
+- 固定路径，不随 work_dir 变动
+
+#### 9. 数据源 Token 拆分
+`stock_data_token` 拆为 `stock_token_us`（美股）和 `stock_token_a`（A 股），`get_stock_fetcher(market)` 按市场选择。
+
+#### 10. 跨平台打包
+PyInstaller + 内置 FinBERT 模型（`prepare_model.py` 从 HF 缓存导出）+ Mac/Win 构建脚本。
+
+### 后续优化路线图
+
+| 优先级 | 项目 | 说明 |
+|--------|------|------|
+| P0 | Massive 数据源接入 | 替代 itick，降低数据成本 |
+| P0 | 期货数据替代 | NQ/ES → QQQ/SPY ETF 盘前数据 |
+| P1 | A 股盘前/盘中 | 当前仅美股支持 |
+| P1 | 策略参数自动调优 | 基于回测绩效优化阈值 |
+| P2 | Web 版完善 | Flet Web 模式 |
+| P3 | 打包体积优化 | ONNX 量化 PyTorch 模型 |

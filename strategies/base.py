@@ -82,6 +82,9 @@ class BaseExecutionStrategy(ABC):
     结合策略上下文（仓位、资金、市场环境），生成 Order 列表。
     """
 
+    # 适配的行情类型（空列表 = 全行情通用）
+    suitable_regimes: list[str] = []
+
     @abstractmethod
     def generate_orders(
         self, df: pd.DataFrame, context: StrategyContext

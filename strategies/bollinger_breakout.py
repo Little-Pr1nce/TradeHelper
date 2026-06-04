@@ -33,6 +33,8 @@ class BollingerBreakoutStrategy(BaseExecutionStrategy):
       cooldown_bars=3
     """
 
+
+    suitable_regimes = ["ranging"]
     def __init__(self, entry_pct: float = 0.70, exit_pct: float = 0.40,
                  cooldown_bars: int = 3, atr_period: int = 14,
                  atr_mult_stop: float = 1.5, risk_budget: float = 0.02,

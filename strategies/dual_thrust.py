@@ -36,6 +36,8 @@ class DualThrustStrategy(BaseExecutionStrategy):
       cooldown_bars=3
     """
 
+
+    suitable_regimes = ["trending_volatile"]
     def __init__(self, entry_pct: float = 0.70, exit_pct: float = 0.40,
                  lookback_n: int = 20, k1: float = 0.2, k2: float = 0.2,
                  cooldown_bars: int = 3, atr_period: int = 14,

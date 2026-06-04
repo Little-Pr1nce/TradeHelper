@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class MainPage(ft.Container):
+    """主分析页面 — 股票输入、参数选择、分析触发、结果展示。"""
 
     def __init__(self):
         super().__init__()
@@ -89,19 +90,13 @@ class MainPage(ft.Container):
         )
 
         # ── 分析模式（盘后/盘中/盘前） ──
-        has_itick = bool(Settings().get("stock_data_token", ""))
+        has_token = bool(Settings().get("stock_token_us", ""))
         self._mode_dd = ft.Dropdown(
             label="分析模式", width=140, value="eod",
             options=[
                 ft.dropdown.Option("eod", "📊 盘后分析"),
-                ft.dropdown.Option(
-                    "intraday", "⏱ 盘中分析",
-                    disabled=not has_itick,
-                ),
-                ft.dropdown.Option(
-                    "pre", "🌅 盘前分析",
-                    disabled=not has_itick,
-                ),
+                ft.dropdown.Option("intraday", "⏱ 盘中分析", disabled=not has_token),
+                ft.dropdown.Option("pre", "🌅 盘前分析", disabled=not has_token),
             ],
             border_radius=8,
         )
@@ -266,11 +261,20 @@ class MainPage(ft.Container):
 
     # ======================== 事件处理 ========================
 
+    def refresh_modes(self):
+        """刷新分析模式下拉框（设置保存后调用，重新检查 token）。"""
+        has_token = bool(Settings().get("stock_token_us", ""))
+        self._mode_dd.options = [
+            ft.dropdown.Option("eod", "📊 盘后分析"),
+            ft.dropdown.Option("intraday", "⏱ 盘中分析", disabled=not has_token),
+            ft.dropdown.Option("pre", "🌅 盘前分析", disabled=not has_token),
+        ]
+        self._mode_dd.update()
+
     def _on_mode_change(self, e):
         """分析模式切换时，自动调整市场选择。"""
         mode = self._mode_dd.value
         if mode == "pre":
-            # 盘前分析目前仅支持美股
             self._market_dd.value = "US"
             self._market_dd.disabled = True
             self._market_dd.update()
@@ -284,17 +288,28 @@ class MainPage(ft.Container):
         if not raw:
             self._show_error("请输入股票代码或名称")
             return
-        if not Settings().get("work_dir", ""):
-            self._show_error("请先在设置中配置工作目录")
+
+        settings = Settings()
+        if not settings.is_fully_configured():
+            missing = settings.missing_fields()
+            labels = [Settings.FIELD_LABELS.get(f, f) for f in missing]
+            self._show_error(f"请先在「设置」中配置：{'、'.join(labels)}")
             return
 
+        # 根据市场检查数据源 token
+        market = self._market_dd.value
         mode = self._mode_dd.value
-        if mode in ("intraday", "pre") and not Settings().get("stock_data_token", ""):
-            self._show_error(
-                f"「{self._mode_name(mode)}」需要配置 itick stock_data_token，\n"
-                f"请在设置页面填写 token 后再试。"
-            )
-            return
+        if market == "US":
+            if not settings.get("stock_token_us"):
+                self._show_error("美股分析需要配置「美股数据源 Token」")
+                return
+            if not settings.get("news_token_us"):
+                self._show_error("美股分析需要配置「新闻数据源 Token - 美股」")
+                return
+        elif market == "A":
+            if not settings.get("stock_token_a"):
+                self._show_error("A 股分析需要配置「A 股数据源 Token」")
+                return
 
         self._show_error("")
         self._reset_ui()
@@ -316,6 +331,7 @@ class MainPage(ft.Container):
         self._show_error("正在停止...")
 
     def _reset_ui(self):
+        """清空上一次分析结果的全部展示控件。"""
         self._current_report_id = None
         self._chart_path = None
         self._report_content = ""

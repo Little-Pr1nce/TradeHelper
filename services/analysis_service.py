@@ -120,7 +120,7 @@ class AnalysisService:
 
         # ---- 3. 获取股价数据（含缓存） ----
         _progress("正在获取股价数据...")
-        df = self._fetch_prices(code, request.period)
+        df = self._fetch_prices(code, request.period, request.market)
         if df is None or df.empty:
             raise RuntimeError(f"无法获取 {code} 的股价数据")
         if _stop(): return self._empty_response(code)
@@ -158,12 +158,13 @@ class AnalysisService:
 
         # ---- 4.6. 获取盘口数据（实时信号，仅 itick，需在管道前获取以入评分） ----
         depth_factor = None
-        if Settings().get("stock_data_token", ""):
+        stoken = Settings().get("stock_token_us", "")
+        if stoken:
             try:
                 _progress("正在获取实时盘口...")
                 from alpha.depth_factor import fetch_depth_factor
                 depth_factor = fetch_depth_factor(
-                    code, request.market, Settings().get("stock_data_token", ""),
+                    code, request.market, stoken,
                 )
             except Exception as e:
                 logger.warning(f"盘口数据获取失败: {e}")
@@ -200,7 +201,7 @@ class AnalysisService:
 
         # 实时报价（用于报告展示）
         realtime_quote = None
-        if Settings().get("stock_data_token", ""):
+        if Settings().get("stock_token_us", ""):
             try:
                 _progress("正在获取实时报价...")
                 fetcher = get_stock_fetcher()
@@ -219,6 +220,9 @@ class AnalysisService:
             rank_ic_10d=pipeline_result.rank_ic_10d,
             benchmark_return=pipeline_result.benchmark_return,
             realtime_quote=realtime_quote,
+            market_regime=pipeline_result.market_regime,
+            active_strategies=pipeline_result.active_strategies,
+            skipped_strategies=pipeline_result.skipped_strategies,
         )
         if not report_content:
             report_content = "报告生成失败，请稍后重试。"
@@ -266,7 +270,7 @@ class AnalysisService:
         return code
 
     def _fetch_stock_info(self, code: str, market: str) -> StockInfo:
-        fetcher = get_stock_fetcher()
+        fetcher = get_stock_fetcher(market)
         info = fetcher.fetch_stock_info(code)
         if info:
             Database().upsert_stock(info)
@@ -275,14 +279,14 @@ class AnalysisService:
         logger.warning(f"未获取到 {code} 的股票信息，使用默认名")
         return StockInfo(code=code, name=code, market=market)
 
-    def _fetch_prices(self, code: str, period: str) -> pd.DataFrame | None:
+    def _fetch_prices(self, code: str, period: str, market: str = "US") -> pd.DataFrame | None:
         start, end = get_backtest_dates(period)
         prices = Database().get_prices(code, start, end)
 
         if not prices:
             # 缓存为空 → 全量拉取
             logger.info(f"缓存为空，联网拉取 {start}~{end}")
-            fetcher = get_stock_fetcher()
+            fetcher = get_stock_fetcher(market)
             new_prices = fetcher.fetch_price_history(code, start, end)
             if new_prices:
                 Database().insert_prices(new_prices)
@@ -296,7 +300,7 @@ class AnalysisService:
             next_day = (dt_date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
             today_str = dt_date.today().isoformat()
             logger.info(f"检查增量 {next_day}~{today_str}")
-            fetcher = get_stock_fetcher()
+            fetcher = get_stock_fetcher(market)
             new_prices = fetcher.fetch_price_history(code, next_day, today_str)
             # 不能仅靠 new_prices 是否空判断——itick 按 limit 取最近 N 条，
             # 不会因为区间内无交易日就返回空列表。必须比较最新一条的日期。
@@ -437,13 +441,13 @@ class AnalysisService:
           3. 计算盘中快照
           4. 生成盘中报告（复用 T-1 报告第 1-7 章 + LLM 重写第 8 章）
 
-        要求：配置 itick stock_data_token。
+        要求：配置美股数据源 Token。
         """
         from config.settings import Settings
         settings = Settings()
-        token = settings.get("stock_data_token", "")
+        token = settings.get("stock_token_us", "")
         if not token:
-            raise RuntimeError("盘中分析需要配置 itick stock_data_token，请在设置中填写。")
+            raise RuntimeError("盘中分析需要配置「美股数据源 Token」，请在设置中填写。")
 
         self._cancelled = False
 
@@ -533,15 +537,15 @@ class AnalysisService:
         # ---- 5. 计算盘中快照 ----
         _progress("正在计算盘中快照...")
         if t1_pipeline_result is None:
-            # 没有 T-1 pipeline result → 跑一次简化版分析到 T-1 日
             _progress("正在计算 T-1 日分析...")
             t1_pipeline_result = self._run_eod_to_t1(code, request, _progress, _stop)
-            if _stop(): return self._empty_response(code)
-            # 也生成 T-1 报告文本
-            if not t1_report_content:
-                t1_report_content = self._generate_t1_report_text(
-                    code, info, t1_pipeline_result, request.period,
-                )
+        if _stop(): return self._empty_response(code)
+        if t1_pipeline_result is None:
+            raise RuntimeError("无法获取 T-1 日数据，盘中分析不可用。请先执行一次盘后分析。")
+        if not t1_report_content:
+            t1_report_content = self._generate_t1_report_text(
+                code, info, t1_pipeline_result, request.period,
+            )
 
         snapshot = compute_intraday_snapshot(
             t1_pipeline_result,
@@ -597,14 +601,14 @@ class AnalysisService:
           4. 生成盘前报告
 
         要求：
-          - 配置 itick stock_data_token
+          - 配置美股数据源 Token
           - 当前仅支持美股（US）
         """
         from config.settings import Settings
         settings = Settings()
-        token = settings.get("stock_data_token", "")
+        token = settings.get("stock_token_us", "")
         if not token:
-            raise RuntimeError("盘前分析需要配置 itick stock_data_token，请在设置中填写。")
+            raise RuntimeError("盘前分析需要配置「美股数据源 Token」，请在设置中填写。")
 
         self._cancelled = False
 
@@ -650,6 +654,13 @@ class AnalysisService:
             stock_tick = fetcher.fetch_stock_tick(code)
         except Exception as e:
             logger.warning(f"股票 tick 获取失败: {e}")
+
+        # 股票实时报价（获取累计成交量，tick 接口只返回单笔量）
+        stock_quote = None
+        try:
+            stock_quote = fetcher.fetch_quote(code)
+        except Exception as e:
+            logger.warning(f"股票实时报价获取失败: {e}")
 
         # 验证盘前时段
         if stock_tick and stock_tick.get("trading_phase") != 1:
@@ -718,11 +729,13 @@ class AnalysisService:
         if t1_pipeline_result is None:
             _progress("正在计算 T-1 日分析...")
             t1_pipeline_result = self._run_eod_to_t1(code, request, _progress, _stop)
-            if _stop(): return self._empty_response(code)
-            if not t1_report_content:
-                t1_report_content = self._generate_t1_report_text(
-                    code, info, t1_pipeline_result, request.period,
-                )
+        if _stop(): return self._empty_response(code)
+        if t1_pipeline_result is None:
+            raise RuntimeError("无法获取 T-1 日数据，盘前分析不可用。请先执行一次盘后分析。")
+        if not t1_report_content:
+            t1_report_content = self._generate_t1_report_text(
+                code, info, t1_pipeline_result, request.period,
+            )
 
         # ---- 6. 计算盘前快照 ----
         _progress("正在计算盘前快照...")
@@ -733,6 +746,7 @@ class AnalysisService:
             overnight_news=overnight_news_list,
             session="pre",
             market=request.market,
+            stock_quote=stock_quote,
         )
         if _stop(): return self._empty_response(code)
 
@@ -846,7 +860,7 @@ class AnalysisService:
 
             prices = Database().get_prices(code, start, end)
             if not prices:
-                fetcher = get_stock_fetcher()
+                fetcher = get_stock_fetcher(request.market)
                 new_prices = fetcher.fetch_price_history(code, start, end)
                 if new_prices:
                     Database().insert_prices(new_prices)
@@ -909,6 +923,9 @@ class AnalysisService:
                 rank_ic_5d=pipeline_result.rank_ic_5d,
                 rank_ic_10d=pipeline_result.rank_ic_10d,
                 benchmark_return=pipeline_result.benchmark_return,
+                market_regime=pipeline_result.market_regime,
+                active_strategies=pipeline_result.active_strategies,
+                skipped_strategies=pipeline_result.skipped_strategies,
             )
             return content or ""
         except Exception as e:

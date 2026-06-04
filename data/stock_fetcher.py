@@ -6,10 +6,10 @@
   - ItickStockFetcher: itick 付费 API（美股 K 线 + 盘口）
   - CustomStockFetcher: 用户自定义付费 API（占位，待扩展）
 
-美股数据流：K 线 → itick（需 stock_data_token），信息/新闻/基本面 → Finnhub（需 news_token_us）。
+美股数据流：K 线 → stock_token_us，信息/新闻/基本面 → Finnhub (news_token_us)。
 A 股数据流保持不变：akshare。
 
-数据源由 get_stock_fetcher() 自动选择：有 stock_data_token → itick，否则免费。
+数据源由 get_stock_fetcher(market) 自动选择：美股看 stock_token_us，A 股看 stock_token_a。
 【扩展点】添加新的数据源：继承 BaseStockFetcher，在 get_stock_fetcher() 中注册。
 """
 
@@ -303,7 +303,7 @@ class FreeStockFetcher(BaseStockFetcher):
             elif market == "US":
                 raise RuntimeError(
                     f"美股 {code} 未配置股票数据源 Token（itick）。"
-                    f"请在设置中填入 stock_data_token。"
+                    f"请在设置中填入美股数据源 Token。"
                 )
         except Exception as e:
             logger.error(f"Failed to fetch price history for {code}: {e}")
@@ -729,10 +729,12 @@ class ItickStockFetcher(BaseStockFetcher):
 
             latest = d.get("ld", 0)
             prev_close = d.get("p", 0)
-            chp = d.get("chp", 0)
-            # chp 可能是百分数或小数，归一化到 0-1
-            if isinstance(chp, (int, float)) and abs(chp) > 1 and prev_close > 0:
-                chp = chp / 100
+            # 自己计算涨跌幅，不依赖 API 的 chp
+            # （itick 期货 chp 可能返回涨跌点数而非百分比，不可靠）
+            if latest and prev_close and prev_close > 0:
+                own_chp = (float(latest) - float(prev_close)) / float(prev_close)
+            else:
+                own_chp = 0.0
 
             quote = {
                 "code": str(d.get("s", code)),
@@ -742,7 +744,7 @@ class ItickStockFetcher(BaseStockFetcher):
                 "low": float(d.get("l", 0)),
                 "prev_close": float(prev_close) if prev_close else 0.0,
                 "change": float(d.get("ch", 0)),
-                "change_pct": round(float(chp) if chp else 0.0, 4),
+                "change_pct": round(own_chp, 6),
                 "volume": float(d.get("v", 0)),
                 "amount": float(d.get("tu", 0)),
                 "timestamp": d.get("t", 0),
@@ -813,26 +815,37 @@ class ItickStockFetcher(BaseStockFetcher):
             return []
 
 
-def get_stock_fetcher() -> BaseStockFetcher:
+def get_stock_fetcher(market: str = "US") -> BaseStockFetcher:
     """
-    根据 Settings 中的 stock_data_token 返回数据源实例。
+    根据市场选择数据源。
 
-    有 stock_data_token → ItickStockFetcher（付费）
-    无 stock_data_token → FreeStockFetcher（免费，含 Finnhub 辅助）
+    美股: stock_token_us 有值 → itick/Massive，否则 Finnhub 免费
+    A 股: stock_token_a 有值 → itick/Tushare，否则 akshare 免费
+
+    Args:
+        market: "US" / "A"
 
     Returns:
         BaseStockFetcher 实例
     """
     from config.settings import Settings
     settings = Settings()
-    token = settings.get("stock_data_token", "")
-    if token:
-        logger.info("使用付费数据源: itick")
-        return ItickStockFetcher(token)
-    finnhub_token = settings.get("news_token_us", "")
-    logger.info("使用免费数据源: akshare"
-                f"{' + Finnhub' if finnhub_token else ''}")
-    return FreeStockFetcher(finnhub_token=finnhub_token)
+
+    if market == "US":
+        token = settings.get("stock_token_us", "")
+        if token:
+            logger.info(f"使用美股付费数据源 ({token[:12]}...)")
+            return ItickStockFetcher(token)
+        finnhub_token = settings.get("news_token_us", "")
+        logger.info("美股使用免费数据源: Finnhub")
+        return FreeStockFetcher(finnhub_token=finnhub_token)
+    else:
+        token = settings.get("stock_token_a", "")
+        if token:
+            logger.info(f"使用 A 股付费数据源 ({token[:12]}...)")
+            return ItickStockFetcher(token)
+        logger.info("A 股使用免费数据源: akshare")
+        return FreeStockFetcher()
 
 
 # ============================================================

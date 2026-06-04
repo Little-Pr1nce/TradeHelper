@@ -42,6 +42,8 @@ class MeanReversionStrategy(BaseExecutionStrategy):
       lookback=252       — 百分位回溯窗口
     """
 
+    suitable_regimes = ["ranging", "transitional"]
+
     def __init__(self, entry_pct: float = 0.20, exit_pct: float = 0.50,
                  vol_window: int = 20, vol_percentile: float = 0.30,
                  cooldown_bars: int = 5, atr_period: int = 14,

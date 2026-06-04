@@ -33,6 +33,9 @@ class AnalysisResult:
     benchmark_return: float = 0.0
     validation: dict = field(default_factory=dict)
     fundamental_data: dict | None = None
+    market_regime: str = "unknown"            # 当前行情类型
+    active_strategies: list = field(default_factory=list)   # 当前激活的策略名
+    skipped_strategies: list = field(default_factory=list)  # 被跳过的策略名
 
 
 def run_pipeline(
@@ -72,7 +75,7 @@ def run_pipeline(
         AnalysisResult 包含全部计算结果
     """
     if strategy_names is None:
-        strategy_names = ["A", "B", "C", "D", "E", "F"]
+        strategy_names = ["A", "B", "C", "D", "E", "F", "G"]
 
     logger.info("=" * 50)
     logger.info(f"管道启动: {len(df)} 条K线, 市场={market}, 策略={strategy_names}")
@@ -130,20 +133,30 @@ def run_pipeline(
             / float(df["close"].iloc[0])
         )
 
-    # ---- ⑤ 三策略并行回测 ----
-    logger.info(f"  [管道 4/4] 三策略并行回测 (初始资金={initial_capital:,.0f})...")
+    # ---- ⑤ 行情检测 + 策略过滤 ----
+    from alpha.scoring import detect_market_regime
+    market_regime, _ = detect_market_regime(df)
+    active_strategies = []
+    skipped_strategies = []
+    for name in strategy_names:
+        s = get_execution_strategy(name)
+        if not s.suitable_regimes or market_regime in s.suitable_regimes:
+            active_strategies.append(s)
+        else:
+            skipped_strategies.append(name)
+            logger.info(f"  [策略] {name} ({s.name}) 不适合 {market_regime} 行情，跳过")
+
+    logger.info(f"  [管道 4/4] 行情={market_regime}, 激活策略={[s.name for s in active_strategies]}, 跳过={skipped_strategies}")
+    logger.info(f"  策略回测 (初始资金={initial_capital:,.0f})...")
     config = BacktestConfig(initial_capital=initial_capital)
     if market == "US":
-        # 美股不设涨跌停限制
         config.broker.limit_up_pct = 999.0
         config.broker.limit_down_pct = 999.0
 
     engine = BacktestEngine(config)
-    strategies = [get_execution_strategy(name) for name in strategy_names]
-    results = engine.run_multi(df, strategies, news_df)
+    results = engine.run_multi(df, active_strategies, news_df)
     comparison = compare_strategies(results)
 
-    # 打印各策略概要
     for name, r in results.items():
         logger.info(
             f"  [管道 4/4] {name}: 收益={r.total_return*100:+.2f}%, "
@@ -171,6 +184,9 @@ def run_pipeline(
         benchmark_return=benchmark_return,
         validation=validation,
         fundamental_data=fundamental_data,
+        market_regime=market_regime,
+        active_strategies=[s.name for s in active_strategies],
+        skipped_strategies=skipped_strategies,
     )
 
 
@@ -581,6 +597,7 @@ def compute_premarket_snapshot(
     overnight_news: list | None = None,
     session: str = "pre",
     market: str = "US",
+    stock_quote: dict | None = None,
 ) -> PremarketSnapshot:
     """
     计算盘前快照（美股专属）。
@@ -713,7 +730,8 @@ def compute_premarket_snapshot(
     lines.append(f"| 盘前价格 | {pre_price:.2f}（{_pct_str(pre_change_pct)}） |")
     lines.append(f"| 期货平均涨跌 | {_pct_str(avg_future_change)} |")
     lines.append(f"| 个股 vs 期货差值 | {_pct_str(pre_vs_future_diff)} |")
-    pre_vol = stock_tick.get("volume", 0)
+    # 成交量优先用 quote 的累计量（tick 只返回最近一笔）
+    pre_vol = (stock_quote or stock_tick).get("volume", 0)
     lines.append(f"| 盘前成交量 | {pre_vol:,.0f} 股 |")
 
     # 跳空均线（只展示 MA5 数值）

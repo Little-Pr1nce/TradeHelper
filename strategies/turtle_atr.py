@@ -39,6 +39,8 @@ class TurtleATRStrategy(BaseExecutionStrategy):
       cooldown_bars=3
     """
 
+
+    suitable_regimes = ["trending_volatile"]
     def __init__(self, entry_pct: float = 0.75, exit_pct: float = 0.40,
                  channel_n: int = 20, exit_channel_n: int = 10,
                  atr_period: int = 20, atr_mult_stop: float = 2.0,

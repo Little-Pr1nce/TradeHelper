@@ -74,25 +74,40 @@ EQUAL_WEIGHTS = {col: 1.0 / len(INDICATOR_COLUMNS) for col in INDICATOR_COLUMNS}
 def detect_market_regime(df: pd.DataFrame, adx_threshold_high: float = 25,
                          adx_threshold_low: float = 20) -> tuple[str, dict[str, float]]:
     """
-    基于 ADX 判断市场状态，返回 (regime, weights)。
+    基于 ADX + 波动率判断市场状态，返回 (regime, weights)。
 
     Returns:
-        regime: "trending" / "ranging" / "transitional"
+        regime: "trending_volatile" / "trending_steady" / "ranging" / "transitional" / "unknown"
         weights: {indicator_col: weight}
+
+    Regime 说明：
+      - trending_volatile: 强趋势 + 高波动（ATR/price > 5%）— 适合突破策略
+      - trending_steady:   弱趋势/慢涨（ATR/price ≤ 5%）— 适合均线跟随
+      - ranging:           震荡 — 适合均值回归、布林
+      - transitional:      过渡期 — 等权保守
+      - unknown:           数据不足
     """
     adx_val = _estimate_adx(df)
     if adx_val is None:
-        logger.debug("  [Regime] ADX 不可用，使用等权")
-        return "transitional", EQUAL_WEIGHTS
+        logger.debug("  [Regime] ADX 不可用 → unknown")
+        return "unknown", EQUAL_WEIGHTS
+
+    # 计算波动率子类型
+    atr_pct = _estimate_atr_pct(df)
 
     if adx_val > adx_threshold_high:
-        logger.info(f"  [Regime] ADX={adx_val:.1f} > {adx_threshold_high} → 趋势市，MACD/ADX 高权重")
-        return "trending", TRENDING_WEIGHTS
+        if atr_pct is not None and atr_pct > 0.05:
+            logger.info(f"  [Regime] ADX={adx_val:.1f} ATR%={atr_pct:.1%} → 强趋势+高波")
+            return "trending_volatile", TRENDING_WEIGHTS
+        else:
+            atr_str = f"{atr_pct:.1%}" if atr_pct is not None else "?"
+            logger.info(f"  [Regime] ADX={adx_val:.1f} ATR%={atr_str} → 慢涨/弱趋势")
+            return "trending_steady", TRENDING_WEIGHTS
     elif adx_val < adx_threshold_low:
-        logger.info(f"  [Regime] ADX={adx_val:.1f} < {adx_threshold_low} → 震荡市，RSI/KDJ/BB 高权重")
+        logger.info(f"  [Regime] ADX={adx_val:.1f} < {adx_threshold_low} → 震荡市")
         return "ranging", RANGING_WEIGHTS
     else:
-        logger.info(f"  [Regime] ADX={adx_val:.1f} 在 [{adx_threshold_low}, {adx_threshold_high}] → 过渡期等权")
+        logger.info(f"  [Regime] ADX={adx_val:.1f} 在 [{adx_threshold_low}, {adx_threshold_high}] → 过渡期")
         return "transitional", EQUAL_WEIGHTS
 
 
@@ -118,6 +133,27 @@ def _estimate_adx(df: pd.DataFrame) -> float | None:
                 val = adx_series.dropna()
                 if len(val) > 0:
                     return float(val.iloc[-1])
+    except Exception:
+        pass
+    return None
+
+
+def _estimate_atr_pct(df: pd.DataFrame, window: int = 20) -> float | None:
+    """估算 ATR 占股价的比例（%）。"""
+    try:
+        if all(c in df.columns for c in ["high", "low", "close"]):
+            import ta
+            atr = ta.volatility.AverageTrueRange(
+                high=df["high"].astype(float),
+                low=df["low"].astype(float),
+                close=df["close"].astype(float),
+                window=window,
+            ).average_true_range()
+            if not atr.empty:
+                last_atr = float(atr.dropna().iloc[-1])
+                last_close = float(df["close"].dropna().iloc[-1])
+                if last_close > 0:
+                    return last_atr / last_close
     except Exception:
         pass
     return None

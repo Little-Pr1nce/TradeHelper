@@ -32,6 +32,7 @@ import re
 from datetime import datetime
 
 from config.settings import Settings
+from strategies import get_execution_strategy
 from report.prompts import (
     SYSTEM_PROMPT, build_user_prompt,
     INTRADAY_SYSTEM_PROMPT, build_intraday_user_prompt,
@@ -104,7 +105,7 @@ def generate_report(
     realtime_quote: dict | None = None,
 ) -> str:
     """
-    生成完整分析报告。
+    生成完整分析报告。market_regime 等回测元信息会体现在报告中。
 
     Args:
         stock_info:         股票基本信息字典
@@ -186,6 +187,27 @@ def generate_report(
         extra += f"\n## 基准收益\n" \
                  f"- 买入持有收益（同期）: {benchmark_return*100:+.2f}%\n" \
                  f"注：用于对比策略是否跑赢被动持有。\n"
+    # ── 市场状态 + 策略适配 ──
+    if market_regime and market_regime != "unknown":
+        regime_labels = {
+            "trending_volatile": "强趋势+高波动",
+            "trending_steady": "慢涨/弱趋势",
+            "ranging": "震荡",
+            "transitional": "趋势形成中",
+        }
+        regime_label = regime_labels.get(market_regime, market_regime)
+        extra += f"\n## 市场状态检测\n\n当前行情：**{regime_label}**（{market_regime}）\n\n"
+        if active_strategies or skipped_strategies:
+            extra += "| 策略 | 状态 | 说明 |\n|------|------|------|\n"
+            for name in (active_strategies or []):
+                s = get_execution_strategy(name)
+                extra += f"| {name} {s.name} | ▶ 运行 | 适配当前 {regime_label} 行情 |\n"
+            for name in (skipped_strategies or []):
+                s = get_execution_strategy(name)
+                regime_desc = ", ".join(s.suitable_regimes) if s.suitable_regimes else "全部行情"
+                extra += f"| {name} {s.name} | ⏭ 跳过 | 适配 {regime_desc}；当前为 {regime_label} |\n"
+            extra += "\n"
+
     if realtime_quote:
         status_map = {0: "正常交易", 1: "停牌", 2: "退市", 3: "熔断"}
         ts = realtime_quote.get("timestamp", 0)

@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 class MomentumNewsStrategy(BaseExecutionStrategy):
     """动量突破+新闻共振确认。"""
 
+    suitable_regimes = []  # 全行情通用
+
     def __init__(self, entry_pct: float = 0.80, exit_pct: float = 0.50,
                  finbert_min: float = 0.3, breakout_window: int = 5,
                  cooldown_bars: int = 2, atr_period: int = 14,

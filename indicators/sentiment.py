@@ -55,6 +55,25 @@ def _get_pipeline():
     try:
         from transformers import pipeline
 
+        # ── 阶段 0：用户配置的本地模型路径（打包后使用） ──
+        from config.settings import Settings
+        local_path = Settings().get("finbert_model_path", "")
+        if local_path and os.path.isdir(local_path) and os.path.isfile(os.path.join(local_path, "config.json")):
+            logger.info(f"FinBERT 从本地路径加载: {local_path}")
+            try:
+                _sentiment_pipeline = pipeline(
+                    "sentiment-analysis",
+                    model=local_path,
+                    tokenizer=local_path,
+                    max_length=512,
+                    truncation=True,
+                    local_files_only=True,
+                )
+                logger.info("FinBERT 加载成功（本地模型）")
+                return _sentiment_pipeline
+            except Exception as e:
+                logger.warning(f"FinBERT 本地路径加载失败 ({e})，回退缓存/在线...")
+
         # ── 阶段 1：优先使用本地缓存（离线，最快） ──
         if _is_model_cached(_FINBERT_MODEL):
             logger.info(f"FinBERT 本地缓存命中，离线加载: {_FINBERT_MODEL}")

@@ -37,7 +37,10 @@ class ThresholdTrendStrategy(BaseExecutionStrategy):
       exit_pct=0.50   — 跌破 50% 百分位即平仓
       cooldown_bars=3  — 冷却期
       lookback=252     — 百分位回溯窗口（交易日）
+
     """
+
+    suitable_regimes = ["trending_volatile", "trending_steady"]
 
     def __init__(self, entry_pct: float = 0.80, exit_pct: float = 0.50,
                  cooldown_bars: int = 3, atr_period: int = 14,

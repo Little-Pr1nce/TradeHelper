@@ -42,13 +42,18 @@ class SettingsPage(ft.Container):
         self._on_save = on_save_callback
         self._status_text = ft.Text("", size=13, color=ft.Colors.GREEN)  # 保存状态提示
 
+    @staticmethod
+    def _label(text: str, required: bool = False) -> str:
+        """必填字段加红色星号标注。"""
+        return f"{text} *" if required else text
+
     def build(self):
         """构建设置页面的控件树。"""
         settings = Settings()
 
         # ========== 工作目录 ==========
         self._work_dir_input = ft.TextField(
-            label="项目工作目录",
+            label=self._label("项目工作目录", required=True),
             value=settings.get("work_dir", ""),
             hint_text="数据、报告、日志存放目录",
             expand=True,
@@ -66,37 +71,44 @@ class SettingsPage(ft.Container):
 
         # ========== LLM API 配置 ==========
         self._llm_base_url = ft.TextField(
-            label="LLM Base URL",
-            value=settings.get("llm_base_url", "https://api.openai.com/v1"),
-            hint_text="OpenAI 兼容 API 地址",
+            label=self._label("LLM Base URL", required=True),
+            value=settings.get("llm_base_url", ""),
+            hint_text="OpenAI 兼容 API 地址（必填）",
         )
         self._llm_api_key = ft.TextField(
-            label="LLM API Key",
+            label=self._label("LLM API Key", required=True),
             value=settings.get("llm_api_key", ""),
-            password=True,            # 密码模式（掩码显示）
-            can_reveal_password=True,  # 可点击眼睛图标查看
-            hint_text="请输入 API Key",
+            password=True,
+            can_reveal_password=True,
+            hint_text="请输入 API Key（必填）",
         )
         self._llm_model = ft.TextField(
-            label="模型名称",
-            value=settings.get("llm_model", "gpt-4o"),
-            hint_text="如 gpt-4o, gpt-4, deepseek-chat 等",
+            label=self._label("模型名称", required=True),
+            value=settings.get("llm_model", ""),
+            hint_text="如 gpt-4o, deepseek-chat 等（必填）",
         )
 
         # ========== 数据源配置 ==========
-        self._stock_data_token = ft.TextField(
-            label="股票数据源 Token（如 itick）",
-            value=settings.get("stock_data_token", ""),
+        self._stock_token_us = ft.TextField(
+            label="美股数据源 Token（如 itick / Massive）",
+            value=settings.get("stock_token_us", ""),
             password=True,
             can_reveal_password=True,
-            hint_text="输入付费股票数据源的 API Token，留空则使用免费数据源",
+            hint_text="美股 K 线 + 实时报价 + 盘口数据",
+        )
+        self._stock_token_a = ft.TextField(
+            label="A 股数据源 Token（如 Tushare）",
+            value=settings.get("stock_token_a", ""),
+            password=True,
+            can_reveal_password=True,
+            hint_text="A 股 K 线 + 实时行情数据",
         )
         self._news_token_us = ft.TextField(
             label="新闻数据源 Token - 美股（如 Finnhub）",
             value=settings.get("news_token_us", ""),
             password=True,
             can_reveal_password=True,
-            hint_text="输入美股新闻数据源的 API Token，留空则使用免费数据源",
+            hint_text="美股新闻；留空则尝试免费数据源",
         )
         self._news_token_a = ft.TextField(
             label="新闻数据源 Token - A 股（如 Tushare）",
@@ -106,12 +118,6 @@ class SettingsPage(ft.Container):
             hint_text="输入 A 股新闻数据源的 API Token，留空则使用免费数据源",
         )
 
-        # ========== 代理配置 ==========
-        self._proxy_input = ft.TextField(
-            label="HTTPS 代理地址",
-            value=settings.get("proxy", ""),
-            hint_text="如 http://127.0.0.1:8118（MonoProxy）或 7890（Clash）；留空则自动读系统代理",
-        )
 
         # ========== 保存按钮 ==========
         save_btn = ft.Button(
@@ -153,21 +159,14 @@ class SettingsPage(ft.Container):
 
                 # 数据源区域
                 ft.Text("数据源配置", size=16, weight=ft.FontWeight.W_600),
-                self._stock_data_token,
+                self._stock_token_us,
+                self._stock_token_a,
                 self._news_token_us,
                 self._news_token_a,
                 ft.Text("「股票数据源 Token」用于付费股票行情 API（如 itick）。\n"
                         "「新闻数据源 Token - 美股」用于美股新闻 API（如 Finnhub）。\n"
                         "「新闻数据源 Token - A 股」用于 A 股新闻 API（如 Tushare）。\n"
                         "留空的字段将自动使用免费数据源。",
-                        size=12, color=ft.Colors.GREY_600),
-
-                ft.Divider(),
-
-                ft.Text("代理配置", size=16, weight=ft.FontWeight.W_600),
-                self._proxy_input,
-                ft.Text("用于访问 Yahoo Finance（美股搜索）。\n"
-                        "若已开启 MonoProxy 等系统代理，可留空自动检测；否则填本地 HTTP 代理地址。",
                         size=12, color=ft.Colors.GREY_600),
 
                 ft.Divider(),
@@ -196,25 +195,33 @@ class SettingsPage(ft.Container):
         self.page.run_task(handle)
 
     def _save_settings(self, e):
-        """保存所有设置到 JSON 配置文件。"""
+        """保存所有设置到 JSON 配置文件，含必填验证。"""
         settings = Settings()
         settings.set("work_dir", self._work_dir_input.value)
         settings.set("llm_base_url", self._llm_base_url.value)
         settings.set("llm_api_key", self._llm_api_key.value)
         settings.set("llm_model", self._llm_model.value)
-        settings.set("stock_data_token", self._stock_data_token.value)
+        settings.set("stock_token_us", self._stock_token_us.value)
+        settings.set("stock_token_a", self._stock_token_a.value)
         settings.set("news_token_us", self._news_token_us.value)
         settings.set("news_token_a", self._news_token_a.value)
-        settings.set("proxy", self._proxy_input.value)
         settings.save()
 
-        # 显示保存成功提示（2 秒后自动消失）
+        # 检查必填项
+        missing = settings.missing_fields()
+        if missing:
+            labels = [Settings.FIELD_LABELS.get(f, f) for f in missing]
+            self._status_text.value = f"⚠️ 请填写：{'、'.join(labels)}"
+            self._status_text.color = ft.Colors.RED_400
+            self._status_text.update()
+            return
+
+        # 显示保存成功提示
         self._status_text.value = "设置已保存！"
         self._status_text.color = ft.Colors.GREEN
         self._status_text.update()
         self.page.run_task(self._reset_status)
 
-        # 通知主应用（重新初始化日志和数据库路径）
         if self._on_save:
             self._on_save()
 

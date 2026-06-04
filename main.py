@@ -16,7 +16,7 @@ TradeHelper - 股票分析助手 应用入口
   └──────────────────────────────────────────┘
 
 启动流程：
-  1. 加载配置文件 (~/.tradehelper/config.json)
+  1. 加载配置文件
   2. 初始化日志系统
   3. 初始化数据库连接并建表
   4. 创建三个页面，通过 NavigationBar 切换
@@ -63,9 +63,19 @@ def main(page: ft.Page):
     page.padding = 20        # 页面内边距
 
     # ========== 初始化全局服务 ==========
-    # 配置文件路径: ~/.tradehelper/config.json
-    config_path = Path.home() / ".tradehelper" / "config.json"
+    config_path = Settings.default_config_path()
     settings = Settings.init(config_path)
+
+    # PyInstaller 打包模式：自动检测内置 FinBERT 模型路径
+    # 开发模式：如果 dist_data 下有模型，也自动启用
+    import sys as _sys
+    if getattr(_sys, 'frozen', False):
+        bundle_dir = Path(_sys._MEIPASS)  # type: ignore
+        model_path = bundle_dir / 'dist_data' / 'finbert_model'
+    else:
+        model_path = Path(__file__).resolve().parent / 'dist_data' / 'finbert_model'
+    if model_path.exists() and (model_path / 'config.json').exists():
+        settings.set("finbert_model_path", str(model_path))
 
     # 初始化日志（写入工作目录下的 logs/ 文件夹）
     setup_logging(settings.work_dir)
@@ -73,16 +83,32 @@ def main(page: ft.Page):
     # 初始化数据库（自动建表）
     Database.init(settings.db_path)
 
+    # ========== 检查是否已完成必要配置 ==========
+    _fully_configured = settings.is_fully_configured()
+
+    def _update_tab_state():
+        """根据配置状态启用/禁用导航 tab。"""
+        nonlocal _fully_configured
+        _fully_configured = settings.is_fully_configured()
+        for i, dest in enumerate(navigation_bar.destinations):
+            if i == 2:  # 设置页永远可用
+                continue
+            dest.enabled = _fully_configured
+        navigation_bar.update()
+
     # ========== 设置保存回调 ==========
     def on_settings_saved():
-        """设置保存后重新初始化日志和数据库路径。"""
+        """设置保存后重新初始化日志、数据库路径，刷新 tab 状态。"""
         setup_logging(settings.work_dir)
         Database.init(settings.db_path)
-        # 如果仍未配置 API，提示用户
-        if not settings.is_configured():
+        _update_tab_state()
+        main_page.refresh_modes()
+        # 如果仍未完全配置，切到设置页
+        if not settings.is_fully_configured():
             page.snack_bar = ft.SnackBar(
-                ft.Text("提示：建议配置大模型 API 以获得更完整的分析报告。"),
-                bgcolor=ft.Colors.ORANGE_700,
+                ft.Text("请填写所有必填配置项（红色 * 标注），完成后即可使用分析功能。"),
+                bgcolor=ft.Colors.BLUE_700,
+                duration=5000,
             )
             page.snack_bar.open = True
             page.update()
@@ -100,33 +126,45 @@ def main(page: ft.Page):
 
     # ========== 页面切换逻辑 ==========
     def switch_page(e):
-        """
-        底部导航栏切换事件处理。
-
-        使用 visible 切换替代页面销毁/重建：
-          - 优势：保持页面状态（如分析结果、历史列表位置）
-          - 切换到"历史报告"时自动刷新列表
-        """
         index = e.control.selected_index
+        # 未完全配置时，只允许访问设置页
+        if not _fully_configured and index != 2:
+            page.snack_bar = ft.SnackBar(
+                ft.Text("请先在「设置」中填写所有必填配置项。"),
+                bgcolor=ft.Colors.ORANGE_700,
+            )
+            page.snack_bar.open = True
+            page.update()
+            return
         main_container.visible = index == 0
         history_container.visible = index == 1
         settings_container.visible = index == 2
         main_container.update()
         history_container.update()
         settings_container.update()
-        # 切换到历史页时刷新数据
         if index == 1:
             history_page._load_reports()
             history_page.update()
 
     # ========== 底部导航栏 ==========
     navigation_bar = ft.NavigationBar(
-        selected_index=0,
+        selected_index=0 if _fully_configured else 2,  # 未配置时默认跳设置页
         on_change=switch_page,
         destinations=[
-            ft.NavigationBarDestination(icon=ft.Icons.ANALYTICS, label="分析"),
-            ft.NavigationBarDestination(icon=ft.Icons.HISTORY, label="历史报告"),
-            ft.NavigationBarDestination(icon=ft.Icons.SETTINGS, label="设置"),
+            ft.NavigationBarDestination(
+                icon=ft.Icons.ANALYTICS,
+                label="分析",
+                disabled=not _fully_configured,
+            ),
+            ft.NavigationBarDestination(
+                icon=ft.Icons.HISTORY,
+                label="历史报告",
+                disabled=not _fully_configured,
+            ),
+            ft.NavigationBarDestination(
+                icon=ft.Icons.SETTINGS,
+                label="设置",
+            ),
         ],
     )
 
@@ -156,24 +194,20 @@ def main(page: ft.Page):
     page.update()
 
     # ========== 首次使用提示 ==========
-    # 如果用户未配置 LLM API，延迟显示提示
-    if not settings.is_configured():
-        page.run_task(_show_setup_hint, page)
+    if not _fully_configured:
+        page.run_task(_show_setup_hint, page, settings)
 
 
-async def _show_setup_hint(page: ft.Page):
-    """
-    首次使用提示：引导用户进入设置页配置 API。
-
-    延迟 0.5 秒显示（等窗口渲染完毕）。
-    """
+async def _show_setup_hint(page: ft.Page, settings: Settings):
+    """首次使用：引导进入设置页。"""
     import asyncio
     await asyncio.sleep(0.5)
-    if not Settings().is_configured():
+    if not settings.is_fully_configured():
+        missing = [Settings.FIELD_LABELS.get(f, f) for f in settings.missing_fields()]
         page.snack_bar = ft.SnackBar(
-            ft.Text("首次使用，请先在「设置」中配置工作目录和大模型 API。"),
+            ft.Text(f"首次使用，请先配置：{'、'.join(missing)}"),
             bgcolor=ft.Colors.BLUE_700,
-            duration=5000,  # 显示 5 秒
+            duration=5000,
         )
         page.snack_bar.open = True
         page.update()
