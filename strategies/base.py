@@ -113,6 +113,10 @@ class BaseExecutionStrategy(ABC):
         """策略描述（说明核心逻辑）。"""
         ...
 
+    def tunable_params(self) -> list[dict]:
+        """返回可调参数列表，每个元素 = {name, default, values: [候选值...]}。"""
+        return []
+
 
 def compute_atr(df: pd.DataFrame, period: int = 14) -> "pd.Series":
     """计算 ATR（Average True Range），使用 Wilder 平滑。"""

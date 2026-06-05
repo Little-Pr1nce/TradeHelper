@@ -36,6 +36,7 @@ class AnalysisResult:
     market_regime: str = "unknown"            # 当前行情类型
     active_strategies: list = field(default_factory=list)   # 当前激活的策略名
     skipped_strategies: list = field(default_factory=list)  # 被跳过的策略名
+    param_tuning: dict = field(default_factory=dict)        # 参数调优结果
 
 
 def run_pipeline(
@@ -136,17 +137,19 @@ def run_pipeline(
     # ---- ⑤ 行情检测 + 策略过滤 ----
     from alpha.scoring import detect_market_regime
     market_regime, _ = detect_market_regime(df)
-    active_strategies = []
-    skipped_strategies = []
+    active_strategy_keys = []
+    skipped_strategy_keys = []
+    active_strategies = []  # Strategy 实例列表
     for name in strategy_names:
         s = get_execution_strategy(name)
         if not s.suitable_regimes or market_regime in s.suitable_regimes:
             active_strategies.append(s)
+            active_strategy_keys.append(name)
         else:
-            skipped_strategies.append(name)
+            skipped_strategy_keys.append(name)
             logger.info(f"  [策略] {name} ({s.name}) 不适合 {market_regime} 行情，跳过")
 
-    logger.info(f"  [管道 4/4] 行情={market_regime}, 激活策略={[s.name for s in active_strategies]}, 跳过={skipped_strategies}")
+    logger.info(f"  [管道 4/4] 行情={market_regime}, 激活策略={[s.name for s in active_strategies]}, 跳过={skipped_strategy_keys}")
     logger.info(f"  策略回测 (初始资金={initial_capital:,.0f})...")
     config = BacktestConfig(initial_capital=initial_capital)
     if market == "US":
@@ -163,6 +166,36 @@ def run_pipeline(
             f"夏普={r.sharpe_ratio:.2f}, 回撤={r.max_drawdown*100:.2f}%, "
             f"交易={r.total_trades}次"
         )
+
+    # ---- ⑥ 参数扫参调优 ----
+    param_tuning = {}
+    logger.info("  [管道 5/5] 策略参数扫参调优...")
+    for name in active_strategy_keys:
+        base = get_execution_strategy(name)
+        tunable = base.tunable_params()
+        if not tunable:
+            continue
+        # 只调第一个参数
+        p = tunable[0]
+        best_val = p["default"]
+        best_score = -999.0
+        for val in p["values"]:
+            kwargs = {p["name"]: val}
+            s = get_execution_strategy(name, **kwargs)
+            test_result = engine.run(df.copy(), s, news_df)
+            score = test_result.sharpe_ratio if test_result.total_trades > 0 else -999.0
+            if score > best_score:
+                best_score = score
+                best_val = val
+        param_tuning[name] = {
+            "param": p["name"], "default": p["default"],
+            "best_value": best_val,
+            "default_sharpe": results.get(base.name, results.get(name, None)),
+        }
+        default_r = results.get(base.name)
+        best_str = (f"默认 entry={p['default']:.2f} → {default_r.total_return*100:+.1f}%/{default_r.sharpe_ratio:.2f}"
+                    if default_r else f"默认 entry={p['default']:.2f}")
+        logger.info(f"  [调优] {name}: {best_str} | 最优 entry={best_val:.2f} → 夏普={best_score:.2f}")
 
     logger.info(f"管道完成: 基准收益={benchmark_return*100:+.2f}%")
     logger.info("=" * 50)
@@ -185,8 +218,9 @@ def run_pipeline(
         validation=validation,
         fundamental_data=fundamental_data,
         market_regime=market_regime,
-        active_strategies=[s.name for s in active_strategies],
-        skipped_strategies=skipped_strategies,
+        active_strategies=active_strategy_keys,
+        skipped_strategies=skipped_strategy_keys,
+        param_tuning=param_tuning,
     )
 
 

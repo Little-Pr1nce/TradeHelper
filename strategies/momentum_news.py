@@ -29,6 +29,10 @@ class MomentumNewsStrategy(BaseExecutionStrategy):
 
     suitable_regimes = []  # 全行情通用
 
+    def tunable_params(self) -> list[dict]:
+        return [{"name": "entry_pct", "default": self.entry_pct, "values": [0.7, 0.75, 0.8, 0.85, 0.9]}]
+
+
     def __init__(self, entry_pct: float = 0.80, exit_pct: float = 0.50,
                  finbert_min: float = 0.3, breakout_window: int = 5,
                  cooldown_bars: int = 2, atr_period: int = 14,

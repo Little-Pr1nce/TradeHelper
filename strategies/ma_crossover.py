@@ -34,6 +34,10 @@ class MACrossoverStrategy(BaseExecutionStrategy):
 
     suitable_regimes = ["trending_steady"]
 
+    def tunable_params(self) -> list[dict]:
+        return [{"name": "entry_pct", "default": self.entry_pct, "values": [0.4, 0.45, 0.5, 0.55, 0.6]}]
+
+
     def __init__(self, entry_pct: float = 0.50, exit_pct: float = 0.30):
         self.entry_pct = entry_pct
         self.exit_pct = exit_pct

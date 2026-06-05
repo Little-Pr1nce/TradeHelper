@@ -41,6 +41,10 @@ class TurtleATRStrategy(BaseExecutionStrategy):
 
 
     suitable_regimes = ["trending_volatile"]
+
+    def tunable_params(self) -> list[dict]:
+        return [{"name": "entry_pct", "default": self.entry_pct, "values": [0.65, 0.7, 0.75, 0.8, 0.85]}]
+
     def __init__(self, entry_pct: float = 0.75, exit_pct: float = 0.40,
                  channel_n: int = 20, exit_channel_n: int = 10,
                  atr_period: int = 20, atr_mult_stop: float = 2.0,

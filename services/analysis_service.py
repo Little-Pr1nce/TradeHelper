@@ -200,12 +200,35 @@ class AnalysisService:
         data_range = f"{dates.iloc[0].strftime('%Y-%m-%d')} ~ {dates.iloc[-1].strftime('%Y-%m-%d')}"
 
         # 实时报价（用于报告展示）
+        # 盘后/夜盘时段 fetch_quote 可能返回常规收盘价，用 tick 拿含盘后的实时价
         realtime_quote = None
         if Settings().get("stock_token_us", ""):
             try:
                 _progress("正在获取实时报价...")
                 fetcher = get_stock_fetcher()
-                realtime_quote = fetcher.fetch_quote(code) if hasattr(fetcher, 'fetch_quote') else None
+                tick = fetcher.fetch_stock_tick(code) if hasattr(fetcher, 'fetch_stock_tick') else None
+                quote = fetcher.fetch_quote(code) if hasattr(fetcher, 'fetch_quote') else None
+                if tick:
+                    q_latest = tick.get("latest", 0)
+                    # prev_close 用日线最后一根 K 线的收盘价（最可靠），不用 API 的 prev_close
+                    q_prev = float(pipeline_result.df["close"].iloc[-1]) if "close" in pipeline_result.df.columns else 0
+                    q_change_pct = (q_latest - q_prev) / q_prev if q_prev > 0 else 0.0
+                    realtime_quote = {
+                        "latest": q_latest,
+                        "open": quote.get("open", 0) if quote else 0,
+                        "high": quote.get("high", 0) if quote else 0,
+                        "low": quote.get("low", 0) if quote else 0,
+                        "prev_close": q_prev,
+                        "change": q_latest - q_prev,
+                        "change_pct": round(q_change_pct, 6),
+                        "volume": quote.get("volume", 0) if quote else tick.get("volume", 0),
+                        "amount": quote.get("amount", 0) if quote else 0,
+                        "timestamp": tick.get("timestamp", 0),
+                        "status": 0,
+                        "vwap": quote.get("vwap", 0) if quote else 0,
+                    }
+                elif quote:
+                    realtime_quote = quote
             except Exception as e:
                 logger.warning(f"实时报价获取失败: {e}")
 
@@ -223,6 +246,7 @@ class AnalysisService:
             market_regime=pipeline_result.market_regime,
             active_strategies=pipeline_result.active_strategies,
             skipped_strategies=pipeline_result.skipped_strategies,
+            param_tuning=pipeline_result.param_tuning,
         )
         if not report_content:
             report_content = "报告生成失败，请稍后重试。"
@@ -541,11 +565,16 @@ class AnalysisService:
             t1_pipeline_result = self._run_eod_to_t1(code, request, _progress, _stop)
         if _stop(): return self._empty_response(code)
         if t1_pipeline_result is None:
-            raise RuntimeError("无法获取 T-1 日数据，盘中分析不可用。请先执行一次盘后分析。")
+            raise RuntimeError("T-1 数据获取失败，请检查网络和数据源配置。")
         if not t1_report_content:
+            _progress("正在生成 T-1 日报告...")
             t1_report_content = self._generate_t1_report_text(
                 code, info, t1_pipeline_result, request.period,
             )
+            # 自动生成的 T-1 报告存回 DB，下次可直接复用
+            if t1_report_content:
+                self._persist_report(info, request.market, request.period,
+                                    t1_report_content, "", mode="eod")
 
         snapshot = compute_intraday_snapshot(
             t1_pipeline_result,
@@ -731,11 +760,15 @@ class AnalysisService:
             t1_pipeline_result = self._run_eod_to_t1(code, request, _progress, _stop)
         if _stop(): return self._empty_response(code)
         if t1_pipeline_result is None:
-            raise RuntimeError("无法获取 T-1 日数据，盘前分析不可用。请先执行一次盘后分析。")
+            raise RuntimeError("T-1 数据获取失败，请检查网络和数据源配置。")
         if not t1_report_content:
+            _progress("正在生成 T-1 日报告...")
             t1_report_content = self._generate_t1_report_text(
                 code, info, t1_pipeline_result, request.period,
             )
+            if t1_report_content:
+                self._persist_report(info, request.market, request.period,
+                                    t1_report_content, "", mode="eod")
 
         # ---- 6. 计算盘前快照 ----
         _progress("正在计算盘前快照...")
@@ -793,37 +826,54 @@ class AnalysisService:
 
     # ======================== T-1 日分析缓存与获取 ========================
 
+    @staticmethod
+    def _previous_trading_day() -> str:
+        """返回上一个交易日（跳过周末）。"""
+        from datetime import date as dt_date, timedelta
+        today = dt_date.today()
+        d = today - timedelta(days=1)
+        while d.weekday() >= 5:  # 周六=5, 周日=6
+            d -= timedelta(days=1)
+        return d.strftime("%Y-%m-%d")
+
     def _get_recent_analyses(
         self, code: str,
         progress, stop,
     ) -> tuple[str | None, str | None, str | None, PipelineResult | None]:
         """
-        从 DB 缓存读取最近的盘后和盘前分析报告。
+        从 DB 缓存读取 T-1 盘后分析报告。
 
         缓存策略：
-          - 盘后(eod)报告：最近 7 天内最新的一份
-          - 盘前(pre)报告：最近 12 小时内最新的一份
+          - 盘后(eod)报告：必须来自上一个交易日（T-1），跨周末自动跳过
+          - 盘前(pre)报告：最近 12 小时内
+
+        如果不是真正的 T-1 报告，即使存在也不复用，让调用方重新生成。
 
         Returns:
             (eod_report_content, pre_report_content, pre_prediction_data, pipeline_result)
-            — 各元素可能为 None（无缓存）
-            — pre_prediction_data: JSON 字符串，盘前报告的结构化预测数据
-            — pipeline_result 不可从 content 恢复，始终为 None
+            — pipeline_result 始终为 None（不可从 text 恢复）
         """
         eod_report = None
         pre_report = None
         pre_prediction = None
         try:
-            # 查询最近的盘后报告（7 天内）
+            t1_date = self._previous_trading_day()
             eod_reports = Database().get_reports_by_code(
-                code, mode="eod", since_hours=168,  # 7 天
+                code, mode="eod", since_hours=168,
             )
-            if eod_reports:
-                eod_report = eod_reports[0].content
-                logger.info(
-                    f"复用 T-1 盘后缓存报告: {eod_reports[0].create_time}, "
-                    f"{len(eod_report)} chars"
-                )
+            for r in eod_reports:
+                # 找到第一份真正 T-1 日期的报告（已按时间倒序，第一个=最新）
+                report_date = (r.create_time or "")[:10]
+                if report_date == t1_date:
+                    eod_report = r.content
+                    logger.info(f"复用 T-1({t1_date}) 盘后缓存报告: {r.create_time}, "
+                                f"同日期共{sum(1 for x in eod_reports if (x.create_time or '')[:10]==t1_date)}份，取最新")
+                    break
+            if eod_reports and not eod_report:
+                # 有缓存但不是 T-1 的 → 跳过，提示将重新生成
+                latest = eod_reports[0]
+                latest_date = (latest.create_time or "")[:10]
+                logger.info(f"缓存报告日期({latest_date})≠T-1({t1_date})，弃用缓存，将重新生成 T-1 分析")
 
             # 查询最近的盘前报告（12 小时内）
             pre_reports = Database().get_reports_by_code(
@@ -926,6 +976,7 @@ class AnalysisService:
                 market_regime=pipeline_result.market_regime,
                 active_strategies=pipeline_result.active_strategies,
                 skipped_strategies=pipeline_result.skipped_strategies,
+                param_tuning=pipeline_result.param_tuning,
             )
             return content or ""
         except Exception as e:
