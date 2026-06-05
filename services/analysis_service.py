@@ -930,13 +930,30 @@ class AnalysisService:
             else:
                 w_tech, w_news = 0.6, 0.4
 
+            # 获取基本面数据
+            fundamental_data = None
+            try:
+                from config.settings import Settings
+                from alpha.fundamental import fetch_fundamental_factors
+                settings = Settings()
+                info = self._fetch_stock_info(code, request.market)
+                fundamental_data = fetch_fundamental_factors(
+                    name=info.name if info else code, code=code, market=request.market,
+                    model=settings.get("llm_model", ""),
+                    base_url=settings.get("llm_base_url", ""),
+                    api_key=settings.get("llm_api_key", ""),
+                    finnhub_token=settings.get("news_token_us", ""),
+                )
+            except Exception as e:
+                logger.warning(f"基本面数据获取失败: {e}")
+
             market_type = detect_market(code) or request.market
-            # 盘中/盘前模式使用更短的因子验证窗口（1 日而非 5 日）
             validation_mode = request.mode if request.mode in ("intraday", "pre") else "eod"
             pipeline_result = run_pipeline(
                 df, news_df, market=market_type,
                 w_tech=w_tech, w_news=w_news,
                 validation_mode=validation_mode,
+                fundamental_data=fundamental_data,
             )
             return pipeline_result
         except Exception as e:
