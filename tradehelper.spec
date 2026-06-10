@@ -30,6 +30,14 @@ for _icon_file in ["controls/material/icons.json", "controls/cupertino/cupertino
         # 目标目录不带文件名，仅目录路径
         datas.append((str(_src), str((_flet_pkg / _icon_file).parent.relative_to(_flet_pkg.parent))))
 
+# ── 包元数据（避免 "no package metadata was found" 错误） ──
+# tickflow/baostock 用 importlib.metadata 查版本，PyInstaller 需显式打包 METADATA
+from PyInstaller.utils.hooks import copy_metadata
+
+datas += copy_metadata('tickflow')
+datas += copy_metadata('baostock')
+datas += copy_metadata('httpx')
+
 # ── 隐藏导入（transformers/torch 等大型库需显式声明） ──
 hiddenimports = [
     "transformers",
