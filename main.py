@@ -103,6 +103,7 @@ def main(page: ft.Page):
         Database.init(settings.db_path)
         _update_tab_state()
         main_page.refresh_modes()
+        main_page.update_session_indicator()
         # 如果仍未完全配置，切到设置页
         if not settings.is_fully_configured():
             page.snack_bar = ft.SnackBar(

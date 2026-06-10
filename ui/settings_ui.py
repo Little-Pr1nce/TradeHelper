@@ -90,18 +90,18 @@ class SettingsPage(ft.Container):
 
         # ========== 数据源配置 ==========
         self._stock_token_us = ft.TextField(
-            label="美股数据源 Token（如 itick / Massive）",
+            label="美股数据源 Token（TickFlow API Key）",
             value=settings.get("stock_token_us", ""),
             password=True,
             can_reveal_password=True,
-            hint_text="美股 K 线 + 实时报价 + 盘口数据",
+            hint_text="TickFlow API Key（tickflow.org 免费注册获取）",
         )
         self._stock_token_a = ft.TextField(
-            label="A 股数据源 Token（如 Tushare）",
+            label="A 股数据源 Token（TickFlow API Key）",
             value=settings.get("stock_token_a", ""),
             password=True,
             can_reveal_password=True,
-            hint_text="A 股 K 线 + 实时行情数据",
+            hint_text="TickFlow API Key（tickflow.org 免费注册获取）",
         )
         self._news_token_us = ft.TextField(
             label="新闻数据源 Token - 美股（如 Finnhub）",
@@ -163,8 +163,8 @@ class SettingsPage(ft.Container):
                 self._stock_token_a,
                 self._news_token_us,
                 self._news_token_a,
-                ft.Text("「股票数据源 Token」用于付费股票行情 API（如 itick）。\n"
-                        "「新闻数据源 Token - 美股」用于美股新闻 API（如 Finnhub）。\n"
+                ft.Text("「股票数据源 Token」填写 TickFlow API Key（tickflow.org 免费注册即可获取实时行情）。\n"
+                        "「新闻数据源 Token - 美股」用于美股新闻 API（如 Finnhub 免费 Key）。\n"
                         "「新闻数据源 Token - A 股」用于 A 股新闻 API（如 Tushare）。\n"
                         "留空的字段将自动使用免费数据源。",
                         size=12, color=ft.Colors.GREY_600),

@@ -8,8 +8,8 @@
   - closed:   非交易时段 / 休市
 
 判断优先级：
-  1. itick /stock/tick 的 te 字段（最准确）
-  2. itick /stock/quote 的 timestamp 结合市场作息推断
+  1. stock_tick 的 trading_phase 字段（如 itick te 字段，最准确）
+  2. stock_quote 的 timestamp 结合市场作息推断
   3. 本地当前时间 + 市场作息规则（兜底）
 """
 
@@ -41,8 +41,8 @@ def detect_session(
 
     Args:
         market:      "A" / "US"
-        stock_tick:  itick /stock/tick 返回值（含 trading_phase 字段），可选
-        stock_quote: itick /stock/quote 返回值，可选
+        stock_tick:  实时成交数据（含 trading_phase 字段），可选
+        stock_quote: 实时报价数据，可选
 
     Returns:
         "pre" / "intraday" / "post" / "closed"
@@ -124,6 +124,59 @@ def session_label(session: str) -> str:
         "post": "盘后交易",
         "closed": "休市",
     }.get(session, "未知")
+
+
+def _us_session_label(session: str) -> str:
+    return {"pre": "盘前交易", "intraday": "常规交易", "post": "盘后交易", "closed": "休市"}.get(session, "未知")
+
+def _a_session_label(session: str) -> str:
+    return {"pre": "集合竞价", "intraday": "盘中交易", "post": "盘后交易", "closed": "休市"}.get(session, "未知")
+
+def _recommended_mode(session: str) -> str:
+    """根据时段返回推荐的分析模式。"""
+    return {"pre": "pre", "intraday": "intraday", "post": "eod", "closed": "eod"}.get(session, "eod")
+
+def _mode_tip(session: str) -> str:
+    return {
+        "pre": "适合跑「盘前预测」",
+        "intraday": "适合跑「盘中实时分析」",
+        "post": "适合跑「盘后分析」",
+        "closed": "适合跑「盘后分析」",
+    }.get(session, "")
+
+
+def get_session_display(market: str) -> dict:
+    """
+    获取当前交易时段信息及建议，供 UI 展示。
+
+    Returns:
+        {
+            "market": "A" / "US",
+            "session": "pre" / "intraday" / "post" / "closed",
+            "label": "盘前交易" / ...,
+            "recommended": "pre" / "intraday" / "eod",
+            "icon": "🌅" / "⏱" / "🌆" / "🌙",
+            "tip": "建议跑...",
+        }
+    """
+    session = detect_session(market)
+    if market == "US":
+        label = _us_session_label(session)
+    else:
+        label = _a_session_label(session)
+
+    icon = {"pre": "🌅", "intraday": "⏱", "post": "🌆", "closed": "🌙"}.get(session, "❓")
+    recommended = _recommended_mode(session)
+    tip = _mode_tip(session)
+
+    return {
+        "market": market,
+        "session": session,
+        "label": label,
+        "recommended": recommended,
+        "icon": icon,
+        "tip": tip,
+    }
 
 
 def is_us_pre_market(stock_tick: Optional[dict] = None) -> bool:

@@ -44,30 +44,74 @@ def fetch_fundamental_factors(
         except Exception as e:
             logger.warning(f"Finnhub 基本面获取失败 ({code}): {e}")
 
-    # ── akshare 优先 ──
+    # ── A 股：baostock 优先，akshare 兜底 ──
+    if market == "A":
+        financials = _fetch_financials_baostock(code)
+        if financials is None:
+            financials = _fetch_financials_akshare(code, market)
+
+        pe_pb = _fetch_pe_pb_baostock(code)
+        if pe_pb is None:
+            pe_pb = _fetch_pe_pb_akshare(code, market)
+
+        style = _calc_style_factors(pe_pb) if pe_pb else {"pe_percentile": 0.5, "pb_percentile": 0.5}
+        fin = financials or {"roe": 0, "gross_margin": 0, "debt_ratio": 0,
+                             "net_profit_yoy": 0, "revenue_yoy": 0}
+
+        if financials and pe_pb:
+            source = "baostock"
+        elif pe_pb:
+            source = "baostock(估值)" if _fetch_pe_pb_baostock.__name__ else "akshare(估值)"
+        elif financials:
+            source = "baostock(财务)" if _fetch_financials_baostock.__name__ else "akshare(财务)"
+        else:
+            if api_key:
+                logger.info("基本面全部缺失，LLM 兜底")
+                try:
+                    from alpha.fundamental_llm import fetch_fundamental_factors_llm
+                    return fetch_fundamental_factors_llm(name, code, market, model, base_url, api_key)
+                except Exception as e:
+                    logger.warning(f"LLM 基本面兜底失败: {e}")
+            source = "default"
+
+        logger.info(
+            f"基本面({source}): PE分位={style['pe_percentile']:.1%}, "
+            f"PB分位={style['pb_percentile']:.1%}, ROE={fin['roe']:.1%}"
+        )
+        return {"style_factors": style, "fundamental_factors": fin, "source": source}
+
+    # ── 美股：Finnhub → akshare ──
     financials = _fetch_financials_akshare(code, market)
     pe_pb = _fetch_pe_pb_akshare(code, market)
 
-    if financials and pe_pb:
-        style = _calc_style_factors(pe_pb)
-        logger.info(
-            f"基本面(akshare): PE分位={style['pe_percentile']:.1%}, "
-            f"PB分位={style['pb_percentile']:.1%}, ROE={financials['roe']:.1%}"
-        )
-        return {"style_factors": style, "fundamental_factors": financials, "source": "akshare"}
-
-    # 部分缺失 → LLM 兜底
-    if api_key:
-        logger.info(f"数据不全(fin={bool(financials)}, pe_pb={bool(pe_pb)})，LLM 兜底")
-        from alpha.fundamental_llm import fetch_fundamental_factors_llm
-        return fetch_fundamental_factors_llm(name, code, market, model, base_url, api_key)
-
-    # 用已有数据 + 默认值
+    # PE/PB 估值分位 + 财务指标各自独立取，各自缺失互不影响
     style = _calc_style_factors(pe_pb) if pe_pb else {"pe_percentile": 0.5, "pb_percentile": 0.5}
     fin = financials or {"roe": 0, "gross_margin": 0, "debt_ratio": 0,
                          "net_profit_yoy": 0, "revenue_yoy": 0}
-    logger.warning("基本面数据部分缺失，使用默认值")
-    return {"style_factors": style, "fundamental_factors": fin, "source": "partial"}
+
+    if financials and pe_pb:
+        source = "akshare"
+    elif pe_pb:
+        source = "akshare(估值)"
+    elif financials:
+        source = "akshare(财务)"
+    else:
+        # 全部缺失 → LLM 兜底
+        if api_key:
+            logger.info("基本面全部缺失，LLM 兜底")
+            try:
+                from alpha.fundamental_llm import fetch_fundamental_factors_llm
+                return fetch_fundamental_factors_llm(name, code, market, model, base_url, api_key)
+            except Exception as e:
+                logger.warning(f"LLM 基本面兜底失败: {e}")
+        source = "default"
+
+    _baostock_logout()
+    logger.info(
+        f"基本面({source}): PE分位={style['pe_percentile']:.1%}, "
+        f"PB分位={style['pb_percentile']:.1%}, ROE={fin['roe']:.1%}"
+    )
+    return {"style_factors": style, "fundamental_factors": fin, "source": source}
 
 
 # ── Finnhub /stock/metric 解析 ──
@@ -189,7 +233,168 @@ def _safe_float(val) -> float:
         return 0.0
 
 
-# ── akshare 数据获取 ──
+# ── baostock 数据获取（A 股基本面，优先） ──
+
+
+_baostock_logged_in = False
+
+
+def _baostock_login():
+    """baostock 全局登录（只登一次，后续调用跳过）。"""
+    global _baostock_logged_in
+    if _baostock_logged_in:
+        return True
+    import baostock as bs
+    try:
+        lg = bs.login()
+        if lg.error_code == '0':
+            _baostock_logged_in = True
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _baostock_logout():
+    """baostock 登出。"""
+    global _baostock_logged_in
+    try:
+        import baostock as bs
+        bs.logout()
+    finally:
+        _baostock_logged_in = False
+
+
+def _fetch_financials_baostock(code: str) -> dict | None:
+    """通过 baostock 获取 A 股财务指标（ROE、毛利率、资产负债率、增速）。"""
+    import baostock as bs
+    try:
+        if not _baostock_login():
+            return None
+
+        symbol = f"sh.{code}" if code.startswith(("6", "5", "9")) else f"sz.{code}"
+
+        # 盈利能力
+        profit = bs.query_profit_data(code=symbol, year=2025, quarter=4)
+        roe = gross_margin = 0.0
+        revenue_2025 = revenue_2024 = 0.0
+        if profit.error_code == '0':
+            while profit.next():
+                row = profit.get_row_data()
+                d = dict(zip(profit.fields, row))
+                roe = _safe_float(d.get("roeAvg"))
+                gross_margin = _safe_float(d.get("gpMargin"))
+                revenue_2025 = _safe_float(d.get("MBRevenue"))
+
+        # 去年营收（算同比）
+        profit_prev = bs.query_profit_data(code=symbol, year=2024, quarter=4)
+        if profit_prev.error_code == '0':
+            while profit_prev.next():
+                row = profit_prev.get_row_data()
+                d = dict(zip(profit_prev.fields, row))
+                revenue_2024 = _safe_float(d.get("MBRevenue"))
+
+        # 偿债能力
+        balance = bs.query_balance_data(code=symbol, year=2025, quarter=4)
+        debt_ratio = 0.0
+        if balance.error_code == '0':
+            while balance.next():
+                row = balance.get_row_data()
+                d = dict(zip(balance.fields, row))
+                debt_ratio = _safe_float(d.get("liabilityToAsset"))
+
+        # 成长能力
+        growth = bs.query_growth_data(code=symbol, year=2025, quarter=4)
+        net_profit_yoy = 0.0
+        if growth.error_code == '0':
+            while growth.next():
+                row = growth.get_row_data()
+                d = dict(zip(growth.fields, row))
+                net_profit_yoy = _safe_float(d.get("YOYNI"))
+
+        revenue_yoy = ((revenue_2025 - revenue_2024) / revenue_2024
+                       if revenue_2024 > 0 else 0.0)
+
+        if roe == 0 and gross_margin == 0 and debt_ratio == 0:
+            return None
+
+        logger.info(
+            f"baostock 财务: ROE={roe:.1%}, margin={gross_margin:.1%}, "
+            f"debt={debt_ratio:.1%}, np_yoy={net_profit_yoy:.1%}, rev_yoy={revenue_yoy:.1%}"
+        )
+        return {
+            "roe": roe, "gross_margin": gross_margin, "debt_ratio": debt_ratio,
+            "net_profit_yoy": net_profit_yoy, "revenue_yoy": revenue_yoy,
+        }
+
+    except Exception as e:
+        logger.warning(f"baostock 财务获取失败 ({code}): {e}")
+        return None
+
+
+def _fetch_pe_pb_baostock(code: str) -> list[dict] | None:
+    """通过 baostock 获取 A 股 PE/PB 3 年日线历史。"""
+    import baostock as bs
+    try:
+        if not _baostock_login():
+            return None
+
+        symbol = f"sh.{code}" if code.startswith(("6", "5", "9")) else f"sz.{code}"
+        from datetime import date, timedelta
+
+        end_date = date.today().strftime("%Y-%m-%d")
+        start_date = (date.today() - timedelta(days=1095)).strftime("%Y-%m-%d")
+
+        rs = bs.query_history_k_data_plus(
+            symbol, "date,peTTM,pbMRQ",
+            start_date=start_date, end_date=end_date,
+            frequency="d", adjustflag="2",
+        )
+        if rs.error_code != '0':
+            logger.warning(f"baostock PE/PB 查询失败: {rs.error_msg}")
+            return None
+
+        result = []
+        while rs.next():
+            row = rs.get_row_data()
+            d = dict(zip(rs.fields, row))
+            pe = _safe_float(d.get("peTTM"))
+            pb = _safe_float(d.get("pbMRQ"))
+            if pe == 0 and pb == 0:
+                continue
+            result.append({"date": d["date"], "pe": pe, "pb": pb})
+
+        if len(result) < 3:
+            return None
+        logger.info(f"baostock PE/PB: {len(result)} 条 ({result[0]['date']}~{result[-1]['date']})")
+        return result
+
+    except Exception as e:
+        logger.warning(f"baostock PE/PB 获取失败 ({code}): {e}")
+        return None
+
+
+def _fetch_stock_industry_baostock(code: str) -> str:
+    """通过 baostock 获取 A 股行业分类。"""
+    import baostock as bs
+    try:
+        if not _baostock_login():
+            return ""
+        symbol = f"sh.{code}" if code.startswith(("6", "5", "9")) else f"sz.{code}"
+        rs = bs.query_stock_industry(code=symbol)
+        if rs.error_code == '0':
+            while rs.next():
+                row = rs.get_row_data()
+                result = row[3] if len(row) > 3 else ""
+                _baostock_logout()
+                return result
+    except Exception:
+        pass
+    _baostock_logout()
+    return ""
+
+
+# ── akshare 数据获取（兜底） ──
 
 
 def _fetch_financials_akshare(code: str, market: str) -> dict | None:
@@ -235,7 +440,8 @@ def _fetch_pe_pb_akshare(code: str, market: str) -> list[dict] | None:
             df = ak.stock_value_em(symbol=code)
             if df is None or df.empty:
                 return None
-            col_map = {"日期": "date", "PE(TTM)": "pe", "市净率": "pb"}
+            # akshare 版本差异：旧版列名"日期"，新版"数据日期"
+            col_map = {"日期": "date", "数据日期": "date", "PE(TTM)": "pe", "市净率": "pb"}
         else:
             return _fetch_pe_pb_us_baidu(code)
 

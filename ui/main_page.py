@@ -90,13 +90,13 @@ class MainPage(ft.Container):
         )
 
         # ── 分析模式（盘后/盘中/盘前） ──
-        has_token = bool(Settings().get("stock_token_us", ""))
+        has_realtime = bool(Settings().get("stock_token_us", "") or Settings().get("stock_token_a", ""))
         self._mode_dd = ft.Dropdown(
             label="分析模式", width=140, value="eod",
             options=[
                 ft.dropdown.Option("eod", "📊 盘后分析"),
-                ft.dropdown.Option("intraday", "⏱ 盘中分析", disabled=not has_token),
-                ft.dropdown.Option("pre", "🌅 盘前分析", disabled=not has_token),
+                ft.dropdown.Option("intraday", "⏱ 盘中分析", disabled=not has_realtime),
+                ft.dropdown.Option("pre", "🌅 盘前分析", disabled=not has_realtime),
             ],
             border_radius=8,
         )
@@ -233,18 +233,44 @@ class MainPage(ft.Container):
         self._chart_container = chart_container
         self._report_container = report_container
 
+        # ── 交易时段提示 ──
+        self._session_a_text = ft.Text("", size=12, weight=ft.FontWeight.W_500)
+        self._session_us_text = ft.Text("", size=12, weight=ft.FontWeight.W_500)
+        session_indicator = ft.Container(
+            margin=ft.Margin(0, 10, 0, 0),
+            border_radius=8,
+            bgcolor=ft.Colors.GREY_50,
+            padding=ft.Padding(16, 10, 16, 10),
+            content=ft.Row(
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                controls=[
+                    ft.Row(spacing=6, controls=[
+                        ft.Text("🇨🇳 A股", size=12, weight=ft.FontWeight.BOLD),
+                        self._session_a_text,
+                    ]),
+                    ft.Row(spacing=6, controls=[
+                        ft.Text("🇺🇸 美股", size=12, weight=ft.FontWeight.BOLD),
+                        self._session_us_text,
+                    ]),
+                ],
+            ),
+        )
+        self._session_indicator = session_indicator
+
         # ── 整体布局 ──
         self.content = ft.Column(
             scroll=ft.ScrollMode.AUTO, expand=True,
             spacing=0,
             controls=[
                 control_panel,
+                session_indicator,
                 self._progress_row,
                 self._error_text,
                 chart_container,
                 report_container,
             ],
         )
+        self.update_session_indicator()
         return self.content
 
     # ======================== 按钮状态 ========================
@@ -263,25 +289,51 @@ class MainPage(ft.Container):
 
     def refresh_modes(self):
         """刷新分析模式下拉框（设置保存后调用，重新检查 token）。"""
-        has_token = bool(Settings().get("stock_token_us", ""))
+        has_us = bool(Settings().get("stock_token_us", ""))
+        has_a = bool(Settings().get("stock_token_a", ""))
+        has_realtime = has_us or has_a
         self._mode_dd.options = [
             ft.dropdown.Option("eod", "📊 盘后分析"),
-            ft.dropdown.Option("intraday", "⏱ 盘中分析", disabled=not has_token),
-            ft.dropdown.Option("pre", "🌅 盘前分析", disabled=not has_token),
+            ft.dropdown.Option("intraday", "⏱ 盘中分析", disabled=not has_realtime),
+            ft.dropdown.Option("pre", "🌅 盘前分析", disabled=not has_realtime),
         ]
         self._mode_dd.update()
 
+    def update_session_indicator(self):
+        """更新交易时段提示（北京时间）。"""
+        from utils.session import get_session_display
+        try:
+            a = get_session_display("A")
+            self._session_a_text.value = (
+                f"{a['icon']} {a['label']} → {a['tip']}"
+            )
+            if a["session"] == "intraday":
+                self._session_a_text.color = ft.Colors.RED_700
+            elif a["session"] == "pre":
+                self._session_a_text.color = ft.Colors.ORANGE_700
+            else:
+                self._session_a_text.color = ft.Colors.GREY_600
+
+            us = get_session_display("US")
+            self._session_us_text.value = (
+                f"{us['icon']} {us['label']} → {us['tip']}"
+            )
+            if us["session"] == "intraday":
+                self._session_us_text.color = ft.Colors.RED_700
+            elif us["session"] == "pre":
+                self._session_us_text.color = ft.Colors.ORANGE_700
+            else:
+                self._session_us_text.color = ft.Colors.GREY_600
+
+            self._session_indicator.update()
+        except Exception:
+            pass
+
     def _on_mode_change(self, e):
         """分析模式切换时，自动调整市场选择。"""
-        mode = self._mode_dd.value
-        if mode == "pre":
-            self._market_dd.value = "US"
-            self._market_dd.disabled = True
-            self._market_dd.update()
-            self._show_error("💡 盘前分析目前仅支持美股。已自动切换为美股市场。")
-        else:
-            self._market_dd.disabled = False
-            self._market_dd.update()
+        # A 股和美股都支持全时段分析
+        # 盘前模式不再强制切美股
+        pass
 
     def _on_start(self, e):
         raw = self._code_input.value.strip()
@@ -296,20 +348,26 @@ class MainPage(ft.Container):
             self._show_error(f"请先在「设置」中配置：{'、'.join(labels)}")
             return
 
-        # 根据市场检查数据源 token
+        # EOD 盘后分析：TickFlow 免费日K线即可，无需 token
+        # 盘中/盘前分析：需要 TickFlow API Key（免费注册即可获取）
         market = self._market_dd.value
         mode = self._mode_dd.value
-        if market == "US":
-            if not settings.get("stock_token_us"):
-                self._show_error("美股分析需要配置「美股数据源 Token」")
+        token_key = "stock_token_us" if market == "US" else "stock_token_a"
+        market_label = "美股" if market == "US" else "A股"
+
+        if mode in ("intraday", "pre"):
+            if not settings.get(token_key):
+                self._show_error(
+                    f"{market_label}盘中/盘前分析需要配置"
+                    f"「{market_label}数据源 Token」（TickFlow API Key）。\n"
+                    f"免费注册：https://tickflow.org"
+                )
                 return
-            if not settings.get("news_token_us"):
-                self._show_error("美股分析需要配置「新闻数据源 Token - 美股」")
-                return
-        elif market == "A":
-            if not settings.get("stock_token_a"):
-                self._show_error("A 股分析需要配置「A 股数据源 Token」")
-                return
+
+        # 美股新闻需要 Finnhub token
+        if market == "US" and not settings.get("news_token_us"):
+            self._show_error("美股分析需要配置「美股新闻 Token」（Finnhub 免费 API Key）")
+            return
 
         self._show_error("")
         self._reset_ui()

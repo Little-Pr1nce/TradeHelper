@@ -579,7 +579,7 @@ def compute_intraday_snapshot(
                 lines.append(f"")
                 lines.append(f"| 项目 | 盘前预测 | 实际盘中 | 验证 |")
                 lines.append(f"|------|---------|---------|------|")
-                lines.append(f"| 开盘方向 | 期货得分 {futures_score:+.3f}（{pre_bias}） | {actual_open}（{open_gap:+.1f}%） | {verdict} |")
+                lines.append(f"| 开盘方向 | ETF 宏观得分 {futures_score:+.3f}（{pre_bias}） | {actual_open}（{open_gap:+.1f}%） | {verdict} |")
                 lines.append(f"| 盘前价格 | {pre_price:.2f}（{pre_change:+.2%}） | 开盘价 {open_price:.2f} | 偏差 {pre_vs_open:+.2f}% |")
                 lines.append(f"| T-1 Alpha | {t1_score:+.3f} | — | 趋势框架参考 |")
                 lines.append(f"")
@@ -634,16 +634,24 @@ def compute_premarket_snapshot(
     stock_quote: dict | None = None,
 ) -> PremarketSnapshot:
     """
-    计算盘前快照（美股专属）。
+    计算盘前快照（美股 + A 股）。
 
-    美股 24 小时交易，盘前数据具备参考价值：
-      - 盘前价格 + 成交量反映隔夜资金意图
-      - 盘口买卖比方向（非绝对值）反映隔夜挂单方向
-      - 期货是盘前最重要的方向锚——期货走势是判断开盘方向最可靠的信号
-      - 盘前价格与期货相对强弱判断是否有独立资金行为
-      - 距均线的跳空幅度预示开盘后回踩/延续概率
+    - 美股：QQQ/SPY ETF 盘前价格 → 宏观情绪参考
+    - A 股：沪深300/上证50 ETF 实时价 → 宏观情绪参考
+    - 盘前价格 + 成交量反映隔夜资金意图
+    - 盘前价格与 ETF 相对强弱判断是否有独立资金行为
+    - 距均线的跳空幅度预示开盘后回踩/延续概率
     """
     df = pipeline_result.df
+
+    # 市场标签
+    if market == "A":
+        etf1_label, etf1_name = "510300", "沪深300 ETF"
+        etf2_label, etf2_name = "510050", "上证50 ETF"
+    else:
+        etf1_label, etf1_name = "QQQ", "纳指ETF"
+        etf2_label, etf2_name = "SPY", "标普ETF"
+
     pre_price = stock_tick.get("latest", 0)
 
     # 通过 quote 推算涨跌幅（tick 只有 latest 没有 prev_close）
@@ -655,7 +663,7 @@ def compute_premarket_snapshot(
             pre_change_pct = (pre_price - t1_close) / t1_close
             prev_close = t1_close
 
-    # ── 期货解读 ──
+    # ── ETF 宏观情绪解读 ──
     nq = futures_data.get("NQ", {})
     es = futures_data.get("ES", {})
 
@@ -703,7 +711,7 @@ def compute_premarket_snapshot(
         except Exception:
             t1_date = str(t1_dt)[:10]
 
-    # 个股与期货的差值（供 LLM 判断个股相对强弱）
+    # 个股与ETF的差值（供 LLM 判断个股相对强弱）
     avg_future_change = (nq_change + es_change) / 2 if nq_change and es_change else 0
     pre_vs_future_diff = pre_change_pct - avg_future_change
 
@@ -712,58 +720,60 @@ def compute_premarket_snapshot(
         f"",
         f"> 🌅 快照时间：{now_str} | 分析基底：T-1 日（{t1_date}）收盘后完整分析",
         f"",
-        f"### 期货风向标",
+        f"### ETF 宏观风向标",
         f"",
-        f"| 期货 | 最新价 | 涨跌幅 | 成交量 |",
+        f"| 标的 | 最新价 | 涨跌幅 | 成交量 |",
         f"|------|--------|--------|--------|",
     ]
 
     if nq:
         lines.append(
-            f"| 纳指期货(NQ) | {nq.get('latest', 0):.2f} | "
+            f"| {etf1_label}（{etf1_name}） | {nq.get('latest', 0):.2f} | "
             f"{_pct_str(nq_change)} | {nq.get('volume', 0):,.0f} |"
         )
     else:
-        lines.append(f"| 纳指期货(NQ) | 数据不可用 | — | — |")
+        lines.append(f"| {etf1_label}（{etf1_name}） | 数据不可用 | — | — |")
 
     if es:
         lines.append(
-            f"| 标普期货(ES) | {es.get('latest', 0):.2f} | "
+            f"| {etf2_label}（{etf2_name}） | {es.get('latest', 0):.2f} | "
             f"{_pct_str(es_change)} | {es.get('volume', 0):,.0f} |"
         )
     else:
-        lines.append(f"| 标普期货(ES) | 数据不可用 | — | — |")
+        lines.append(f"| {etf2_label}（{etf2_name}） | 数据不可用 | — | — |")
 
     lines.append(f"")
-    lines.append(f"**期货宏观情绪得分**: {futures_score:+.3f}")
+    lines.append(f"**ETF 宏观情绪得分**: {futures_score:+.3f}")
     lines.append(f"")
 
-    # 期货 K 线数据（纯数值）
-    lines.append(f"### 期货盘前走势（5分钟K线，最近1小时）")
-    lines.append(f"")
-    lines.append(f"| 期货 | 首根K收盘 | 末根K收盘 | 涨跌 | 阳线数/总根数 |")
-    lines.append(f"|------|----------|----------|------|--------------|")
-    for label, kline in [("NQ", nq_kline), ("ES", es_kline)]:
-        if kline and len(kline) >= 3:
-            closes = [bar.get("c", bar.get("close", 0)) for bar in kline]
-            opens = [bar.get("o", bar.get("open", 0)) for bar in kline]
-            up_bars = sum(1 for i in range(len(kline))
-                          if closes[i] and opens[i] and closes[i] >= opens[i])
-            first_c = closes[0] if closes[0] else opens[0]
-            last_c = closes[-1] if closes[-1] else opens[-1]
-            kline_chg = (last_c - first_c) / first_c * 100 if first_c > 0 else 0
-            lines.append(f"| {label} | {first_c:.2f} | {last_c:.2f} | {kline_chg:+.2f}% | {up_bars}/{len(kline)} |")
-        else:
-            lines.append(f"| {label} | — | — | — | — |")
-    lines.append(f"")
+    # ETF 分钟线走势形态 — 仅在数据可用时展示（TickFlow 免费层不支持分钟线）
+    has_kline_data = (nq_kline and len(nq_kline) >= 3) or (es_kline and len(es_kline) >= 3)
+    if has_kline_data:
+        lines.append(f"### ETF 盘前走势（5分钟K线，最近1小时）")
+        lines.append(f"")
+        lines.append(f"| 标的 | 首根K收盘 | 末根K收盘 | 涨跌 | 阳线数/总根数 |")
+        lines.append(f"|------|----------|----------|------|--------------|")
+        for label, kline in [(etf1_label, nq_kline), (etf2_label, es_kline)]:
+            if kline and len(kline) >= 3:
+                closes = [bar.get("c", bar.get("close", 0)) for bar in kline]
+                opens = [bar.get("o", bar.get("open", 0)) for bar in kline]
+                up_bars = sum(1 for i in range(len(kline))
+                              if closes[i] and opens[i] and closes[i] >= opens[i])
+                first_c = closes[0] if closes[0] else opens[0]
+                last_c = closes[-1] if closes[-1] else opens[-1]
+                kline_chg = (last_c - first_c) / first_c * 100 if first_c > 0 else 0
+                lines.append(f"| {label} | {first_c:.2f} | {last_c:.2f} | {kline_chg:+.2f}% | {up_bars}/{len(kline)} |")
+            else:
+                lines.append(f"| {label} | — | — | — | — |")
+        lines.append(f"")
 
     lines.append(f"### 个股盘前")
     lines.append(f"")
     lines.append(f"| 项目 | 数值 |")
     lines.append(f"|------|------|")
     lines.append(f"| 盘前价格 | {pre_price:.2f}（{_pct_str(pre_change_pct)}） |")
-    lines.append(f"| 期货平均涨跌 | {_pct_str(avg_future_change)} |")
-    lines.append(f"| 个股 vs 期货差值 | {_pct_str(pre_vs_future_diff)} |")
+    lines.append(f"| ETF 平均涨跌 | {_pct_str(avg_future_change)} |")
+    lines.append(f"| 个股 vs ETF 差值 | {_pct_str(pre_vs_future_diff)} |")
     # 成交量优先用 quote 的累计量（tick 只返回最近一笔）
     pre_vol = (stock_quote or stock_tick).get("volume", 0)
     lines.append(f"| 盘前成交量 | {pre_vol:,.0f} 股 |")

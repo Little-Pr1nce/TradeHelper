@@ -1,19 +1,43 @@
+# ============================================================
+# TradeHelper — Python 3.12+ 依赖
+# ============================================================
+#
+# 安装: pip install -r requirements.txt
+#
+
+# ── UI 框架 ──
 flet>=0.25.0
-akshare>=1.14.0
-yfinance>=0.2.40
-mplfinance>=0.12.8b6
+
+# ── 行情数据（核心） ──
+tickflow>=0.1.22                # A股+美股日K线（免费）+ 实时行情（注册）
+
+# ── 行情数据（兜底/补充） ──
+baostock>=0.8.8                 # A股基本面（财务指标、PE/PB历史、行业）优先
+akshare>=1.14.0                 # A股新闻、股票搜索（爬虫兜底）
+yfinance>=0.2.40                # 美股Kal线兜底（仅FreeStockFetcher备用）
+
+# ── 图表 ──
+mplfinance>=0.12.8b6            # K线图
+matplotlib>=3.9.0               # 图表渲染
+Pillow>=10.3.0                  # 图片处理
+
+# ── 数值计算 ──
 pandas>=2.2.0
 numpy>=1.26.0
-ta>=0.11.0
-transformers>=4.40.0
-torch>=2.3.0
-openai>=1.30.0
-reportlab>=4.2.0
-matplotlib>=3.9.0
-Pillow>=10.3.0
-huggingface_hub>=0.20
-requests>=2.31.0
-scipy>=1.13.0
+scipy>=1.13.0                   # ta 依赖
+ta>=0.11.0                      # 技术指标
 
-# 打包工具（仅开发需要，用户不需要）
+# ── AI/LLM ──
+openai>=1.30.0                  # LLM API 调用（OpenAI 兼容）
+transformers>=4.40.0            # FinBERT 情感分析
+torch>=2.3.0                    # FinBERT 运行时
+huggingface_hub>=0.20           # FinBERT 模型缓存
+
+# ── HTTP 请求 ──
+requests>=2.31.0                # Finnhub API、百度API 等
+
+# ── 报告导出 ──
+reportlab>=4.2.0                # PDF 报告导出
+
+# ── 打包工具（开发用，非运行时依赖） ──
 pyinstaller>=6.0

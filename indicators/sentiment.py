@@ -6,11 +6,13 @@
   - 输出: positive / negative / neutral 三分类
   - 首次需下载约 300MB，后续缓存秒级加载
 
-降级方案：模型加载失败时自动切关键词匹配。
+中文新闻：LLM 翻译为英文 → FinBERT 分析 → 关键词降级（兜底）
+英文新闻：直接 FinBERT 分析 → 关键词降级（兜底）
 """
 
 import logging
 import os
+import re
 from typing import Optional
 
 from data.models import NewsItem
@@ -120,6 +122,67 @@ def _news_text(item: NewsItem) -> str:
     return item.title[:512]
 
 
+def _is_chinese(text: str) -> bool:
+    """检测文本是否包含中文字符。"""
+    return bool(re.search(r"[一-鿿]", text))
+
+
+def _translate_via_llm(texts: list[str]) -> list[str]:
+    """
+    用 LLM 批量翻译中文财经新闻为英文，供 FinBERT 分析。
+
+    Returns:
+        翻译后的英文文本列表（与输入等长）。
+        失败返回空列表，调用方降级关键词匹配。
+    """
+    from config.settings import Settings
+    from openai import OpenAI
+
+    settings = Settings()
+    try:
+        client = OpenAI(
+            api_key=settings.get("llm_api_key"),
+            base_url=settings.get("llm_base_url"),
+        )
+
+        count = len(texts)
+        prompt = (
+            f"Translate these {count} Chinese financial news items to English. "
+            "Keep financial terminology. "
+            f"Return exactly {count} lines, one translation per line, no numbering:\n\n"
+        )
+        for i, t in enumerate(texts):
+            prompt += f"[{i+1}] {t}\n"
+
+        # 每条中文 ≈ 输出 400 tokens 英文，加 200 余量
+        max_tokens = min(len(texts) * 400 + 200, 4096)
+        resp = client.chat.completions.create(
+            model=settings.get("llm_model"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=max_tokens,
+        )
+        content = resp.choices[0].message.content.strip()
+        # 按行分割，保留所有非空行
+        lines = [line.strip() for line in content.split("\n") if line.strip()]
+
+        # 去掉可能的编号前缀 "1. " / "1) " / "[1] "
+        result = [re.sub(r"^\[?\d+\][\.\)\s]*", "", line).strip() for line in lines]
+        # 过滤掉纯符号/空行
+        result = [r for r in result if r and len(r) > 5]
+
+        # 行数不足时用原文填补
+        while len(result) < len(texts):
+            result.append(texts[len(result)][:512])
+
+        logger.info(f"LLM 翻译: {len(texts)} 条 → {len(result)} 条英文")
+        return result[:len(texts)]
+
+    except Exception as e:
+        logger.warning(f"LLM 翻译失败: {e}")
+        return []
+
+
 class _SimpleFallbackAnalyzer:
     POSITIVE_WORDS = {
         "涨", "增长", "利好", "突破", "盈利", "升", "牛", "反弹",
@@ -161,13 +224,32 @@ def analyze(news_list: list[NewsItem]) -> list[NewsItem]:
     from indicators.constants import SENTIMENT_BATCH_SIZE
 
     pipeline = _get_pipeline()
-    texts = [_news_text(n) for n in news_list]
+    original_texts = [_news_text(n) for n in news_list]
 
-    # 拆批推理，避免一次性传入过多文本卡死 UI 线程
+    # ── 中文新闻：LLM 翻译为英文 → FinBERT 分析 ──
+    is_zh = any(_is_chinese(t) for t in original_texts)
+    finbert_input = original_texts
+    if is_zh:
+        logger.info(f"检测到中文新闻 ({len(news_list)} 条)，LLM 翻译后送 FinBERT")
+        translations = _translate_via_llm(original_texts)
+        if translations and len(translations) == len(original_texts):
+            finbert_input = translations
+        else:
+            # 翻译失败 → 直接降级关键词匹配
+            logger.warning("LLM 翻译失败，降级为中文关键词匹配")
+            fallback = _SimpleFallbackAnalyzer()
+            for item, result in zip(news_list, fallback(original_texts)):
+                label = result.get("label", "neutral")
+                item.sentiment = label if label in ("positive", "negative") else "neutral"
+                item.confidence = result.get("score", 0.5)
+                logger.info(f"  [{item.sentiment:<8} {item.confidence:.2f}] {item.title[:50]}")
+            return news_list
+
+    # ── FinBERT 推理 ──
     raw_results: list[dict] = []
     try:
-        for i in range(0, len(texts), SENTIMENT_BATCH_SIZE):
-            batch = texts[i : i + SENTIMENT_BATCH_SIZE]
+        for i in range(0, len(finbert_input), SENTIMENT_BATCH_SIZE):
+            batch = finbert_input[i : i + SENTIMENT_BATCH_SIZE]
             raw_results.extend(pipeline(batch))
     except Exception as e:
         logger.error(f"Sentiment analysis failed: {e}")
@@ -185,20 +267,20 @@ def analyze(news_list: list[NewsItem]) -> list[NewsItem]:
         else:
             item.sentiment = label.lower()
         item.confidence = round(score, 4)
+        logger.info(f"  [{item.sentiment:<8} {item.confidence:.2f}] {item.title[:50]}")
 
-    # FinBERT 全判 neutral（常见于中文新闻）→ 降级为中文关键词匹配
+    # ── 全判 neutral（翻译质量差或 FinBERT 不适配）→ 关键词兜底 ──
     all_neutral = all(n.sentiment == "neutral" for n in news_list)
     if all_neutral and len(news_list) > 0:
-        logger.info("FinBERT 全部判为 neutral，切换为中文关键词匹配")
+        logger.info("FinBERT 全部判为 neutral，降级为关键词匹配")
         fallback = _SimpleFallbackAnalyzer()
-        fb_results = fallback(texts)
+        # 用原始中文文本做关键词匹配
+        fb_results = fallback(original_texts)
         for item, result in zip(news_list, fb_results):
             label = result.get("label", "neutral")
             item.sentiment = label if label in ("positive", "negative") else "neutral"
             item.confidence = result.get("score", 0.5)
-            logger.info(
-                f"  [{item.sentiment:<8} {item.confidence:.2f}] {item.title[:50]}"
-            )
+            logger.info(f"  [{item.sentiment:<8} {item.confidence:.2f}] {item.title[:50]}")
 
     return news_list
 

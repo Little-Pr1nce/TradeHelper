@@ -27,8 +27,8 @@ DEFAULT_CONFIG = {
     "llm_base_url": "",
     "llm_api_key": "",
     "llm_model": "",
-    "stock_token_us": "",         # 美股数据源 Token（如 itick / Massive）
-    "stock_token_a": "",          # A 股数据源 Token（如 Tushare）
+    "stock_token_us": "",         # 美股数据源 Token（TickFlow API Key，免费注册即可获取实时行情）
+    "stock_token_a": "",          # A 股数据源 Token（同上）
     "news_token_us": "",         # 美股新闻 Token（如 Finnhub）
     "news_token_a": "",          # A 股新闻 Token（如 Tushare）
     "finbert_model_path": "",    # 程序自动设置，用户无需关心

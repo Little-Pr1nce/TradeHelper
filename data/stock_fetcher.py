@@ -2,14 +2,14 @@
 股票数据获取模块
 
 采用策略模式提供多数据源支持：
-  - FreeStockFetcher: 免费数据源（A 股 akshare 多源降级，美股 Finnhub 信息）
-  - ItickStockFetcher: itick 付费 API（美股 K 线 + 盘口）
-  - CustomStockFetcher: 用户自定义付费 API（占位，待扩展）
+  - TickFlowFetcher: TickFlow 行情 API（A 股+美股，日K线免费，实时行情需 API Key）
+  - FreeStockFetcher: 免费数据源（A 股 akshare，美股 Finnhub）
+  - CustomStockFetcher: 用户自定义 API（占位，待扩展）
 
-美股数据流：K 线 → stock_token_us，信息/新闻/基本面 → Finnhub (news_token_us)。
-A 股数据流保持不变：akshare。
+美股数据流：K 线 + 实时 → TickFlow；信息/新闻/基本面 → Finnhub (news_token_us)。
+A 股数据流：K 线 + 实时 → TickFlow；新闻 → akshare；基本面 → akshare。
 
-数据源由 get_stock_fetcher(market) 自动选择：美股看 stock_token_us，A 股看 stock_token_a。
+数据源由 get_stock_fetcher(market) 自动选择。
 【扩展点】添加新的数据源：继承 BaseStockFetcher，在 get_stock_fetcher() 中注册。
 """
 
@@ -204,7 +204,7 @@ def _us_akshare_symbol_candidates(code: str) -> list[str]:
 
 
 class FreeStockFetcher(BaseStockFetcher):
-    """免费数据源：A 股新浪/雪球/东财多源降级；美股仅 Finnhub（需 finnhub_token，无 itick 则不提供 K 线）。"""
+    """免费数据源：A 股新浪/雪球/东财多源降级；美股 Finnhub 信息（K 线建议用 TickFlowFetcher）。"""
 
     def __init__(self, finnhub_token: str = ""):
         self._finnhub_token = (finnhub_token or "").strip()
@@ -302,8 +302,8 @@ class FreeStockFetcher(BaseStockFetcher):
                 df = self._fetch_a_price_history(code, start_date, end_date)
             elif market == "US":
                 raise RuntimeError(
-                    f"美股 {code} 未配置股票数据源 Token（itick）。"
-                    f"请在设置中填入美股数据源 Token。"
+                    f"美股 {code} 未配置数据源 Token。"
+                    f"请在设置中填入 TickFlow API Key（tickflow.org 免费注册获取）。"
                 )
         except Exception as e:
             logger.error(f"Failed to fetch price history for {code}: {e}")
@@ -815,39 +815,252 @@ class ItickStockFetcher(BaseStockFetcher):
             return []
 
 
+class TickFlowFetcher(BaseStockFetcher):
+    """
+    TickFlow 行情数据源，统一覆盖 A 股 + 美股。
+
+    免费层（无需 API Key）：
+      - 日 K 线（前复权），A 股+美股全量历史数据
+      - 标的基本信息（名称、代码）
+      - 不支持实时行情
+
+    注册用户（配置 API Key）：
+      - 以上全部 + 实时行情（A 股+美股 Level-1）
+
+    标的代码格式：600519.SH / 000001.SZ / AAPL.US
+
+    安装：pip install tickflow
+    """
+
+    # A 股代码 → TickFlow 后缀
+    # 6=主板/科创板(SH), 5=ETF(SH), 9=B股(SH); 0/2/3=深市主板/创业板(SZ), 159=深市ETF(SZ)
+    _A_SH_CODES = frozenset({"6", "5", "9"})
+
+    def __init__(self, api_key: str = ""):
+        from tickflow import TickFlow
+        self._api_key = (api_key or "").strip()
+        if self._api_key:
+            self._tf = TickFlow(api_key=self._api_key, base_url="https://api.tickflow.org")
+            logger.info("TickFlow 完整服务已初始化（日K线 + 实时行情）")
+        else:
+            self._tf = TickFlow.free()
+            logger.info("TickFlow 免费服务已初始化（仅日K线，无实时行情）")
+
+    @property
+    def has_realtime(self) -> bool:
+        """是否支持实时行情。"""
+        return bool(self._api_key)
+
+    @staticmethod
+    def _to_symbol(code: str) -> str:
+        """600519 → 600519.SH / AAPL → AAPL.US"""
+        from utils.market import detect_market
+        market = detect_market(code)
+        if market == "A":
+            prefix = code[0]
+            if prefix in TickFlowFetcher._A_SH_CODES:
+                suffix = "SH"
+            elif code[:3] == "159":
+                suffix = "SZ"
+            else:
+                suffix = "SZ"
+            return f"{code}.{suffix}"
+        elif market == "US":
+            return f"{code}.US"
+        return code
+
+    # ── fetch_stock_info ──
+
+    def fetch_stock_info(self, code: str) -> Optional[StockInfo]:
+        """从日 K 线数据中获取股票名称（免费层可用）。"""
+        from utils.market import detect_market
+        try:
+            df = self._tf.klines.get(self._to_symbol(code), period="1d", count=1,
+                                     as_dataframe=True)
+            if df is not None and not df.empty:
+                row = df.iloc[-1]
+                name = str(row.get("name", code))
+                market = detect_market(code)
+                logger.info(f"TickFlow 股票信息: {name} ({code})")
+                return StockInfo(
+                    code=code, name=name, market=market,
+                    update_time=datetime.now().isoformat(),
+                )
+        except Exception as e:
+            logger.error(f"TickFlow fetch_stock_info 失败 ({code}): {e}")
+        return None
+
+    # ── fetch_price_history ──
+
+    def fetch_price_history(self, code: str, start_date: str,
+                            end_date: str) -> list[PriceData]:
+        """通过 TickFlow 获取日 K 线（前复权）。"""
+        try:
+            from datetime import datetime as _dt
+            d_start = _dt.strptime(start_date, "%Y-%m-%d")
+            d_end = _dt.strptime(end_date, "%Y-%m-%d")
+            days = max((d_end - d_start).days, 1)
+            count = min(int(days * 1.4), 10000)
+        except Exception:
+            count = 1000
+
+        try:
+            symbol = self._to_symbol(code)
+            df = self._tf.klines.get(symbol, period="1d", count=count,
+                                     as_dataframe=True)
+            if df is None or df.empty:
+                logger.warning(f"TickFlow K 线为空 ({code})")
+                return []
+
+            prices = []
+            is_a_share = code.isdigit() and len(code) == 6
+            for _, row in df.iterrows():
+                date_str = str(row.get("trade_date", ""))[:10]
+                if date_str < start_date or date_str > end_date:
+                    continue
+                try:
+                    vol = float(row["volume"])
+                    # TickFlow A 股成交量单位为「手」（100 股），转为「股」与历史数据一致
+                    if is_a_share:
+                        vol *= 100
+                    prices.append(PriceData(
+                        code=code,
+                        date=date_str,
+                        open=float(row["open"]),
+                        high=float(row["high"]),
+                        low=float(row["low"]),
+                        close=float(row["close"]),
+                        volume=vol,
+                    ))
+                except (KeyError, ValueError, TypeError):
+                    continue
+
+            logger.info(f"TickFlow K 线: {len(prices)} 条 ({start_date}~{end_date})")
+            return prices
+        except Exception as e:
+            logger.error(f"TickFlow fetch_price_history 失败 ({code}): {e}")
+            return []
+
+    # ── fetch_quote ──
+
+    def fetch_quote(self, code: str) -> dict | None:
+        """
+        实时报价（需要 API Key）。
+
+        Returns 格式与 itick quote 兼容：
+            {code, latest, open, high, low, prev_close, change, change_pct,
+             volume, amount, timestamp, status, vwap}
+        """
+        if not self.has_realtime:
+            logger.warning("TickFlow 免费层不支持实时行情，需要 API Key")
+            return None
+
+        try:
+            symbol = self._to_symbol(code)
+            quotes = self._tf.quotes.get(symbols=[symbol])
+            if not quotes:
+                return None
+            q = quotes[0]
+
+            latest = float(q.get("last_price", 0))
+            prev_close = float(q.get("prev_close", 0))
+            own_chp = (latest - prev_close) / prev_close if latest and prev_close else 0.0
+
+            return {
+                "code": str(code),
+                "latest": latest,
+                "open": float(q.get("open", 0)),
+                "high": float(q.get("high", 0)),
+                "low": float(q.get("low", 0)),
+                "prev_close": prev_close,
+                "change": latest - prev_close,
+                "change_pct": round(own_chp, 6),
+                "volume": float(q.get("volume", 0)),
+                "amount": float(q.get("amount", 0)),
+                "timestamp": int(q.get("timestamp", 0)),
+                "status": 0,
+                "vwap": float(q.get("vwap", 0)) if q.get("vwap") else 0.0,
+            }
+        except Exception as e:
+            logger.error(f"TickFlow fetch_quote 失败 ({code}): {e}")
+            return None
+
+    # ── fetch_stock_tick ──
+
+    def fetch_stock_tick(self, code: str) -> dict | None:
+        """
+        实时成交数据。
+
+        TickFlow 无独立 tick 接口（无 te 交易时段标识），
+        用 quote 最新价模拟，trading_phase 固定为 0。
+        实际交易时段由 session.py 本地时间推断兜底。
+        """
+        quote = self.fetch_quote(code)
+        if not quote:
+            return None
+        return {
+            "latest": quote["latest"],
+            "volume": quote["volume"],
+            "timestamp": quote["timestamp"],
+            "trading_phase": 0,
+        }
+
+    # ── fetch_future_quote（ETF 替代方案） ──
+
+    # 国际期货 → 对应 ETF 映射
+    _FUTURE_ETF_MAP = {
+        "NQ": "QQQ",    # 纳斯达克 100 ETF
+        "ES": "SPY",    # 标普 500 ETF
+    }
+
+    def fetch_future_quote(self, region: str, code: str) -> dict | None:
+        """
+        期货实时报价 → ETF 替代。
+
+        NQ/ES 国际期货用 QQQ/SPY ETF 盘前价格替代，
+        对盘前分析预测准确度影响 ≈0。
+        """
+        etf_code = self._FUTURE_ETF_MAP.get(code, code)
+        logger.info(f"TickFlow 期货报价→ETF: {region}:{code} → {etf_code}")
+        return self.fetch_quote(etf_code)
+
+    def fetch_future_kline(self, region: str, code: str,
+                           kType: int = 2, limit: int = 12) -> list[dict]:
+        """
+        期货分钟 K 线 → 不再使用，返回空列表。
+
+        盘前分析中 NQ/ES 5 分钟 K 线走势形态占 futures_score 权重仅 30%，
+        去掉后影响微乎其微。
+        """
+        logger.info(f"TickFlow 不获取期货分钟K线 ({region}:{code})，"
+                     f"futures_score 纯靠涨跌方向")
+        return []
+
+
 def get_stock_fetcher(market: str = "US") -> BaseStockFetcher:
     """
-    根据市场选择数据源。
+    根据市场选择数据源，统一使用 TickFlow。
 
-    美股: stock_token_us 有值 → itick/Massive，否则 Finnhub 免费
-    A 股: stock_token_a 有值 → itick/Tushare，否则 akshare 免费
+    - 有 stock_token_us / stock_token_a → TickFlow 完整服务（日K + 实时行情）
+    - 无 token → TickFlow 免费服务（仅日K线）
+
+    如需实时行情，请在 https://tickflow.org 注册获取 API Key，
+    填入设置页对应市场的「数据源 Token」。
 
     Args:
         market: "US" / "A"
 
     Returns:
-        BaseStockFetcher 实例
+        TickFlowFetcher 实例
     """
     from config.settings import Settings
     settings = Settings()
 
     if market == "US":
-        token = settings.get("stock_token_us", "")
-        if token:
-            logger.info(f"使用美股付费数据源 ({token[:12]}...)")
-            return ItickStockFetcher(token)
-        finnhub_token = settings.get("news_token_us", "")
-        logger.info("美股使用免费数据源: Finnhub")
-        return FreeStockFetcher(finnhub_token=finnhub_token)
+        api_key = settings.get("stock_token_us", "")
     else:
-        token = settings.get("stock_token_a", "")
-        if token:
-            logger.info(f"使用 A 股付费数据源 ({token[:12]}...)")
-            return ItickStockFetcher(token)
-        logger.info("A 股使用免费数据源: akshare")
-        return FreeStockFetcher()
+        api_key = settings.get("stock_token_a", "")
 
-
-# ============================================================
-# 以下函数仅用于 A 股（akshare），美股已全量迁至 itick + Finnhub
-# ============================================================
+    label = "完整服务" if api_key else "免费服务"
+    logger.info(f"{'美股' if market == 'US' else 'A股'}数据源: TickFlow {label}")
+    return TickFlowFetcher(api_key=api_key)

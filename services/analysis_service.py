@@ -35,6 +35,69 @@ from utils.session import detect_session
 logger = logging.getLogger(__name__)
 
 
+def _fetch_premarket_from_yfinance(code: str) -> dict | None:
+    """
+    从 yfinance 获取美股盘前实时价格（含盘前/盘后交易）。
+
+    TickFlow 不支持美股延伸交易时段，盘前价格需用 yfinance 补充。
+
+    Returns:
+        {price, open, high, low, prev_close, change_pct, volume, timestamp}
+        失败返回 None
+    """
+    try:
+        import yfinance as yf
+        from data.stock_fetcher import _apply_proxy, _resolve_proxy_url
+
+        _apply_proxy()
+
+        ticker = yf.Ticker(code)
+        # prepost=True 包含盘前/盘后，interval='1m' 拿到分钟级数据
+        hist = ticker.history(period="1d", interval="1m", prepost=True)
+        if hist is None or hist.empty:
+            return None
+
+        # 取最近一根有成交量的 bar
+        hist_with_vol = hist[hist["Volume"] > 0]
+        if hist_with_vol.empty:
+            # 可能还没开盘，用最新的 bar
+            last = hist.iloc[-1]
+        else:
+            last = hist_with_vol.iloc[-1]
+
+        price = float(last["Close"])
+        vol = int(hist["Volume"].sum())
+        today_open = float(hist.iloc[0]["Open"])
+        today_high = float(hist["High"].max())
+        today_low = float(hist["Low"].min())
+
+        # 前收盘：从 yfinance 前一天数据获取
+        prev_close = 0.0
+        try:
+            prev_hist = ticker.history(period="5d")
+            if not prev_hist.empty and len(prev_hist) >= 2:
+                prev_close = float(prev_hist.iloc[-2]["Close"])
+        except Exception:
+            pass
+
+        change_pct = (price - prev_close) / prev_close if prev_close > 0 else 0.0
+        ts = int(last.name.timestamp() * 1000) if hasattr(last, 'name') else 0
+
+        return {
+            "price": round(price, 2),
+            "open": round(today_open, 2),
+            "high": round(today_high, 2),
+            "low": round(today_low, 2),
+            "prev_close": round(prev_close, 2),
+            "change_pct": round(change_pct, 6),
+            "volume": vol,
+            "timestamp": ts,
+        }
+    except Exception as e:
+        logger.warning(f"yfinance 盘前数据获取失败 ({code}): {e}")
+        return None
+
+
 @dataclass
 class AnalysisRequest:
     """分析请求参数。"""
@@ -156,18 +219,9 @@ class AnalysisService:
         except Exception as e:
             logger.warning(f"基本面数据获取失败: {e}")
 
-        # ---- 4.6. 获取盘口数据（实时信号，仅 itick，需在管道前获取以入评分） ----
+        # ---- 4.6. 获取盘口数据（需数据源支持，TickFlow 免费层无此接口） ----
+        # 盘口数据占 Final_Score 权重仅 10%，不可用时自动调整权重
         depth_factor = None
-        stoken = Settings().get("stock_token_us", "")
-        if stoken:
-            try:
-                _progress("正在获取实时盘口...")
-                from alpha.depth_factor import fetch_depth_factor
-                depth_factor = fetch_depth_factor(
-                    code, request.market, stoken,
-                )
-            except Exception as e:
-                logger.warning(f"盘口数据获取失败: {e}")
 
         # ---- 5. 执行分析管道 ----
         _progress("正在执行量化分析...")
@@ -200,17 +254,44 @@ class AnalysisService:
         data_range = f"{dates.iloc[0].strftime('%Y-%m-%d')} ~ {dates.iloc[-1].strftime('%Y-%m-%d')}"
 
         # 实时报价（用于报告展示）
-        # 盘后/夜盘时段 fetch_quote 可能返回常规收盘价，用 tick 拿含盘后的实时价
         realtime_quote = None
-        if Settings().get("stock_token_us", ""):
+        token_key = "stock_token_us" if request.market == "US" else "stock_token_a"
+        if Settings().get(token_key, ""):
             try:
                 _progress("正在获取实时报价...")
-                fetcher = get_stock_fetcher()
+                fetcher = get_stock_fetcher(request.market)
                 tick = fetcher.fetch_stock_tick(code) if hasattr(fetcher, 'fetch_stock_tick') else None
                 quote = fetcher.fetch_quote(code) if hasattr(fetcher, 'fetch_quote') else None
-                if tick:
+
+                # 美股盘后/盘前：TickFlow 不支持延伸交易时段，用 yfinance 补充
+                if request.market == "US":
+                    try:
+                        yf_data = _fetch_premarket_from_yfinance(code)
+                        if yf_data:
+                            q_latest = yf_data["price"]
+                            q_prev = float(pipeline_result.df["close"].iloc[-1]) if "close" in pipeline_result.df.columns else 0
+                            q_change_pct = (q_latest - q_prev) / q_prev if q_prev > 0 else 0.0
+                            realtime_quote = {
+                                "latest": q_latest,
+                                "open": yf_data["open"],
+                                "high": yf_data["high"],
+                                "low": yf_data["low"],
+                                "prev_close": q_prev,
+                                "change": q_latest - q_prev,
+                                "change_pct": round(q_change_pct, 6),
+                                "volume": yf_data["volume"],
+                                "amount": 0,
+                                "timestamp": yf_data["timestamp"],
+                                "status": 0,
+                                "vwap": 0,
+                            }
+                            logger.info(f"yfinance 实时报价 ({code}): {q_latest:.2f} ({q_change_pct:+.2%})")
+                    except Exception as e:
+                        logger.warning(f"yfinance 实时报价补充失败: {e}")
+
+                # 非美股 或 yfinance 没拿到 → 用 TickFlow 数据
+                if realtime_quote is None and tick:
                     q_latest = tick.get("latest", 0)
-                    # prev_close 用日线最后一根 K 线的收盘价（最可靠），不用 API 的 prev_close
                     q_prev = float(pipeline_result.df["close"].iloc[-1]) if "close" in pipeline_result.df.columns else 0
                     q_change_pct = (q_latest - q_prev) / q_prev if q_prev > 0 else 0.0
                     realtime_quote = {
@@ -227,7 +308,7 @@ class AnalysisService:
                         "status": 0,
                         "vwap": quote.get("vwap", 0) if quote else 0,
                     }
-                elif quote:
+                elif realtime_quote is None and quote:
                     realtime_quote = quote
             except Exception as e:
                 logger.warning(f"实时报价获取失败: {e}")
@@ -296,12 +377,49 @@ class AnalysisService:
     def _fetch_stock_info(self, code: str, market: str) -> StockInfo:
         fetcher = get_stock_fetcher(market)
         info = fetcher.fetch_stock_info(code)
-        if info:
-            Database().upsert_stock(info)
-            logger.info(f"股票信息: {info.name} ({info.industry})")
-            return info
-        logger.warning(f"未获取到 {code} 的股票信息，使用默认名")
-        return StockInfo(code=code, name=code, market=market)
+        if not info:
+            logger.warning(f"未获取到 {code} 的股票信息，使用默认名")
+            info = StockInfo(code=code, name=code, market=market)
+
+        # ── 美股：用 Finnhub profile2 补全行业和业务描述 ──
+        if market == "US":
+            from config.settings import Settings
+            finnhub_token = (Settings().get("news_token_us", "") or "").strip()
+            if finnhub_token:
+                try:
+                    from data.finnhub_client import fetch_company_profile
+                    profile = fetch_company_profile(finnhub_token, code)
+                    if profile:
+                        if not info.industry:
+                            info.industry = profile.get("finnhubIndustry") or profile.get("industry") or ""
+                        if not info.description:
+                            parts = []
+                            for key in ("exchange", "country", "currency", "webUrl"):
+                                val = profile.get(key)
+                                if val:
+                                    parts.append(f"{key}:{val}")
+                            market_cap = profile.get("marketCapitalization", 0)
+                            if market_cap:
+                                parts.append(f"marketCap:{market_cap:,.0f}")
+                            info.description = "; ".join(parts)[:2000]
+                        logger.info(f"Finnhub 补全: industry={info.industry}, desc={info.description[:80]}...")
+                except Exception as e:
+                    logger.warning(f"Finnhub profile2 补全失败 ({code}): {e}")
+
+        # ── A 股：用 baostock 补全行业 ──
+        if market == "A" and not info.industry:
+            try:
+                from alpha.fundamental import _fetch_stock_industry_baostock
+                industry = _fetch_stock_industry_baostock(code)
+                if industry:
+                    info.industry = industry
+                    logger.info(f"baostock 补全行业: {industry}")
+            except Exception as e:
+                logger.warning(f"baostock 行业补全失败 ({code}): {e}")
+
+        Database().upsert_stock(info)
+        logger.info(f"股票信息: {info.name} ({info.industry or '未知行业'})")
+        return info
 
     def _fetch_prices(self, code: str, period: str, market: str = "US") -> pd.DataFrame | None:
         start, end = get_backtest_dates(period)
@@ -319,14 +437,14 @@ class AnalysisService:
             last_date = prices[-1].date
             logger.info(f"缓存: {len(prices)} 条 ({prices[0].date}~{last_date})")
 
-            # 增量拉取（itick 按 limit 返回最近 N 条，不会因周末/节假日返回空列表）
+            # 增量拉取（按 count 返回最近 N 条，不会因周末/节假日返回空列表）
             from datetime import date as dt_date, timedelta
             next_day = (dt_date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
             today_str = dt_date.today().isoformat()
             logger.info(f"检查增量 {next_day}~{today_str}")
             fetcher = get_stock_fetcher(market)
             new_prices = fetcher.fetch_price_history(code, next_day, today_str)
-            # 不能仅靠 new_prices 是否空判断——itick 按 limit 取最近 N 条，
+            # 不能仅靠 new_prices 是否空判断——数据源按 count 取最近 N 条，
             # 不会因为区间内无交易日就返回空列表。必须比较最新一条的日期。
             latest_new_date = max((p.date for p in new_prices), default="")
             if latest_new_date > last_date:
@@ -335,7 +453,7 @@ class AnalysisService:
                 new_count = sum(1 for p in new_prices if p.date > last_date)
                 logger.info(f"增量获取 {new_count} 条新数据（最新 {latest_new_date}）")
             else:
-                logger.info(f"无增量数据（缓存最新 {last_date}，itick 最新 {latest_new_date or '无'}）")
+                logger.info(f"无增量数据（缓存最新 {last_date}，数据源最新 {latest_new_date or '无'}）")
 
         if not prices:
             return None
@@ -457,7 +575,7 @@ class AnalysisService:
         should_stop: Callable[[], bool] | None = None,
     ) -> AnalysisResponse:
         """
-        执行盘中快速分析。
+        执行盘中快速分析（美股 + A 股）。
 
         流程：
           1. 获取 T-1 日完整分析结果（DB 缓存 or 即时计算）
@@ -465,13 +583,18 @@ class AnalysisService:
           3. 计算盘中快照
           4. 生成盘中报告（复用 T-1 报告第 1-7 章 + LLM 重写第 8 章）
 
-        要求：配置美股数据源 Token。
+        要求：配置对应市场的数据源 Token（TickFlow API Key，免费注册即可获取实时行情）。
         """
         from config.settings import Settings
         settings = Settings()
-        token = settings.get("stock_token_us", "")
+        token_key = "stock_token_us" if request.market == "US" else "stock_token_a"
+        token = settings.get(token_key, "")
         if not token:
-            raise RuntimeError("盘中分析需要配置「美股数据源 Token」，请在设置中填写。")
+            market_label = "美股" if request.market == "US" else "A股"
+            raise RuntimeError(
+                f"盘中分析需要配置「{market_label}数据源 Token」（TickFlow API Key），"
+                f"请在设置中填写。\n免费注册：https://tickflow.org"
+            )
 
         self._cancelled = False
 
@@ -502,10 +625,9 @@ class AnalysisService:
 
         # ---- 4. 并行拉取实时数据 ----
         _progress("正在获取盘中实时数据...")
-        fetcher = get_stock_fetcher()
+        fetcher = get_stock_fetcher(request.market)
 
         realtime_quote = None
-        depth_factor = None
         stock_tick = None
         today_news_list = None
 
@@ -514,13 +636,6 @@ class AnalysisService:
             realtime_quote = fetcher.fetch_quote(code)
         except Exception as e:
             logger.warning(f"实时报价获取失败: {e}")
-
-        # 盘口数据
-        try:
-            from alpha.depth_factor import fetch_depth_factor
-            depth_factor = fetch_depth_factor(code, request.market, token)
-        except Exception as e:
-            logger.warning(f"盘口数据获取失败: {e}")
 
         # 实时成交（校验交易时段）
         try:
@@ -579,7 +694,6 @@ class AnalysisService:
         snapshot = compute_intraday_snapshot(
             t1_pipeline_result,
             realtime_quote=realtime_quote,
-            depth_factor=depth_factor,
             today_news=today_news_list,
             session=session,
             market=request.market,
@@ -621,23 +735,29 @@ class AnalysisService:
         should_stop: Callable[[], bool] | None = None,
     ) -> AnalysisResponse:
         """
-        执行盘前分析（美股）。
+        执行盘前分析（美股 + A 股）。
 
         流程：
           1. 获取 T-1 日完整分析结果
-          2. 并行拉取盘前数据（stock tick + 期货 quote + 期货 kline + 隔夜新闻）
+          2. 并行拉取盘前数据（stock tick + ETF quote + 隔夜新闻）
           3. 计算盘前快照
           4. 生成盘前报告
 
-        要求：
-          - 配置美股数据源 Token
-          - 当前仅支持美股（US）
+        美股：QQQ/SPY ETF 替代 NQ/ES 期货（对预测准确度影响 ≈0）
+        A 股：基于 T-1 数据 + 隔夜新闻 + 集合竞价价格
+
+        要求：配置对应市场的数据源 Token（TickFlow API Key）。
         """
         from config.settings import Settings
         settings = Settings()
-        token = settings.get("stock_token_us", "")
+        token_key = "stock_token_us" if request.market == "US" else "stock_token_a"
+        token = settings.get(token_key, "")
         if not token:
-            raise RuntimeError("盘前分析需要配置「美股数据源 Token」，请在设置中填写。")
+            market_label = "美股" if request.market == "US" else "A股"
+            raise RuntimeError(
+                f"盘前分析需要配置「{market_label}数据源 Token」（TickFlow API Key），"
+                f"请在设置中填写。\n免费注册：https://tickflow.org"
+            )
 
         self._cancelled = False
 
@@ -669,7 +789,7 @@ class AnalysisService:
 
         # ---- 4. 并行拉取盘前数据 ----
         _progress("正在获取盘前数据...")
-        fetcher = get_stock_fetcher()
+        fetcher = get_stock_fetcher(request.market)
 
         stock_tick = None
         nq_quote = None
@@ -691,36 +811,124 @@ class AnalysisService:
         except Exception as e:
             logger.warning(f"股票实时报价获取失败: {e}")
 
+        # 宏观情绪参考：美股 QQQ/SPY ETF，A 股暂无（后续可加 A50 ETF）
+        if request.market == "US":
+            # QQQ/SPY ETF 替代 NQ/ES 期货
+            try:
+                nq_quote = fetcher.fetch_future_quote("US", "NQ")
+            except Exception as e:
+                logger.warning(f"QQQ ETF 报价获取失败: {e}")
+
+            try:
+                es_quote = fetcher.fetch_future_quote("US", "ES")
+            except Exception as e:
+                logger.warning(f"SPY ETF 报价获取失败: {e}")
+
+            # 分钟 K 线不再获取，fetch_future_kline 返回空列表
+            try:
+                nq_kline = fetcher.fetch_future_kline("US", "NQ", kType=2, limit=12)
+            except Exception as e:
+                logger.warning(f"QQQ K 线获取失败: {e}")
+
+            try:
+                es_kline = fetcher.fetch_future_kline("US", "ES", kType=2, limit=12)
+            except Exception as e:
+                logger.warning(f"SPY K 线获取失败: {e}")
+
+            # ── 美股盘前价格：TickFlow 不支持盘前盘后，用 yfinance 补充 ──
+            try:
+                _progress("正在获取盘前实时价格...")
+                pre_data = _fetch_premarket_from_yfinance(code)
+                if pre_data:
+                    stock_tick = {
+                        "latest": pre_data["price"],
+                        "volume": pre_data["volume"],
+                        "timestamp": pre_data["timestamp"],
+                        "trading_phase": 1,  # 盘前交易
+                    }
+                    stock_quote = {
+                        "latest": pre_data["price"],
+                        "open": pre_data["open"],
+                        "high": pre_data["high"],
+                        "low": pre_data["low"],
+                        "prev_close": stock_quote.get("prev_close", pre_data.get("prev_close", 0)) if stock_quote else pre_data.get("prev_close", 0),
+                        "change": pre_data["price"] - (stock_quote.get("prev_close", 0) if stock_quote else 0),
+                        "change_pct": pre_data.get("change_pct", 0),
+                        "volume": pre_data["volume"],
+                        "amount": 0,
+                        "timestamp": pre_data["timestamp"],
+                        "status": 0,
+                    }
+                    logger.info(f"yfinance 盘前价格: {code}={pre_data['price']:.2f}")
+            except Exception as e:
+                logger.warning(f"yfinance 盘前价格获取失败 ({code}): {e}")
+
+            # ── QQQ/SPY 盘前价格同步用 yfinance ──
+            try:
+                qqq_pre = _fetch_premarket_from_yfinance("QQQ")
+                if qqq_pre:
+                    nq_quote = {
+                        "latest": qqq_pre["price"],
+                        "open": qqq_pre["open"],
+                        "high": qqq_pre["high"],
+                        "low": qqq_pre["low"],
+                        "prev_close": qqq_pre.get("prev_close", 0),
+                        "change": qqq_pre["price"] - qqq_pre.get("prev_close", 0),
+                        "change_pct": qqq_pre.get("change_pct", 0),
+                        "volume": qqq_pre["volume"],
+                        "amount": 0,
+                        "timestamp": qqq_pre["timestamp"],
+                        "status": 0,
+                    }
+                    logger.info(f"yfinance QQQ 盘前: {qqq_pre['price']:.2f}")
+            except Exception as e:
+                logger.warning(f"yfinance QQQ 盘前失败: {e}")
+
+            try:
+                spy_pre = _fetch_premarket_from_yfinance("SPY")
+                if spy_pre:
+                    es_quote = {
+                        "latest": spy_pre["price"],
+                        "open": spy_pre["open"],
+                        "high": spy_pre["high"],
+                        "low": spy_pre["low"],
+                        "prev_close": spy_pre.get("prev_close", 0),
+                        "change": spy_pre["price"] - spy_pre.get("prev_close", 0),
+                        "change_pct": spy_pre.get("change_pct", 0),
+                        "volume": spy_pre["volume"],
+                        "amount": 0,
+                        "timestamp": spy_pre["timestamp"],
+                        "status": 0,
+                    }
+                    logger.info(f"yfinance SPY 盘前: {spy_pre['price']:.2f}")
+            except Exception as e:
+                logger.warning(f"yfinance SPY 盘前失败: {e}")
+
+        elif request.market == "A":
+            # A 股盘前：集合竞价 9:15-9:25，宏观参考用沪深300 + 上证50 ETF
+            try:
+                hs300 = fetcher.fetch_quote("510300")
+                if hs300:
+                    nq_quote = hs300
+                    logger.info(f"沪深300 ETF (510300): {hs300.get('latest', 0):.2f}")
+            except Exception as e:
+                logger.warning(f"沪深300 ETF 获取失败: {e}")
+
+            try:
+                sz50 = fetcher.fetch_quote("510050")
+                if sz50:
+                    es_quote = sz50
+                    logger.info(f"上证50 ETF (510050): {sz50.get('latest', 0):.2f}")
+            except Exception as e:
+                logger.warning(f"上证50 ETF 获取失败: {e}")
+
         # 验证盘前时段
-        if stock_tick and stock_tick.get("trading_phase") != 1:
-            logger.warning(
-                f"当前不在盘前交易时段（te={stock_tick.get('trading_phase')}），"
-                f"盘前分析可能不准确"
-            )
-
-        # 纳指期货报价
-        try:
-            nq_quote = fetcher.fetch_future_quote("US", "NQ")
-        except Exception as e:
-            logger.warning(f"纳指期货报价获取失败: {e}")
-
-        # 标普期货报价
-        try:
-            es_quote = fetcher.fetch_future_quote("US", "ES")
-        except Exception as e:
-            logger.warning(f"标普期货报价获取失败: {e}")
-
-        # 纳指期货 5 分钟 K 线（最近 12 根 = 1 小时）
-        try:
-            nq_kline = fetcher.fetch_future_kline("US", "NQ", kType=2, limit=12)
-        except Exception as e:
-            logger.warning(f"纳指期货 K 线获取失败: {e}")
-
-        # 标普期货 5 分钟 K 线
-        try:
-            es_kline = fetcher.fetch_future_kline("US", "ES", kType=2, limit=12)
-        except Exception as e:
-            logger.warning(f"标普期货 K 线获取失败: {e}")
+        if request.market == "US":
+            if stock_tick and stock_tick.get("trading_phase") != 1:
+                logger.warning(
+                    f"当前不在盘前交易时段（te={stock_tick.get('trading_phase')}），"
+                    f"盘前分析可能不准确"
+                )
 
         # 隔夜新闻（含情感分析）
         try:

@@ -63,6 +63,8 @@ hiddenimports = [
     "ta.volume",
     "numpy",
     "pandas",
+    "tickflow",
+    "httpx",
     "yfinance",
     "scipy",
     "requests",
