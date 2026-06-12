@@ -36,66 +36,10 @@ logger = logging.getLogger(__name__)
 
 
 def _fetch_premarket_from_yfinance(code: str) -> dict | None:
-    """
-    从 yfinance 获取美股盘前实时价格（含盘前/盘后交易）。
+    """兼容旧调用名：美股盘前/盘后价格统一走 yfinance helper。"""
+    from data.stock_fetcher import fetch_us_extended_quote
 
-    TickFlow 不支持美股延伸交易时段，盘前价格需用 yfinance 补充。
-
-    Returns:
-        {price, open, high, low, prev_close, change_pct, volume, timestamp}
-        失败返回 None
-    """
-    try:
-        import yfinance as yf
-        from data.stock_fetcher import _apply_proxy, _resolve_proxy_url
-
-        _apply_proxy()
-
-        ticker = yf.Ticker(code)
-        # prepost=True 包含盘前/盘后，interval='1m' 拿到分钟级数据
-        hist = ticker.history(period="1d", interval="1m", prepost=True)
-        if hist is None or hist.empty:
-            return None
-
-        # 取最近一根有成交量的 bar
-        hist_with_vol = hist[hist["Volume"] > 0]
-        if hist_with_vol.empty:
-            # 可能还没开盘，用最新的 bar
-            last = hist.iloc[-1]
-        else:
-            last = hist_with_vol.iloc[-1]
-
-        price = float(last["Close"])
-        vol = int(hist["Volume"].sum())
-        today_open = float(hist.iloc[0]["Open"])
-        today_high = float(hist["High"].max())
-        today_low = float(hist["Low"].min())
-
-        # 前收盘：从 yfinance 前一天数据获取
-        prev_close = 0.0
-        try:
-            prev_hist = ticker.history(period="5d")
-            if not prev_hist.empty and len(prev_hist) >= 2:
-                prev_close = float(prev_hist.iloc[-2]["Close"])
-        except Exception:
-            pass
-
-        change_pct = (price - prev_close) / prev_close if prev_close > 0 else 0.0
-        ts = int(last.name.timestamp() * 1000) if hasattr(last, 'name') else 0
-
-        return {
-            "price": round(price, 2),
-            "open": round(today_open, 2),
-            "high": round(today_high, 2),
-            "low": round(today_low, 2),
-            "prev_close": round(prev_close, 2),
-            "change_pct": round(change_pct, 6),
-            "volume": vol,
-            "timestamp": ts,
-        }
-    except Exception as e:
-        logger.warning(f"yfinance 盘前数据获取失败 ({code}): {e}")
-        return None
+    return fetch_us_extended_quote(code)
 
 
 @dataclass
@@ -675,6 +619,18 @@ class AnalysisService:
 
         # ---- 5. 计算盘中快照 ----
         _progress("正在计算盘中快照...")
+        from services.signal_stabilizer import SignalStabilizer
+        stabilizer_decision = SignalStabilizer().should_emit(code, realtime_quote.get("latest", 0))
+        if not stabilizer_decision.should_emit and stabilizer_decision.previous_report:
+            logger.info(f"盘中信号防抖命中: {stabilizer_decision.reason}")
+            _progress("盘中波动较小，复用最近报告...")
+            return AnalysisResponse(
+                stock_info=info,
+                chart_path=stabilizer_decision.previous_report.chart_path or "",
+                report_content=stabilizer_decision.previous_report.content,
+                backtest_results={},
+                report_id=stabilizer_decision.previous_report.id,
+            )
         if t1_pipeline_result is None:
             _progress("正在计算 T-1 日分析...")
             t1_pipeline_result = self._run_eod_to_t1(code, request, _progress, _stop)
@@ -716,12 +672,18 @@ class AnalysisService:
         if not report_content:
             report_content = "盘中报告生成失败，请稍后重试。"
 
+        report_id = self._persist_report(
+            info, request.market, request.period,
+            report_content, "", mode="intraday",
+        )
+
         _progress("盘中分析完成")
         return AnalysisResponse(
             stock_info=info,
             chart_path="",
             report_content=report_content,
             backtest_results=t1_pipeline_result.backtest if t1_pipeline_result else {},
+            report_id=report_id,
             alpha_stats=self._extract_alpha_stats(t1_pipeline_result) if t1_pipeline_result else {},
             pipeline_result=t1_pipeline_result,
         )

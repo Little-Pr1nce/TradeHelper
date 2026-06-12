@@ -15,31 +15,6 @@ from data.database import Database
 from data import news_fetcher
 
 
-def test_parse_llm_json_markdown():
-    sample = '''```json
-[{"date": "2026-05-27", "title": "Test News", "content": "Good growth", "source": "Reuters"}]
-```'''
-    items = news_fetcher._parse_llm_json(sample, "600519", 5)
-    assert len(items) == 1
-    assert items[0].title == "Test News"
-    assert items[0].content == "Good growth"
-
-
-def test_parse_llm_json_skips_invalid():
-    sample = '[{"date": "invalid", "title": "", "source": "X"}, {"date": "2026-05-25", "title": "Valid", "source": "CNBC"}]'
-    items = news_fetcher._parse_llm_json(sample, "600519", 5)
-    assert len(items) == 1
-    assert items[0].title == "Valid"
-
-
-def test_parse_llm_json_dedupes():
-    sample = '''[
-        {"date": "2026-05-27", "title": "Dup", "source": "A"},
-        {"date": "2026-05-27", "title": "Dup", "source": "B"}
-    ]'''
-    items = news_fetcher._parse_llm_json(sample, "600519", 5)
-    assert len(items) == 1
-
 
 def test_insert_news_upsert():
     tmpdir = tempfile.mkdtemp()
@@ -92,33 +67,6 @@ def test_fallback_cache():
     result = news_fetcher._fallback_cache(db, "TSLA", 5, [])
     assert len(result) == 1
     assert result[0].title == "Old News"
-
-
-def test_merge_news_dedupes():
-    real = [NewsItem(code="AAPL", date="2026-05-27", title="Real", source="Reuters")]
-    llm = [
-        NewsItem(code="AAPL", date="2026-05-27", title="Real", source="LLM"),
-        NewsItem(code="AAPL", date="2026-05-26", title="Extra", source="LLM"),
-    ]
-    merged = news_fetcher._merge_news(real, llm, 5)
-    assert len(merged) == 2
-    assert merged[0].title == "Real"
-    assert merged[0].source == "Reuters"
-
-
-def test_parse_yfinance_entry():
-    from data.news_providers import _parse_yfinance_entry
-    entry = {
-        "title": "Apple beats earnings",
-        "providerPublishTime": 1748367890,
-        "publisher": "Reuters",
-        "summary": "Strong iPhone sales",
-    }
-    item = _parse_yfinance_entry(entry, "AAPL")
-    assert item is not None
-    assert item.title == "Apple beats earnings"
-    assert item.source == "Reuters"
-    assert item.content == "Strong iPhone sales"
 
 
 def test_parse_finnhub_entry():
@@ -175,14 +123,9 @@ def test_dedupe_before_unique_index():
 
 if __name__ == "__main__":
     tests = [
-        test_parse_llm_json_markdown,
-        test_parse_llm_json_skips_invalid,
-        test_parse_llm_json_dedupes,
         test_insert_news_upsert,
         test_cache_24h_with_sentiment,
         test_fallback_cache,
-        test_merge_news_dedupes,
-        test_parse_yfinance_entry,
         test_parse_finnhub_entry,
         test_dedupe_before_unique_index,
     ]

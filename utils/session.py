@@ -8,7 +8,7 @@
   - closed:   非交易时段 / 休市
 
 判断优先级：
-  1. stock_tick 的 trading_phase 字段（如 itick te 字段，最准确）
+  1. stock_tick 的 trading_phase 字段（数据源提供时最准确）
   2. stock_quote 的 timestamp 结合市场作息推断
   3. 本地当前时间 + 市场作息规则（兜底）
 """

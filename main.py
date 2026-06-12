@@ -36,6 +36,7 @@ from config.settings import Settings
 from data.database import Database
 from ui.main_page import MainPage
 from ui.history_page import HistoryPage
+from ui.portfolio_page import PortfolioPage
 from ui.settings_ui import SettingsPage
 from utils.logging import setup_logging
 
@@ -91,7 +92,7 @@ def main(page: ft.Page):
         nonlocal _fully_configured
         _fully_configured = settings.is_fully_configured()
         for i, dest in enumerate(navigation_bar.destinations):
-            if i == 2:  # 设置页永远可用
+            if i == 3:  # 设置页永远可用
                 continue
             dest.enabled = _fully_configured
         navigation_bar.update()
@@ -117,19 +118,21 @@ def main(page: ft.Page):
     # ========== 创建三个页面 ==========
     main_page = MainPage()
     history_page = HistoryPage()
+    portfolio_page = PortfolioPage()
     settings_page = SettingsPage(on_save_callback=on_settings_saved)
 
     # 每个页面包裹在 Container 中，通过 visible 控制显示/隐藏
     # 使用 Stack 叠加而非 TabView，每个页面保留自身状态
     main_container = ft.Container(expand=True, content=main_page)
     history_container = ft.Container(expand=True, visible=False, content=history_page)
+    portfolio_container = ft.Container(expand=True, visible=False, content=portfolio_page)
     settings_container = ft.Container(expand=True, visible=False, content=settings_page)
 
     # ========== 页面切换逻辑 ==========
     def switch_page(e):
         index = e.control.selected_index
         # 未完全配置时，只允许访问设置页
-        if not _fully_configured and index != 2:
+        if not _fully_configured and index != 3:
             page.snack_bar = ft.SnackBar(
                 ft.Text("请先在「设置」中填写所有必填配置项。"),
                 bgcolor=ft.Colors.ORANGE_700,
@@ -139,9 +142,11 @@ def main(page: ft.Page):
             return
         main_container.visible = index == 0
         history_container.visible = index == 1
-        settings_container.visible = index == 2
+        portfolio_container.visible = index == 2
+        settings_container.visible = index == 3
         main_container.update()
         history_container.update()
+        portfolio_container.update()
         settings_container.update()
         if index == 1:
             history_page._load_reports()
@@ -149,7 +154,7 @@ def main(page: ft.Page):
 
     # ========== 底部导航栏 ==========
     navigation_bar = ft.NavigationBar(
-        selected_index=0 if _fully_configured else 2,  # 未配置时默认跳设置页
+        selected_index=0 if _fully_configured else 3,  # 未配置时默认跳设置页
         on_change=switch_page,
         destinations=[
             ft.NavigationBarDestination(
@@ -160,6 +165,11 @@ def main(page: ft.Page):
             ft.NavigationBarDestination(
                 icon=ft.Icons.HISTORY,
                 label="历史报告",
+                disabled=not _fully_configured,
+            ),
+            ft.NavigationBarDestination(
+                icon=ft.Icons.ACCOUNT_BALANCE_WALLET,
+                label="组合",
                 disabled=not _fully_configured,
             ),
             ft.NavigationBarDestination(
@@ -182,6 +192,7 @@ def main(page: ft.Page):
                         controls=[
                             main_container,
                             history_container,
+                            portfolio_container,
                             settings_container,
                         ],
                     ),

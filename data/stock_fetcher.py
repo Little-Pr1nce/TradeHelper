@@ -1,16 +1,12 @@
 """
 股票数据获取模块
 
-采用策略模式提供多数据源支持：
-  - TickFlowFetcher: TickFlow 行情 API（A 股+美股，日K线免费，实时行情需 API Key）
-  - FreeStockFetcher: 免费数据源（A 股 akshare，美股 Finnhub）
-  - CustomStockFetcher: 用户自定义 API（占位，待扩展）
+统一股票行情数据源：
+  - TickFlowFetcher: 第一且唯一的股市信息/K线/盘中报价来源
+  - yfinance: 仅用于美股盘前/盘后延伸交易时段价格补充
 
-美股数据流：K 线 + 实时 → TickFlow；信息/新闻/基本面 → Finnhub (news_token_us)。
-A 股数据流：K 线 + 实时 → TickFlow；新闻 → akshare；基本面 → akshare。
-
+新闻源不在本模块处理：A 股使用 akshare，美股使用 Finnhub。
 数据源由 get_stock_fetcher(market) 自动选择。
-【扩展点】添加新的数据源：继承 BaseStockFetcher，在 get_stock_fetcher() 中注册。
 """
 
 import logging
@@ -22,8 +18,6 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Callable, Optional, TypeVar
-
-import pandas as pd
 
 from data.models import StockInfo, PriceData
 
@@ -145,675 +139,55 @@ def _retry(func: Callable[[], T], max_retries=3, label="") -> T:
             raise
 
 
-def _a_share_exchange(code: str) -> str:
-    """返回 A 股新浪/雪球接口用的小写市场前缀 sh / sz。"""
-    if code.startswith(("600", "601", "603", "605", "688")):
-        return "sh"
-    return "sz"
 
+def fetch_us_extended_quote(code: str) -> dict | None:
+    """用 yfinance 获取美股盘前/盘后延伸时段价格。"""
+    try:
+        import yfinance as yf
 
-def _xq_symbol(code: str) -> str:
-    """A 股雪球 symbol，如 SH603993。"""
-    return f"{_a_share_exchange(code).upper()}{code}"
-
-
-def _normalize_kline_df(df: pd.DataFrame) -> pd.DataFrame:
-    """将各源 K 线统一为 date/open/high/low/close/volume 列，并处理缺失值。"""
-    col_map = {
-        "日期": "date", "开盘": "open", "最高": "high",
-        "最低": "low", "收盘": "close", "成交量": "volume",
-    }
-    df = df.rename(columns=col_map).copy()
-    if "date" not in df.columns:
-        raise ValueError("missing date column")
-    df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-    for c in ("open", "high", "low", "close", "volume"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    # 关键字段任一为 NaN 则丢弃该行（确保技术指标和回测计算不出错）
-    required_cols = ["date", "open", "high", "low", "close"]
-    return df[required_cols + ["volume"]].dropna(subset=required_cols)
-
-
-def _stock_info_from_xq(df: pd.DataFrame, code: str, market: str) -> StockInfo:
-    info_dict = dict(zip(df["item"], df["value"]))
-    name = (
-        info_dict.get("org_short_name_cn")
-        or info_dict.get("org_name_cn")
-        or code
-    )
-    industry = str(info_dict.get("industry") or info_dict.get("affiliate_industry") or "")
-    desc_parts = []
-    for key in ("main_operation", "org_description", "business_scope"):
-        val = info_dict.get(key)
-        if val:
-            desc_parts.append(str(val))
-    description = "；".join(desc_parts)[:2000]
-    return StockInfo(
-        code=code, name=str(name), market=market,
-        industry=industry, description=description,
-        update_time=datetime.now().isoformat(),
-    )
-
-
-def _us_akshare_symbol_candidates(code: str) -> list[str]:
-    """东财美股 hist 接口 secid 候选，形如 105.AAPL。"""
-    code = code.upper()
-    if "." in code:
-        return [code]
-    return [f"{prefix}.{code}" for prefix in ("105", "106", "107")]
-
-
-class FreeStockFetcher(BaseStockFetcher):
-    """免费数据源：A 股新浪/雪球/东财多源降级；美股 Finnhub 信息（K 线建议用 TickFlowFetcher）。"""
-
-    def __init__(self, finnhub_token: str = ""):
-        self._finnhub_token = (finnhub_token or "").strip()
-
-    def fetch_stock_info(self, code: str) -> Optional[StockInfo]:
-        from utils.market import detect_market
-        market = detect_market(code)
-        try:
-            if market == "A":
-                return self._fetch_a_stock_info(code)
-            elif market == "US":
-                return self._fetch_us_stock_info(code)
-        except Exception as e:
-            logger.error(f"Failed to fetch stock info for {code}: {e}")
-        return None
-
-    def _fetch_a_stock_info(self, code: str) -> Optional[StockInfo]:
-        with _without_system_proxy():
-            for label, fetcher in (
-                ("xueqiu", self._fetch_a_stock_info_xq),
-                ("eastmoney", self._fetch_a_stock_info_em),
-            ):
-                try:
-                    info = fetcher(code)
-                    if info:
-                        logger.info(f"A-stock info for {code} via {label}")
-                        return info
-                except Exception as e:
-                    logger.warning(f"A-stock info {label} failed for {code}: {e}")
-        return None
-
-    def _fetch_a_stock_info_xq(self, code: str) -> Optional[StockInfo]:
-        import akshare as ak
-        df = ak.stock_individual_basic_info_xq(symbol=_xq_symbol(code))
-        if df is None or df.empty:
-            return None
-        return _stock_info_from_xq(df, code, "A")
-
-    def _fetch_a_stock_info_em(self, code: str) -> Optional[StockInfo]:
-        import akshare as ak
-        df = ak.stock_individual_info_em(symbol=code)
-        if df is None or df.empty:
-            return None
-        info_dict = dict(zip(df["item"], df["value"]))
-        name = info_dict.get("股票简称", code)
-        industry = info_dict.get("行业", "")
-        desc_items = []
-        for key in ["主营业务", "公司简介", "经营范围"]:
-            val = info_dict.get(key, "")
-            if val:
-                desc_items.append(f"{key}：{val}")
-        description = "；".join(desc_items) if desc_items else ""
-        return StockInfo(
-            code=code, name=name, market="A",
-            industry=industry, description=description,
-            update_time=datetime.now().isoformat(),
-        )
-
-    def _fetch_us_stock_info(self, code: str) -> Optional[StockInfo]:
-        # ── 唯一来源：Finnhub /stock/profile2 ──
-        if self._finnhub_token:
-            try:
-                from data.finnhub_client import fetch_company_profile
-                profile = fetch_company_profile(self._finnhub_token, code)
-                if profile:
-                    name = profile.get("name") or code
-                    industry = profile.get("industry") or profile.get("finnhubIndustry") or ""
-                    market_cap = profile.get("marketCapitalization", 0)
-                    description_parts = []
-                    for key in ("exchange", "country", "currency"):
-                        val = profile.get(key)
-                        if val:
-                            description_parts.append(f"{key}:{val}")
-                    if market_cap:
-                        description_parts.append(f"marketCap:{market_cap:.0f}")
-                    logger.info(f"US stock info for {code} via Finnhub ({name})")
-                    return StockInfo(
-                        code=code, name=name, market="US",
-                        industry=industry,
-                        description="; ".join(description_parts)[:2000],
-                        update_time=datetime.now().isoformat(),
-                    )
-            except Exception as e:
-                logger.warning(f"Finnhub stock info failed for US {code}: {e}")
-
-        logger.warning(f"No US stock info for {code} (no finnhub token or request failed)")
-        return None
-
-    def fetch_price_history(self, code: str, start_date: str, end_date: str) -> list[PriceData]:
-        from utils.market import detect_market
-        market = detect_market(code)
-        df = None
-        try:
-            if market == "A":
-                df = self._fetch_a_price_history(code, start_date, end_date)
-            elif market == "US":
-                raise RuntimeError(
-                    f"美股 {code} 未配置数据源 Token。"
-                    f"请在设置中填入 TickFlow API Key（tickflow.org 免费注册获取）。"
-                )
-        except Exception as e:
-            logger.error(f"Failed to fetch price history for {code}: {e}")
-            return []
-
-        if df is None or df.empty:
-            return []
-
-        prices = []
-        for _, row in df.iterrows():
-            try:
-                prices.append(PriceData(
-                    code=code,
-                    date=str(row["date"])[:10],
-                    open=float(row["open"]),
-                    high=float(row["high"]),
-                    low=float(row["low"]),
-                    close=float(row["close"]),
-                    volume=float(row["volume"]),
-                ))
-            except (KeyError, ValueError, TypeError):
-                continue
-        return prices
-
-    def _fetch_a_price_history(self, code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        sd = start_date.replace("-", "")
-        ed = end_date.replace("-", "")
-        exchange = _a_share_exchange(code)
-
-        with _without_system_proxy():
-            try:
-                import akshare as ak
-                df = _retry(
-                    lambda: ak.stock_zh_a_daily(
-                        symbol=f"{exchange}{code}",
-                        start_date=sd, end_date=ed, adjust="qfq",
-                    ),
-                    max_retries=2, label="akshare.sina",
-                )
-                if df is not None and not df.empty:
-                    logger.info(f"A-stock prices for {code} via sina")
-                    return _normalize_kline_df(df)
-            except Exception as e:
-                logger.warning(f"Sina A-stock prices failed for {code}: {e}")
-
-            try:
-                import akshare as ak
-                df = _retry(
-                    lambda: ak.stock_zh_a_hist(
-                        symbol=code, period="daily",
-                        start_date=start_date, end_date=end_date, adjust="qfq",
-                    ),
-                    max_retries=2, label="akshare.em",
-                )
-                if df is not None and not df.empty:
-                    logger.info(f"A-stock prices for {code} via eastmoney")
-                    return _normalize_kline_df(df)
-            except Exception as e:
-                logger.error(f"Eastmoney A-stock prices failed for {code}: {e}")
-        return None
-
-    def _fetch_us_price_history(self, code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        try:
-            import yfinance as yf
-            df = _retry(
-                lambda: yf.Ticker(code).history(start=start_date, end=end_date),
-                max_retries=3, label="yf.history",
-            )
-            if df is None or df.empty:
-                return None
-            df = df.reset_index()
-            df = df.rename(columns={
-                "Date": "date", "Open": "open", "High": "high",
-                "Low": "low", "Close": "close", "Volume": "volume",
-            })
-            return _normalize_kline_df(df)
-        except Exception as e:
-            logger.error(f"Failed US stock prices for {code}: {e}")
+        _apply_proxy()
+        ticker = yf.Ticker(code.upper())
+        hist = ticker.history(period="1d", interval="1m", prepost=True)
+        if hist is None or hist.empty:
             return None
 
-    def _fetch_us_price_akshare(self, code: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        import akshare as ak
-        sd = start_date.replace("-", "")
-        ed = end_date.replace("-", "")
+        hist_with_vol = hist[hist["Volume"] > 0]
+        last = hist_with_vol.iloc[-1] if not hist_with_vol.empty else hist.iloc[-1]
+        price = float(last["Close"])
+        volume = int(hist["Volume"].sum())
+        day_open = float(hist.iloc[0]["Open"])
+        day_high = float(hist["High"].max())
+        day_low = float(hist["Low"].min())
 
-        for symbol in _us_akshare_symbol_candidates(code):
-            try:
-                df = _retry(
-                    lambda sym=symbol: ak.stock_us_hist(
-                        symbol=sym, period="daily",
-                        start_date=sd, end_date=ed, adjust="qfq",
-                    ),
-                    max_retries=1, label=f"akshare.US.{symbol}",
-                )
-                if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
-                    logger.info(f"US stock prices for {code} via akshare ({symbol})")
-                    return _normalize_kline_df(df)
-            except Exception as e:
-                logger.debug(f"akshare US {symbol} failed: {e}")
-                continue
-
-        logger.error(f"Failed akshare US prices for {code} (tried {_us_akshare_symbol_candidates(code)})")
-        return None
-
-
-class CustomStockFetcher(BaseStockFetcher):
-    """用户自定义付费 API 数据源（占位）。"""
-
-    def __init__(self, api_endpoint: str, api_key: str):
-        self.api_endpoint = api_endpoint
-        self.api_key = api_key
-
-    def fetch_stock_info(self, code: str) -> Optional[StockInfo]:
-        return None
-
-    def fetch_price_history(self, code: str, start_date: str, end_date: str) -> list[PriceData]:
-        return []
-
-
-class ItickStockFetcher(BaseStockFetcher):
-    """
-    itick 付费数据源。
-
-    API 文档: https://docs.itick.org
-
-    接口:
-      - GET /stock/info    → 股票基本信息
-      - GET /stock/kline   → 历史 K 线（日线 kType=8）
-      - GET /stock/quote   → 实时报价
-      - GET /stock/tick    → 实时成交（含交易时段标识 te）
-      - GET /future/quote  → 期货实时报价（盘前分析用）
-      - GET /future/kline  → 期货历史 K 线（盘前分析用）
-    """
-
-    BASE_URL = "https://api0.itick.org"
-
-    # A 股代码前缀 → itick region 映射
-    _A_SHARE_PREFIX = {
-        "6": "SH",   # 600xxx/601xxx/603xxx/605xxx → 上海
-        "0": "SZ",   # 000xxx/001xxx/002xxx → 深圳
-        "3": "SZ",   # 300xxx → 深圳创业板
-    }
-
-    def __init__(self, token: str):
-        self.token = token
-        self._session = None
-
-    def _get_session(self):
-        """延迟创建 requests Session（避免 import 时加载）。"""
-        if self._session is None:
-            import requests
-            self._session = requests.Session()
-            self._session.trust_env = False  # 不走系统代理，itick 直连
-            self._session.headers.update({
-                "accept": "application/json",
-                "token": self.token,
-            })
-        return self._session
-
-    @staticmethod
-    def _a_stock_region(code: str) -> str:
-        """A 股代码 → itick region（SH/SZ）。"""
-        if code.isdigit() and len(code) == 6:
-            prefix = code[0]
-            return ItickStockFetcher._A_SHARE_PREFIX.get(prefix, "SH")
-        return "SH"
-
-    def _get(self, path: str, params: dict, max_retries: int = 3) -> dict:
-        """带重试的 GET 请求。"""
-        import time as _time
-        session = self._get_session()
-        url = f"{self.BASE_URL}{path}"
-        delay = 1
-        last_error = None
-        for attempt in range(max_retries):
-            try:
-                resp = session.get(url, params=params, timeout=30)
-                # 非 200 时打印完整响应体帮助诊断
-                if not resp.ok:
-                    body = resp.text[:500]
-                    logger.error(f"itick HTTP {resp.status_code}: {body}")
-                resp.raise_for_status()
-                data = resp.json()
-                if data.get("code") != 0:
-                    raise RuntimeError(f"itick API 错误: code={data.get('code')}, msg={data.get('msg')}")
-                return data
-            except Exception as e:
-                last_error = e
-                if attempt < max_retries - 1:
-                    logger.warning(f"itick 请求重试 {attempt+1}/{max_retries} in {delay}s: {e}")
-                    _time.sleep(delay)
-                    delay = min(delay * 2, 10)
-        raise last_error  # type: ignore
-
-    # ── fetch_stock_info ──
-
-    def fetch_stock_info(self, code: str) -> Optional[StockInfo]:
-        """通过 itick /stock/info 获取股票基本信息。"""
-        from utils.market import detect_market
-        market = detect_market(code)
-        region = self._a_stock_region(code) if market == "A" else "US"
-
+        prev_close = 0.0
         try:
-            data = self._get("/stock/info", {"type": "stock", "region": region, "code": code})
-            d = data.get("data", {})
-            if not d:
-                return None
-
-            name = str(d.get("n", code))
-            industry = str(d.get("i", "") or d.get("s", ""))
-            description = str(d.get("bd", ""))[:2000]
-
-            logger.info(f"itick 股票信息: {name} ({industry})")
-            return StockInfo(
-                code=code,
-                name=name,
-                market=market,
-                industry=industry,
-                description=description,
-                update_time=datetime.now().isoformat(),
-            )
-        except Exception as e:
-            logger.error(f"itick fetch_stock_info 失败 ({code}): {e}")
-            return None
-
-    # ── fetch_price_history ──
-
-    def fetch_price_history(self, code: str, start_date: str, end_date: str) -> list[PriceData]:
-        """通过 itick /stock/kline 获取日 K 线数据。"""
-        from utils.market import detect_market
-        market = detect_market(code)
-        region = self._a_stock_region(code) if market == "A" else "US"
-
-        # 估算需要的 K 线条数：日期跨度 + 20% 余量
-        try:
-            from datetime import datetime as _dt
-            d_start = _dt.strptime(start_date, "%Y-%m-%d")
-            d_end = _dt.strptime(end_date, "%Y-%m-%d")
-            days = max((d_end - d_start).days, 1)
-            limit = min(int(days * 1.4), 2000)  # 最多 2000 条
+            prev_hist = ticker.history(period="5d")
+            if prev_hist is not None and not prev_hist.empty and len(prev_hist) >= 2:
+                prev_close = float(prev_hist.iloc[-2]["Close"])
         except Exception:
-            limit = 1000
+            pass
 
-        try:
-            data = self._get("/stock/kline", {
-                "region": region, "code": code,
-                "kType": 8,        # 日 K 线
-                "limit": limit,
-            })
-            bars = data.get("data", [])
-            if not bars:
-                logger.warning(f"itick K 线为空 ({code})")
-                return []
-
-            prices = []
-            for bar in bars:
-                # 时间戳（毫秒） → 日期字符串
-                ts = bar.get("t", 0)
-                date_str = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
-
-                # 按日期范围过滤
-                if date_str < start_date or date_str > end_date:
-                    continue
-
-                try:
-                    prices.append(PriceData(
-                        code=code,
-                        date=date_str,
-                        open=float(bar["o"]),
-                        high=float(bar["h"]),
-                        low=float(bar["l"]),
-                        close=float(bar["c"]),
-                        volume=float(bar["v"]),
-                    ))
-                except (KeyError, ValueError, TypeError):
-                    continue
-
-            logger.info(f"itick K 线: {len(prices)} 条 ({start_date}~{end_date})")
-            return prices
-        except Exception as e:
-            logger.error(f"itick fetch_price_history 失败 ({code}): {e}")
-            return []
-
-    # ── fetch_quote ──
-
-    def fetch_quote(self, code: str) -> dict | None:
-        """
-        通过 itick /stock/quote 获取实时报价。
-
-        Returns:
-            {
-                "code": str,       # 产品代码
-                "latest": float,   # 最新价
-                "open": float,     # 开盘价
-                "high": float,     # 最高价
-                "low": float,      # 最低价
-                "prev_close": float,  # 前日收盘价
-                "change": float,   # 涨跌额
-                "change_pct": float,  # 涨跌幅百分比
-                "volume": float,   # 成交量
-                "amount": float,   # 成交额
-                "timestamp": int,  # 时间戳（毫秒）
-                "status": int,     # 交易状态 0:正常 1:停牌 2:退市 3:熔断
-            }
-            失败返回 None
-        """
-        from utils.market import detect_market
-        market = detect_market(code)
-        region = self._a_stock_region(code) if market == "A" else "US"
-
-        try:
-            data = self._get("/stock/quote", {"region": region, "code": code})
-            d = data.get("data", {})
-            if not d:
-                return None
-
-            latest = d.get("ld", 0)
-            prev_close = d.get("p", 0)
-            # 自己计算涨跌幅：不依赖 API 返回的 chp
-            # （chp 的格式不稳定，有时是百分数 -73.0 有时是小数 -0.0073）
-            if latest and prev_close and prev_close > 0:
-                own_chp = (float(latest) - float(prev_close)) / float(prev_close)  # 小数
-            else:
-                own_chp = 0.0
-
-            quote = {
-                "code": str(d.get("s", code)),
-                "latest": float(latest) if latest else 0.0,
-                "open": float(d.get("o", 0)),
-                "high": float(d.get("h", 0)),
-                "low": float(d.get("l", 0)),
-                "prev_close": float(prev_close) if prev_close else 0.0,
-                "change": float(d.get("ch", 0)),
-                "change_pct": round(own_chp, 6),  # 小数：0.0069 = 0.69%
-                "volume": float(d.get("v", 0)),
-                "amount": float(d.get("tu", 0)),
-                "timestamp": d.get("t", 0),
-                "status": d.get("ts", 0),
-            }
-            logger.info(
-                f"itick 实时报价 ({code}): "
-                f"最新价={quote['latest']:.2f}, 涨跌={quote['change_pct']:+.2%}"
-            )
-            return quote
-        except Exception as e:
-            logger.error(f"itick fetch_quote 失败 ({code}): {e}")
-            return None
-
-    # ── fetch_stock_tick ──
-
-    def fetch_stock_tick(self, code: str) -> dict | None:
-        """
-        通过 itick /stock/tick 获取实时成交数据（含交易时段标识）。
-
-        Returns:
-            {
-                "latest": float,         # 最新价
-                "volume": float,         # 成交数量
-                "timestamp": int,        # 时间戳（毫秒）
-                "trading_phase": int,    # 0:常规交易 1:盘前交易 2:盘后交易
-            }
-            失败返回 None
-        """
-        from utils.market import detect_market
-        market = detect_market(code)
-        region = self._a_stock_region(code) if market == "A" else "US"
-
-        try:
-            data = self._get("/stock/tick", {"region": region, "code": code})
-            d = data.get("data", {})
-            if not d:
-                return None
-
-            tick = {
-                "latest": float(d.get("ld", 0)),
-                "volume": float(d.get("v", 0)),
-                "timestamp": d.get("t", 0),
-                "trading_phase": d.get("te", 0),  # 0:常规 1:盘前 2:盘后
-            }
-            phase_labels = {0: "常规交易", 1: "盘前交易", 2: "盘后交易"}
-            logger.info(
-                f"itick 实时成交 ({code}): "
-                f"最新价={tick['latest']:.2f}, "
-                f"交易时段={phase_labels.get(tick['trading_phase'], '未知')}"
-            )
-            return tick
-        except Exception as e:
-            logger.error(f"itick fetch_stock_tick 失败 ({code}): {e}")
-            return None
-
-    # ── fetch_future_quote ──
-
-    def fetch_future_quote(self, region: str, code: str) -> dict | None:
-        """
-        通过 itick /future/quote 获取期货实时报价。
-
-        Args:
-            region: 市场代码（US/HK/CN）
-            code:   期货代码（NQ=纳指, ES=标普）
-
-        Returns:
-            {
-                "code": str,           # 产品代码
-                "latest": float,       # 最新价
-                "open": float,         # 开盘价
-                "high": float,         # 最高价
-                "low": float,          # 最低价
-                "prev_close": float,   # 前日收盘价
-                "change": float,       # 涨跌额
-                "change_pct": float,   # 涨跌幅百分比（已归一化为小数）
-                "volume": float,       # 成交量
-                "amount": float,       # 成交额
-                "timestamp": int,      # 时间戳（毫秒）
-                "status": int,         # 交易状态
-            }
-            失败返回 None
-        """
-        try:
-            data = self._get("/future/quote", {"region": region, "code": code})
-            d = data.get("data", {})
-            if not d:
-                return None
-
-            latest = d.get("ld", 0)
-            prev_close = d.get("p", 0)
-            # 自己计算涨跌幅，不依赖 API 的 chp
-            # （itick 期货 chp 可能返回涨跌点数而非百分比，不可靠）
-            if latest and prev_close and prev_close > 0:
-                own_chp = (float(latest) - float(prev_close)) / float(prev_close)
-            else:
-                own_chp = 0.0
-
-            quote = {
-                "code": str(d.get("s", code)),
-                "latest": float(latest) if latest else 0.0,
-                "open": float(d.get("o", 0)),
-                "high": float(d.get("h", 0)),
-                "low": float(d.get("l", 0)),
-                "prev_close": float(prev_close) if prev_close else 0.0,
-                "change": float(d.get("ch", 0)),
-                "change_pct": round(own_chp, 6),
-                "volume": float(d.get("v", 0)),
-                "amount": float(d.get("tu", 0)),
-                "timestamp": d.get("t", 0),
-                "status": d.get("ts", 0),
-            }
-            logger.info(
-                f"itick 期货报价 ({code}): "
-                f"最新价={quote['latest']:.2f}, 涨跌={quote['change_pct']:+.2%}"
-            )
-            return quote
-        except Exception as e:
-            logger.error(f"itick fetch_future_quote 失败 ({region}:{code}): {e}")
-            return None
-
-    # ── fetch_future_kline ──
-
-    def fetch_future_kline(
-        self, region: str, code: str,
-        kType: int = 1, limit: int = 60,
-    ) -> list[dict]:
-        """
-        通过 itick /future/kline 获取期货历史 K 线。
-
-        Args:
-            region: 市场代码（US/HK/CN）
-            code:   期货代码（NQ=纳指, ES=标普）
-            kType:  K线类型
-                    1=1分钟, 2=5分钟, 3=15分钟, 4=30分钟,
-                    5=1小时, 6=2小时, 7=4小时, 8=日K, 9=周K, 10=月K
-            limit:  K线数量（默认 60）
-
-        Returns:
-            list[dict]: 每个 bar 含 {t, o, h, l, c, v, tu}
-            失败返回空列表
-        """
-        try:
-            data = self._get("/future/kline", {
-                "region": region, "code": code,
-                "kType": kType, "limit": limit,
-            })
-            bars = data.get("data", [])
-            if not bars:
-                logger.warning(f"itick 期货 K 线为空 ({region}:{code})")
-                return []
-
-            result = []
-            for bar in bars:
-                try:
-                    result.append({
-                        "t": bar.get("t", 0),      # 时间戳（毫秒）
-                        "o": float(bar["o"]),       # 开盘价
-                        "h": float(bar["h"]),       # 最高价
-                        "l": float(bar["l"]),       # 最低价
-                        "c": float(bar["c"]),       # 收盘价
-                        "v": float(bar.get("v", 0)),  # 成交量
-                        "tu": float(bar.get("tu", 0)), # 成交额
-                    })
-                except (KeyError, ValueError, TypeError):
-                    continue
-
-            logger.info(
-                f"itick 期货 K 线 ({region}:{code}): "
-                f"{len(result)} 条 (kType={kType})"
-            )
-            return result
-        except Exception as e:
-            logger.error(f"itick fetch_future_kline 失败 ({region}:{code}): {e}")
-            return []
-
+        change_pct = (price - prev_close) / prev_close if prev_close > 0 else 0.0
+        ts = int(last.name.timestamp() * 1000) if hasattr(last, "name") else 0
+        return {
+            "code": code.upper(),
+            "latest": round(price, 2),
+            "price": round(price, 2),
+            "open": round(day_open, 2),
+            "high": round(day_high, 2),
+            "low": round(day_low, 2),
+            "prev_close": round(prev_close, 2),
+            "change": round(price - prev_close, 2) if prev_close > 0 else 0.0,
+            "change_pct": round(change_pct, 6),
+            "volume": volume,
+            "amount": 0,
+            "timestamp": ts,
+            "status": 0,
+            "vwap": 0,
+        }
+    except Exception as e:
+        logger.warning(f"yfinance 延伸时段数据获取失败 ({code}): {e}")
+        return None
 
 class TickFlowFetcher(BaseStockFetcher):
     """
@@ -947,7 +321,7 @@ class TickFlowFetcher(BaseStockFetcher):
         """
         实时报价（需要 API Key）。
 
-        Returns 格式与 itick quote 兼容：
+        Returns 标准报价格式：
             {code, latest, open, high, low, prev_close, change, change_pct,
              volume, amount, timestamp, status, vwap}
         """
@@ -1036,6 +410,41 @@ class TickFlowFetcher(BaseStockFetcher):
                      f"futures_score 纯靠涨跌方向")
         return []
 
+
+
+def check_tickflow_available(market: str = "US", code: str | None = None) -> dict:
+    """检测 TickFlow K线/实时接口是否可用，返回结构化状态。"""
+    code = code or ("AAPL" if market == "US" else "600519")
+    try:
+        fetcher = get_stock_fetcher(market)
+        info = fetcher.fetch_stock_info(code)
+        prices = fetcher.fetch_price_history(code, "2024-01-01", "2099-12-31")
+        quote = fetcher.fetch_quote(code) if getattr(fetcher, "has_realtime", False) else None
+        return {
+            "source": "TickFlow",
+            "ok": bool(info or prices),
+            "info_ok": info is not None,
+            "history_ok": bool(prices),
+            "realtime_ok": quote is not None,
+            "has_realtime": getattr(fetcher, "has_realtime", False),
+            "error": "",
+        }
+    except Exception as e:
+        return {"source": "TickFlow", "ok": False, "error": str(e)}
+
+
+def check_yfinance_available(code: str = "AAPL") -> dict:
+    """检测 yfinance 美股延伸时段接口是否可用。"""
+    try:
+        quote = fetch_us_extended_quote(code)
+        return {
+            "source": "yfinance",
+            "ok": quote is not None and quote.get("latest", 0) > 0,
+            "extended_quote_ok": quote is not None,
+            "error": "",
+        }
+    except Exception as e:
+        return {"source": "yfinance", "ok": False, "error": str(e)}
 
 def get_stock_fetcher(market: str = "US") -> BaseStockFetcher:
     """

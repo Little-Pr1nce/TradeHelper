@@ -100,7 +100,6 @@ a = Analysis(
         'test',
         'xmlrpc',
         'pydoc',
-        'distutils',
         'setuptools',
     ],
 )
