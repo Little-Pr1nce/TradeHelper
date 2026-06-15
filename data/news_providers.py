@@ -4,9 +4,9 @@
 策略模式，按市场选择数据源，LLM 仅作条数不足时的补充：
 
   A 股：akshare 东方财富 stock_news_em（免费，项目已有依赖）
-  美股：Finnhub company-news（可选，需 API Key）
+  美股：Finnhub company-news（需 API Key）
         Finnhub market-news（宏观新闻，与个股新闻一起做情感分析）
-  兜底：LLM 生成（news_fetcher 层调用）
+  API 不可用时降级使用本地历史缓存
 """
 
 import logging
@@ -78,42 +78,6 @@ class AkshareEastMoneyProvider(BaseNewsProvider):
         return items
 
 
-class YfinanceNewsProvider(BaseNewsProvider):
-    """美股 yfinance Ticker.news（已废弃—不再注册到美股新闻列表，仅保留类定义供测试引用）。"""
-
-    @property
-    def name(self) -> str:
-        return "yfinance"
-
-    def fetch(self, code: str, name: str, market: str, limit: int) -> list[NewsItem]:
-        if market != "US":
-            return []
-
-        _apply_proxy()
-
-        def _call():
-            import yfinance as yf
-            ticker = yf.Ticker(code.upper())
-            return ticker.news or []
-
-        try:
-            raw = _retry(_call, max_retries=3, label=self.name)
-        except Exception as e:
-            logger.warning(f"{self.name} 获取失败: {e}")
-            return []
-
-        items: list[NewsItem] = []
-        for entry in raw[:limit * 2]:
-            item = _parse_yfinance_entry(entry, code)
-            if item:
-                items.append(item)
-            if len(items) >= limit:
-                break
-
-        logger.info(f"{self.name}: {code} 获取 {len(items)} 条")
-        return items
-
-
 class FinnhubNewsProvider(BaseNewsProvider):
     """美股 Finnhub company-news（免费档 60 次/分钟，需 API Key）。"""
 
@@ -174,7 +138,6 @@ def get_news_providers(market: str, news_token_us: str = "", news_token_a: str =
     providers: list[BaseNewsProvider] = []
     if news_token_us:
         providers.append(FinnhubNewsProvider(news_token_us))
-    # 美股不再用 yfinance 新闻兜底，交由 news_fetcher 层 LLM 补充
     return providers
 
 
@@ -205,25 +168,6 @@ def fetch_from_providers(
 
     merged.sort(key=lambda n: n.date, reverse=True)
     return merged[:limit]
-
-
-def _parse_yfinance_entry(entry: dict, code: str) -> NewsItem | None:
-    title = str(entry.get("title", "")).strip()
-    if not title:
-        return None
-
-    ts = entry.get("providerPublishTime") or entry.get("publishedAt")
-    if isinstance(ts, (int, float)) and ts > 0:
-        news_date = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
-    else:
-        news_date = date.today().isoformat()
-
-    source = str(
-        entry.get("publisher") or entry.get("publisherName") or "Yahoo Finance"
-    ).strip()
-    summary = str(entry.get("summary", "")).strip()[:500]
-
-    return NewsItem(code=code, date=news_date, title=title, source=source, content=summary)
 
 
 def _parse_finnhub_entry(entry: dict, code: str) -> NewsItem | None:

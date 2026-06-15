@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core.pipeline import run_pipeline
 from backtest.analytics import compare_strategies, plot_comparison
-from data.stock_fetcher import FreeStockFetcher, get_stock_fetcher
+from data.stock_fetcher import get_stock_fetcher
 from utils.market import detect_market
 
 logger = logging.getLogger("run_backtest")

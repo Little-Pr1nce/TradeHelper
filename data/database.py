@@ -26,7 +26,10 @@ import threading
 from datetime import datetime
 from typing import Optional
 
-from data.models import StockInfo, PriceData, AnalysisReport, NewsItem
+from data.models import (
+    StockInfo, PriceData, AnalysisReport, NewsItem,
+    Portfolio, PortfolioHolding, PortfolioAnalysis,
+)
 from config.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -101,6 +104,47 @@ CREATE TABLE IF NOT EXISTS news_sentiment (
 
 CREATE INDEX IF NOT EXISTS idx_news_code ON news_sentiment(code);
 CREATE INDEX IF NOT EXISTS idx_news_date ON news_sentiment(date);
+
+-- 组合定义表
+CREATE TABLE IF NOT EXISTS portfolios (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT DEFAULT '',
+    risk_stop_pct REAL DEFAULT 0.08,
+    create_time TEXT NOT NULL,
+    update_time TEXT NOT NULL
+);
+
+-- 组合持仓/候选池
+CREATE TABLE IF NOT EXISTS portfolio_holdings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT DEFAULT '',
+    market TEXT DEFAULT 'US',
+    industry TEXT DEFAULT '',
+    weight REAL DEFAULT 0.0,
+    note TEXT DEFAULT '',
+    UNIQUE(portfolio_id, code),
+    FOREIGN KEY(portfolio_id) REFERENCES portfolios(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_portfolio_holdings_pid ON portfolio_holdings(portfolio_id);
+
+-- 组合分析快照
+CREATE TABLE IF NOT EXISTS portfolio_analyses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id INTEGER NOT NULL,
+    create_time TEXT NOT NULL,
+    summary TEXT DEFAULT '',
+    industry_exposure TEXT DEFAULT '{}',
+    max_drawdown REAL DEFAULT 0.0,
+    risk_triggered INTEGER DEFAULT 0,
+    candidates_json TEXT DEFAULT '[]',
+    FOREIGN KEY(portfolio_id) REFERENCES portfolios(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_portfolio_analyses_pid ON portfolio_analyses(portfolio_id);
 """
 
 
@@ -393,17 +437,128 @@ class Database:
             (pdf_path, report_id)
         )
 
-
     def delete_report(self, report_id: int):
-        """
-        删除指定报告（注意：不会删除磁盘上的 PDF 文件）。
-
-        Args:
-            report_id: 报告 ID
-        """
+        """删除指定报告（注意：不会删除磁盘上的 PDF 文件）。"""
         self._execute_write("DELETE FROM reports WHERE id = ?", (report_id,))
 
-    # ======================== 新闻情感 ========================
+    def filter_reports(
+        self,
+        code: str = "",
+        market: str = "",
+        mode: str = "",
+        period: str = "",
+        min_rating: int | None = None,
+        limit: int = 100,
+    ) -> list[AnalysisReport]:
+        """按多条件筛选报告。"""
+        conditions = []
+        params: list = []
+        if code:
+            conditions.append("code LIKE ?")
+            params.append(f"%{code.upper()}%")
+        if market:
+            conditions.append("market = ?")
+            params.append(market)
+        if mode:
+            conditions.append("mode = ?")
+            params.append(mode)
+        if period:
+            conditions.append("backtest_period = ?")
+            params.append(period)
+        if min_rating is not None:
+            conditions.append("rating >= ?")
+            params.append(min_rating)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(limit)
+        rows = self.execute(
+            f"SELECT * FROM reports {where} ORDER BY create_time DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
+        return [AnalysisReport.from_dict(dict(r)) for r in rows]
+
+    # ======================== 组合管理 ========================
+
+    def create_portfolio(self, name: str, description: str = "", risk_stop_pct: float = 0.08) -> int:
+        """创建组合，名称重复时返回已有组合 ID。"""
+        now = datetime.now().isoformat()
+        with self._write_lock:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO portfolios
+                   (name, description, risk_stop_pct, create_time, update_time)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (name, description, risk_stop_pct, now, now),
+            )
+            self.conn.execute(
+                """UPDATE portfolios SET description = ?, risk_stop_pct = ?, update_time = ?
+                   WHERE name = ?""",
+                (description, risk_stop_pct, now, name),
+            )
+            self.conn.commit()
+            row = self.conn.execute("SELECT id FROM portfolios WHERE name = ?", (name,)).fetchone()
+        return int(row[0])
+
+    def list_portfolios(self) -> list[Portfolio]:
+        rows = self.execute("SELECT * FROM portfolios ORDER BY update_time DESC").fetchall()
+        return [Portfolio.from_dict(dict(r)) for r in rows]
+
+    def get_portfolio(self, portfolio_id: int) -> Portfolio | None:
+        row = self.execute("SELECT * FROM portfolios WHERE id = ?", (portfolio_id,)).fetchone()
+        return Portfolio.from_dict(dict(row)) if row else None
+
+    def delete_portfolio(self, portfolio_id: int):
+        self._execute_write("DELETE FROM portfolios WHERE id = ?", (portfolio_id,))
+
+    def upsert_portfolio_holding(self, holding: PortfolioHolding):
+        self._execute_write(
+            """INSERT INTO portfolio_holdings
+               (portfolio_id, code, name, market, industry, weight, note)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(portfolio_id, code) DO UPDATE SET
+                 name=excluded.name, market=excluded.market, industry=excluded.industry,
+                 weight=excluded.weight, note=excluded.note""",
+            (
+                holding.portfolio_id, holding.code.upper(), holding.name, holding.market,
+                holding.industry, holding.weight, holding.note,
+            ),
+        )
+        self._execute_write(
+            "UPDATE portfolios SET update_time = ? WHERE id = ?",
+            (datetime.now().isoformat(), holding.portfolio_id),
+        )
+
+    def delete_portfolio_holding(self, holding_id: int):
+        self._execute_write("DELETE FROM portfolio_holdings WHERE id = ?", (holding_id,))
+
+    def list_portfolio_holdings(self, portfolio_id: int) -> list[PortfolioHolding]:
+        rows = self.execute(
+            "SELECT * FROM portfolio_holdings WHERE portfolio_id = ? ORDER BY weight DESC, code ASC",
+            (portfolio_id,),
+        ).fetchall()
+        return [PortfolioHolding.from_dict(dict(r)) for r in rows]
+
+    def insert_portfolio_analysis(self, analysis: PortfolioAnalysis) -> int:
+        cursor = self._execute_write(
+            """INSERT INTO portfolio_analyses
+               (portfolio_id, create_time, summary, industry_exposure, max_drawdown,
+                risk_triggered, candidates_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                analysis.portfolio_id, analysis.create_time, analysis.summary,
+                analysis.industry_exposure, analysis.max_drawdown,
+                1 if analysis.risk_triggered else 0,
+                analysis.candidates_json,
+            ),
+        )
+        return cursor.lastrowid
+
+    def list_portfolio_analyses(self, portfolio_id: int, limit: int = 20) -> list[PortfolioAnalysis]:
+        rows = self.execute(
+            """SELECT * FROM portfolio_analyses WHERE portfolio_id = ?
+               ORDER BY create_time DESC LIMIT ?""",
+            (portfolio_id, limit),
+        ).fetchall()
+        return [PortfolioAnalysis.from_dict(dict(r)) for r in rows]
+
 
     def insert_news(self, news_list: list[NewsItem]):
         """

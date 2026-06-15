@@ -114,7 +114,7 @@ scripts\build_windows.bat          # Windows → dist/win/TradeHelper/
 | 风格（PE/PB） | 15% | — | akshare / Finnhub |
 | 基本面（ROE/毛利率等） | 20% | — | akshare / Finnhub |
 | 新闻情感（FinBERT） | 25% | 35% | FinBERT 模型 |
-| 盘口因子 | 10% | 10% | itick Level 2 |
+| 盘口因子 | 10% | 10% | TickFlow Level-1（盘口暂缺时自动回退） |
 
 无盘口数据时权重自动回退。因子经 IC/IR 检验：D 级剔除、C 级半权。新闻情感带时间衰减（半衰期 1 天）。
 
@@ -146,8 +146,8 @@ scripts\build_windows.bat          # Windows → dist/win/TradeHelper/
 
 | 市场 | K 线+实时+盘口 | 新闻 | 基本面 |
 |------|-------------|------|--------|
-| 美股 | stock_token_us（itick / Massive） | news_token_us（Finnhub） | Finnhub |
-| A 股 | stock_token_a（Tushare） | akshare 免费 | akshare |
+| 美股 | stock_token_us（TickFlow） | news_token_us（Finnhub） | Finnhub |
+| A 股 | stock_token_a（TickFlow） | akshare 免费 | akshare |
 
 配置文件存储于系统标准应用目录（macOS `~/Library/Application Support/`，Windows `%APPDATA%`，Linux `~/.config/`）下的 `TradeHelper/config.json`。
 

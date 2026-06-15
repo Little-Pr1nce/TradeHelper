@@ -13,8 +13,8 @@
 |------|---------|
 | UI 框架 | Flet (Flutter) |
 | 数据存储 | SQLite (WAL) |
-| A 股数据 | akshare（免费）/ itick（付费） |
-| 美股数据 | itick（K线/信息/盘口）/ Finnhub（搜索/信息/新闻/基本面） |
+| A 股数据 | TickFlow（行情）+ akshare（新闻/基本面） |
+| 美股数据 | TickFlow（盘中/K线）+ yfinance（盘前盘后）+ Finnhub（新闻/基本面） |
 | 金融新闻 | A 股: akshare 东方财富；美股: Finnhub → LLM 补充 |
 | 新闻情感分析 | FinBERT + 中文关键词兜底 |
 | K 线图 | mplfinance |
@@ -44,7 +44,7 @@ TradeHelper/
 │   ├── validation.py             #   因子 IC/IR 检验
 │   ├── fundamental.py            #   基本面因子（Finnhub/akshare 优先，LLM 兜底）
 │   ├── fundamental_llm.py        #   LLM PE/PB 兜底
-│   └── depth_factor.py           #   实时盘口因子（itick）
+│   └── depth_factor.py           #   实时盘口因子（TickFlow 可用时）
 │
 ├── strategies/                   # 交易执行策略库
 │   ├── base.py                   #   基类 + compute_atr
@@ -65,7 +65,7 @@ TradeHelper/
 ├── data/                         # 数据层
 │   ├── models.py                 #   数据模型
 │   ├── database.py               #   SQLite CRUD
-│   ├── stock_fetcher.py          #   股价获取（Free/Itick）
+│   ├── stock_fetcher.py          #   股价获取（TickFlow + yfinance延伸时段）
 │   ├── news_fetcher.py           #   新闻获取 + LLM 补充
 │   ├── news_providers.py         #   新闻源策略
 │   └── finnhub_client.py         #   Finnhub API 客户端
@@ -121,12 +121,12 @@ TradeHelper/
 ```
 用户输入
   → 搜索代码 (utils/market.py)         Finnhub /search(美股) + 本地字典
-  → 获取股价 (data/stock_fetcher.py)    SQLite 缓存 → 增量更新 itick
+  → 获取股价 (data/stock_fetcher.py)    SQLite 缓存 → 增量更新 TickFlow
   → 获取新闻 (data/news_fetcher.py)     Finnhub → LLM 补充 → 历史降级
   → 获取基本面 (alpha/fundamental.py)   Finnhub metric → akshare → LLM 兜底
   → Alpha 打分 (alpha/scoring.py)      7 指标 Z-Score + 因子检验(IC/IR) + 扩展权重
   → 三策略回测 (backtest/engine.py)    T+1 撮合，美股不限涨跌停
-  → 盘口数据 (alpha/depth_factor.py)   实时买卖比（仅 itick）
+  → 盘口数据 (alpha/depth_factor.py)   实时买卖比（数据源支持时）
   → 报告生成 (report/generator.py)     LLM 全量数据交叉分析 + AI 综合建议与预测 / 模板兜底
   → 导出 HTML (ui/main_page.py)
 ```
@@ -170,7 +170,7 @@ TradeHelper/
 
 - 缓存为空 → 全量拉取 (start~end)
 - 缓存存在 → 从缓存最新日期次日至 today 做增量拉取
-- 通过比较 itick 返回的最新年份与缓存最新年份判断是否有新数据，非交易日自动跳过
+- 通过比较 TickFlow 返回的最新日期与缓存最新日期判断是否有新数据，非交易日自动跳过
 
 ---
 
@@ -242,7 +242,7 @@ cache(24h) → API Provider → LLM 补充 → 历史缓存兜底
 | 美股 | FinnhubNewsProvider | ✓（需 `news_token_us`） |
 | 通用 | LLM 补充 | ✓（需大模型配置） |
 
-注：美股 YfinanceNewsProvider 已废弃，美股新闻统一走 Finnhub。
+注：美股新闻统一走 Finnhub；yfinance 仅用于盘前/盘后价格。
 
 ### 8.3 情感分析
 
@@ -258,10 +258,10 @@ cache(24h) → API Provider → LLM 补充 → 历史缓存兜底
 
 | 数据源 | settings | 类 |
 |--------|---------|------|
-| 免费 | `stock_data_token` 为空 | FreeStockFetcher（akshare，美股需 `news_token_us` 辅助） |
-| 付费 | `stock_data_token` 有值 | ItickStockFetcher（A 股 + 美股 K 线/信息/盘口） |
+| 免费 | `stock_token_us/a` 为空 | TickFlow 免费 K 线 |
+| 注册 | `stock_token_us/a` 有值 | TickFlow K 线 + 盘中实时行情 |
 
-注：`data_source` 和 `paid_api_token` 字段已废弃，改为读取 `stock_data_token` 和 `news_token_us`。
+注：行情统一读取 `stock_token_us` / `stock_token_a`，新闻读取 `news_token_us`。
 
 ### 9.2 基本面数据
 
@@ -282,7 +282,8 @@ cache(24h) → API Provider → LLM 补充 → 历史缓存兜底
   "llm_base_url": "https://api.deepseek.com",
   "llm_api_key": "sk-...",
   "llm_model": "deepseek-v4-flash",
-  "stock_data_token": "",
+  "stock_token_us": "",
+  "stock_token_a": "",
   "news_token_us": "",
   "news_token_a": "",
   "proxy": ""
@@ -291,7 +292,7 @@ cache(24h) → API Provider → LLM 补充 → 历史缓存兜底
 
 | 配置项 | 说明 |
 |--------|------|
-| `stock_data_token` | itick API Token（付费，K线/信息/盘口） |
+| `stock_token_us/a` | TickFlow API Key（K线/盘中实时行情） |
 | `news_token_us` | Finnhub API Key（免费注册，美股搜索/信息/新闻/基本面） |
 | `news_token_a` | A 股额外新闻 Token（预留，如 Tushare） |
 | `proxy` | 代理地址（yfinance 等海外服务用） |
@@ -313,7 +314,7 @@ cache(24h) → API Provider → LLM 补充 → 历史缓存兜底
 
 ### 缓存策略
 
-- 股价：缓存存在 → 增量拉取（缓存最新日期次日 ~ today）；缓存为空 → 全量拉取。itick 按日期比较判断是否有新数据。
+- 股价：缓存存在 → 增量拉取（缓存最新日期次日 ~ today）；缓存为空 → 全量拉取。TickFlow 按日期比较判断是否有新数据。
 - 新闻：24h 内已分析 → 缓存命中
 - 新闻去重：启动时自动合并重复 (code, date, title)
 
@@ -373,7 +374,7 @@ cache(24h) → API Provider → LLM 补充 → 历史缓存兜底
 - 固定路径，不随 work_dir 变动
 
 #### 9. 数据源 Token 拆分
-`stock_data_token` 拆为 `stock_token_us`（美股）和 `stock_token_a`（A 股），`get_stock_fetcher(market)` 按市场选择。
+`get_stock_fetcher(market)` 按市场读取 `stock_token_us`（美股）或 `stock_token_a`（A 股），统一返回 TickFlow。
 
 #### 10. 跨平台打包
 PyInstaller + 内置 FinBERT 模型（`prepare_model.py` 从 HF 缓存导出）+ Mac/Win 构建脚本。
@@ -382,7 +383,7 @@ PyInstaller + 内置 FinBERT 模型（`prepare_model.py` 从 HF 缓存导出）+
 
 | 优先级 | 项目 | 说明 |
 |--------|------|------|
-| P0 | Massive 数据源接入 | 替代 itick，降低数据成本 |
+| P0 | 数据适配器完善 | 统一 TickFlow/yfinance 可用性检查和错误提示 |
 | P0 | 期货数据替代 | NQ/ES → QQQ/SPY ETF 盘前数据 |
 | P1 | A 股盘前/盘中 | 当前仅美股支持 |
 | P1 | 策略参数自动调优 | 基于回测绩效优化阈值 |
