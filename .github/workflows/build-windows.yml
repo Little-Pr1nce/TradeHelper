@@ -6,11 +6,6 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:   # 允许手动触发
-    inputs:
-      upload_release:
-        description: '上传到 Release（需要打 tag）'
-        type: boolean
-        default: false
 
 jobs:
   build:
@@ -21,10 +16,15 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 设置 Python 3.12
+      - name: 设置 Python 3.12 + UTF-8
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: 强制 UTF-8 编码
+        run: |
+          # 设置控制台编码为 UTF-8，避免中文输出报错
+          chcp 65001
+        shell: cmd
 
       - name: 安装依赖
         run: |
@@ -34,12 +34,26 @@ jobs:
           pip uninstall torch torchvision -y
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
+      - name: 验证所有关键模块可导入
+        run: |
+          python -c "import flet; print('flet OK')"
+          python -c "import tickflow; print('tickflow OK')"
+          python -c "import baostock; print('baostock OK')"
+          python -c "import httpx; print('httpx OK')"
+          python -c "import yfinance; print('yfinance OK')"
+          python -c "import akshare; print('akshare OK')"
+          python -c "import transformers; print('transformers OK')"
+          python -c "import torch; print('torch OK')"
+          python -c "import openai; print('openai OK')"
+          python -c "import mplfinance; print('mplfinance OK')"
+
       - name: 准备 FinBERT 模型
         run: python scripts/prepare_model.py
 
-      - name: PyInstaller 打包
+      - name: PyInstaller 打包（详细日志）
         run: |
-          python -m PyInstaller tradehelper.spec --distpath dist/win --workpath build/win --noconfirm
+          python -m PyInstaller tradehelper.spec --distpath dist/win --workpath build/win --noconfirm --log-level=INFO
+        shell: cmd
 
       - name: 验证输出
         run: |
@@ -48,6 +62,7 @@ jobs:
             Get-ChildItem dist/win/TradeHelper/TradeHelper.exe | ForEach-Object { Write-Host "大小: $([math]::Round($_.Length/1MB, 1)) MB" }
           } else {
             Write-Host "✗ 打包失败！"
+            Get-ChildItem dist/win/ -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -AutoSize
             exit 1
           }
 

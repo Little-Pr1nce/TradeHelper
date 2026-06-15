@@ -34,9 +34,12 @@ for _icon_file in ["controls/material/icons.json", "controls/cupertino/cupertino
 # tickflow/baostock 用 importlib.metadata 查版本，PyInstaller 需显式打包 METADATA
 from PyInstaller.utils.hooks import copy_metadata
 
-datas += copy_metadata('tickflow')
-datas += copy_metadata('baostock')
-datas += copy_metadata('httpx')
+# 逐个 try，避免某一个包没 metadata 就全局报错
+for _pkg in ('tickflow', 'baostock', 'httpx', 'h11', 'httpcore', 'anyio'):
+    try:
+        datas += copy_metadata(_pkg)
+    except Exception:
+        pass  # 部分包 Windows 上结构不同，忽略即可
 
 # ── 隐藏导入（transformers/torch 等大型库需显式声明） ──
 hiddenimports = [
@@ -83,6 +86,13 @@ hiddenimports = [
     "packaging",
     "dateutil",
     "tqdm",
+    "sentencepiece",          # transformers 可能用到
+    "safetensors",            # 模型加载
+    "json",                   # tickflow 用
+    "httpcore",               # httpx 依赖
+    "h11",                    # httpcore 依赖
+    "anyio",                  # httpx 依赖
+    "asyncio",                # httpx 依赖
 ]
 
 a = Analysis(
