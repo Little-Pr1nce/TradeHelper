@@ -67,10 +67,7 @@ def _verify(path: Path):
     """验证模型文件完整性。"""
     required = ["config.json", "tokenizer_config.json"]
     missing = [f for f in required if not (path / f).exists()]
-<<<<<<< HEAD
-=======
     # model.safetensors 或 pytorch_model.bin 至少一个
->>>>>>> 62d8fe7b10a293cb49f5be2c144a4606910282ca
     has_weights = (path / "model.safetensors").exists() or (path / "pytorch_model.bin").exists()
     has_tokenizer = (path / "tokenizer.json").exists() or (path / "vocab.json").exists()
     if not has_weights:
