@@ -13,6 +13,10 @@ import shutil
 import sys
 from pathlib import Path
 
+# Windows 控制台 UTF-8 支持（GitHub Actions 默认 cp1252）
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 MODEL_ID = "mrm8488/distilroberta-finetuned-financial-news-sentiment-analysis"
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "dist_data" / "finbert_model"
 
