@@ -207,33 +207,41 @@ class AnalysisService:
                 tick = fetcher.fetch_stock_tick(code) if hasattr(fetcher, 'fetch_stock_tick') else None
                 quote = fetcher.fetch_quote(code) if hasattr(fetcher, 'fetch_quote') else None
 
-                # 美股盘后/盘前：TickFlow 不支持延伸交易时段，用 yfinance 补充
-                if request.market == "US":
+                # 检测当前交易时段
+                # 美股：只有盘中（regular hours）用 TickFlow 实时数据，
+                # 盘前/盘后/休市都用 yfinance（TickFlow 不支持延伸时段）
+                session = detect_session(request.market, stock_tick=tick, stock_quote=quote)
+                use_yfinance = request.market == "US" and session != "intraday"
+
+                # 美股盘前/盘后：TickFlow 不支持延伸时段，用 yfinance
+                if use_yfinance:
                     try:
                         yf_data = _fetch_premarket_from_yfinance(code)
                         if yf_data:
-                            q_latest = yf_data["price"]
                             q_prev = float(pipeline_result.df["close"].iloc[-1]) if "close" in pipeline_result.df.columns else 0
-                            q_change_pct = (q_latest - q_prev) / q_prev if q_prev > 0 else 0.0
                             realtime_quote = {
-                                "latest": q_latest,
+                                "latest": yf_data["price"],
                                 "open": yf_data["open"],
                                 "high": yf_data["high"],
                                 "low": yf_data["low"],
                                 "prev_close": q_prev,
-                                "change": q_latest - q_prev,
-                                "change_pct": round(q_change_pct, 6),
+                                "change": yf_data["price"] - q_prev,
+                                "change_pct": round((yf_data["price"] - q_prev) / q_prev, 6) if q_prev > 0 else 0.0,
                                 "volume": yf_data["volume"],
                                 "amount": 0,
                                 "timestamp": yf_data["timestamp"],
                                 "status": 0,
                                 "vwap": 0,
                             }
-                            logger.info(f"yfinance 实时报价 ({code}): {q_latest:.2f} ({q_change_pct:+.2%})")
+                            logger.info(f"yfinance 延伸时段报价 ({code}): {yf_data['price']:.2f}")
+                        else:
+                            logger.warning(f"yfinance 延伸时段数据为空 ({code})")
+                            _progress("⚠️ yfinance 盘前/盘后数据不可用，涨跌幅/成交量可能为 0")
                     except Exception as e:
-                        logger.warning(f"yfinance 实时报价补充失败: {e}")
+                        logger.warning(f"yfinance 延伸时段报价失败 ({code}): {e}")
+                        _progress("⚠️ yfinance 盘前/盘后数据不可用，涨跌幅/成交量可能为 0")
 
-                # 非美股 或 yfinance 没拿到 → 用 TickFlow 数据
+                # 盘中/非美股 → 用 TickFlow（实时）
                 if realtime_quote is None and tick:
                     q_latest = tick.get("latest", 0)
                     q_prev = float(pipeline_result.df["close"].iloc[-1]) if "close" in pipeline_result.df.columns else 0
@@ -252,6 +260,7 @@ class AnalysisService:
                         "status": 0,
                         "vwap": quote.get("vwap", 0) if quote else 0,
                     }
+                    logger.info(f"TickFlow 实时报价 ({code}): {q_latest:.2f} ({q_change_pct:+.2%})")
                 elif realtime_quote is None and quote:
                     realtime_quote = quote
             except Exception as e:
@@ -822,8 +831,12 @@ class AnalysisService:
                         "status": 0,
                     }
                     logger.info(f"yfinance 盘前价格: {code}={pre_data['price']:.2f}")
+                else:
+                    logger.warning(f"yfinance 盘前数据为空 ({code})")
+                    _progress("⚠️ yfinance 盘前数据不可用，成交量/价格可能不准确")
             except Exception as e:
                 logger.warning(f"yfinance 盘前价格获取失败 ({code}): {e}")
+                _progress("⚠️ yfinance 盘前数据获取失败，成交量/价格可能不准确")
 
             # ── QQQ/SPY 盘前价格同步用 yfinance ──
             try:

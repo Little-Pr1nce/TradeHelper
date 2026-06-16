@@ -366,8 +366,9 @@ class TickFlowFetcher(BaseStockFetcher):
         实时成交数据。
 
         TickFlow 无独立 tick 接口（无 te 交易时段标识），
-        用 quote 最新价模拟，trading_phase 固定为 0。
-        实际交易时段由 session.py 本地时间推断兜底。
+        用 quote 最新价模拟。
+        不设置 trading_phase，交由 detect_session() 用 timestamp
+        或本地时间推断实际交易时段。
         """
         quote = self.fetch_quote(code)
         if not quote:
@@ -376,7 +377,6 @@ class TickFlowFetcher(BaseStockFetcher):
             "latest": quote["latest"],
             "volume": quote["volume"],
             "timestamp": quote["timestamp"],
-            "trading_phase": 0,
         }
 
     # ── fetch_future_quote（ETF 替代方案） ──
