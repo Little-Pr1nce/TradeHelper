@@ -141,24 +141,40 @@ def _retry(func: Callable[[], T], max_retries=3, label="") -> T:
 
 
 def fetch_us_extended_quote(code: str) -> dict | None:
-    """用 yfinance 获取美股盘前/盘后延伸时段价格。"""
+    """用 yfinance 获取美股盘前/盘后延伸时段价格。
+
+    使用 period=\"5d\" 而非 \"1d\"，以兼容凌晨时段（美东 00:00-04:00）
+    「今天」尚未开盘导致 yfinance 返回空 DataFrame 的边界情况。
+    """
     try:
         import yfinance as yf
 
         _apply_proxy()
         ticker = yf.Ticker(code.upper())
-        hist = ticker.history(period="1d", interval="1m", prepost=True)
+        hist = ticker.history(period="5d", interval="1m", prepost=True)
         if hist is None or hist.empty:
             return None
 
+        # 取最近一个有数据的交易日的 1 分钟 bar
         hist_with_vol = hist[hist["Volume"] > 0]
-        last = hist_with_vol.iloc[-1] if not hist_with_vol.empty else hist.iloc[-1]
-        price = float(last["Close"])
-        volume = int(hist["Volume"].sum())
-        day_open = float(hist.iloc[0]["Open"])
-        day_high = float(hist["High"].max())
-        day_low = float(hist["Low"].min())
+        if hist_with_vol.empty:
+            return None
 
+        latest_bar = hist_with_vol.iloc[-1]
+        latest_day = latest_bar.name.date() if hasattr(latest_bar.name, "date") else None
+        if latest_day:
+            day_mask = hist.index.date == latest_day
+            day_hist = hist[day_mask]
+        else:
+            day_hist = hist
+
+        price = float(latest_bar["Close"])
+        volume = int(day_hist["Volume"].sum())
+        day_open = float(day_hist.iloc[0]["Open"])
+        day_high = float(day_hist["High"].max())
+        day_low = float(day_hist["Low"].min())
+
+        # 前收盘：最近有数据的那天之前一个交易日的收盘价
         prev_close = 0.0
         try:
             prev_hist = ticker.history(period="5d")
@@ -168,7 +184,7 @@ def fetch_us_extended_quote(code: str) -> dict | None:
             pass
 
         change_pct = (price - prev_close) / prev_close if prev_close > 0 else 0.0
-        ts = int(last.name.timestamp() * 1000) if hasattr(last, "name") else 0
+        ts = int(latest_bar.name.timestamp() * 1000) if hasattr(latest_bar, "name") else 0
         return {
             "code": code.upper(),
             "latest": round(price, 2),

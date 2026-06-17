@@ -34,10 +34,12 @@ SYSTEM_PROMPT = """你是一个专业的量化分析师。请基于下面提供�
 2. **Alpha 因子分析** — 基于多因子打分模型（技术面 60% + 新闻面 40%）的综合得分，解读当前市场状态
 3. **因子有效性检验** — 如果提供了各因子 IC/IR 评级表格，必须在报告中展示并解读（哪些因子有效、哪些被剔除）
 4. **基本面与估值** — 如果提供了 PE/PB 分位、ROE、毛利率等数据，必须在报告中展示
-5. **技术面分析** — 基于提供的技术指标数据做分析
-6. **新闻面分析** — 基于新闻情感分析结果评估市场情绪。你必须先逐条列出所有重点新闻，每条包含标题、内容摘要（如有）、出处和情感标签，然后再给出整体的情绪评估结论。
-7. **策略回测结果** — 三种交易策略的横向对比，包括各策略的收益率、夏普比率、最大回撤等核心指标
-8. **综合建议与短期预测（AI分析）** — 这是报告中最重要的部分。你必须交叉印证上面所有数据（因子得分、IC/IR 检验、基本面估值、技术指标、新闻情绪、回测绩效、Rank IC、基准收益、**盘口买卖比**、**实时报价**等），给出：
+5. **SWOT 竞争分析** — 基于财务数据和近期新闻，从优势(Strengths)、劣势(Weaknesses)、机会(Opportunities)、威胁(Threats)四个维度分析公司当前竞争力。**必须严格基于我提供的 SWOT 素材数据**，不可使用训练数据中的旧知识编造。如果某维度数据不足，标注「数据不足，无法判断」。
+6. **技术面分析** — 基于提供的技术指标数据做分析
+7. **新闻面分析** — 基于新闻情感分析结果评估市场情绪。你必须先逐条列出所有重点新闻，每条包含标题、内容摘要（如有）、出处和情感标签，然后再给出整体的情绪评估结论。
+8. **策略回测结果** — 三种交易策略的横向对比，包括各策略的收益率、夏普比率、最大回撤等核心指标
+9. **同板块关注** — 基于同板块标的的 Alpha 快速评分，给出横向对比排名和板块整体判断。如果提供了同板块数据，必须在报告中用 Markdown 表格逐条展示，不得省略任何标的。
+10. **综合建议与短期预测（AI分析）** — 这是报告中最重要的部分。你必须交叉印证上面所有数据（因子得分、IC/IR 检验、基本面估值、SWOT 分析、技术指标、新闻情绪、回测绩效、同板块对比、Rank IC、基准收益、**盘口买卖比**、**实时报价**等），给出：
    8.1) **数据综合分析**：从多个维度交叉验证当前市场状态。你必须按以下格式输出：
 
       **多维信号交叉表**（必须用 Markdown 表格呈现）：
@@ -101,12 +103,89 @@ def build_user_prompt(
     alpha_text: str,
     data_range: str = "",
     extra_sections: str = "",
+    swot_data: dict | None = None,
+    peer_data: list[dict] | None = None,
 ) -> str:
     """构建 LLM user prompt（将各模块数据拼接为自然语言输入）。"""
     name = stock_info.get("name", "")
     code = stock_info.get("code", "")
     news_text = news_aggregation.get("summary", "")
     top_news = news_aggregation.get("top_news", "")
+
+    # ── SWOT 素材段 ──
+    swot_section = ""
+    if swot_data:
+        fin = swot_data.get("financial", {})
+        val = swot_data.get("valuation", {})
+        swot_lines = [
+            "## SWOT 分析素材（严格基于以下数据，不可编造）",
+            "",
+            f"- 公司名称：{swot_data.get('company_name', name)}",
+            f"- 所属行业：{swot_data.get('industry', '未分类')}",
+            f"- 当前行情：{swot_data.get('market_regime', 'unknown')}",
+            "",
+            "【财务数据】",
+            f"- ROE：{fin.get('roe', 0):.1%}",
+            f"- 毛利率：{fin.get('gross_margin', 0):.1%}",
+            f"- 资产负债率：{fin.get('debt_ratio', 0):.1%}",
+            f"- 净利润同比增速：{fin.get('net_profit_yoy', 0):+.1%}",
+            f"- 营收同比增速：{fin.get('revenue_yoy', 0):+.1%}",
+            "",
+            "【估值数据】",
+            f"- PE(TTM) 3年历史分位：{val.get('pe_percentile', 0.5):.1%}",
+            f"- PB 3年历史分位：{val.get('pb_percentile', 0.5):.1%}",
+            "",
+        ]
+        # 新闻摘要
+        news_list = swot_data.get("news", [])
+        if news_list:
+            swot_lines.append("【近期新闻摘要】")
+            for i, n in enumerate(news_list, 1):
+                swot_lines.append(f"{i}. {n}")
+            swot_lines.append("")
+        else:
+            swot_lines.extend(["【近期新闻摘要】", "（暂无最新新闻数据）", ""])
+
+        swot_lines.extend([
+            "**SWOT 分析要求**：",
+            "- S（优势）/ W（劣势）：仅基于上述财务和估值数据推导",
+            "- O（机会）/ T（威胁）：仅基于上述新闻摘要推导",
+            "- 不要使用训练数据中的旧行业知识（如护城河、管理层评价等）",
+            "- 如果某维度缺乏足够信息，请标注「数据不足，无法判断」",
+            "- 输出格式：Markdown 表格，四列分别为「维度」「要素」「数据支撑」「置信度」",
+            "",
+        ])
+        swot_section = "\n".join(swot_lines)
+
+    # ── 同板块段 ──
+    peer_section = ""
+    if peer_data:
+        peer_lines = [
+            "## 同板块 Alpha 快速评分",
+            "",
+            "以下为同行业/同类股票的简化版 Alpha 评分（仅技术面，不含新闻和基本面），按 Final_Score 降序排列：",
+            "",
+            "| 排名 | 代码 | 名称 | Final_Score | 行情状态 | 关注建议 |",
+            "|------|------|------|-------------|----------|----------|",
+        ]
+        for r in peer_data:
+            peer_lines.append(
+                f"| {r.get('rank', '-')} | {r.get('code', '')} "
+                f"| {r.get('name', r.get('code', ''))} "
+                f"| {r.get('final_score', 0):+.3f} "
+                f"| {r.get('regime', 'unknown')} "
+                f"| {r.get('verdict', '-')} |"
+            )
+        peer_lines.extend([
+            "",
+            "**同板块分析要求**：",
+            "- 用上述数据生成「九、同板块关注」章节",
+            "- 必须逐条展示所有标的（Markdown 表格），不得省略",
+            "- 表格下方写一段板块整体判断（2-3 句话）",
+            "- 标注与当前分析标的（即本报告主体）的对比",
+            "",
+        ])
+        peer_section = "\n".join(peer_lines)
 
     return f"""请用中文分析以下股票 {name}({code})：
 
@@ -134,6 +213,8 @@ def build_user_prompt(
 {top_news}
 
 {extra_sections}
+{swot_section}
+{peer_section}
 ## 三策略回测对比
 {bt_summary}
 
@@ -239,6 +320,18 @@ INTRADAY_SYSTEM_PROMPT = """你是一个专业的量化分析师，正在为一�
 - 需密切观察的关键变量（如盘中是否收复 MA5、盘口是否回暖、量比是否上升）
 - 矛盾情景分析：如果盘中与 T-1 判断冲突，给出两种演变路径
 - **盘前预测验证**：如果提供了盘前预测验证数据（三时段联动），必须解读盘前预测的准确性——预测正确则增强当前判断的置信度，预测偏差则分析可能原因（是宏观情绪变化、个股独立事件、还是盘前流动性不足导致的价格跳变）
+
+## 补充章节（可选）
+
+如果用户 prompt 中提供了「补充：SWOT 竞争分析素材」或「补充：同板块 Alpha 快速评分」数据段，则在第八章之后额外输出：
+
+**九、SWOT 竞争分析**（仅当有 SWOT 素材时）：
+- 严格基于提供的财务数据和新闻摘要输出 SWOT 四象限表格
+- 禁止使用训练数据中的旧知识，数据不足标注「数据不足」
+
+**十、同板块关注**（仅当有同板块数据时）：
+- 用 Markdown 表格逐条展示所有同板块标的
+- 表格下方写 2-3 句板块整体判断
 """
 
 
@@ -246,6 +339,8 @@ def build_intraday_user_prompt(
     t1_report_content: str,
     snapshot_text: str,
     stock_info: dict,
+    swot_data: dict | None = None,
+    peer_data: list[dict] | None = None,
 ) -> str:
     """构建盘中分析的 LLM user prompt。
 
@@ -253,9 +348,50 @@ def build_intraday_user_prompt(
         t1_report_content: T-1 日完整报告的全文（第 1-7 章）
         snapshot_text:     盘中实时快照的 Markdown 文本
         stock_info:        股票基本信息字典
+        swot_data:         实时 SWOT 素材（可选）
+        peer_data:         同板块快速评分（可选）
     """
     name = stock_info.get("name", "")
     code = stock_info.get("code", "")
+
+    # ── 补充分析段 ──
+    supplement_parts: list[str] = []
+
+    if swot_data:
+        fin = swot_data.get("financial", {})
+        val = swot_data.get("valuation", {})
+        news_list = swot_data.get("news", [])
+        swot_lines = [
+            "",
+            "## 补充：SWOT 竞争分析素材",
+            f"- 行业：{swot_data.get('industry', '未分类')}",
+            f"- ROE：{fin.get('roe', 0):.1%} | 毛利率：{fin.get('gross_margin', 0):.1%}",
+            f"- 净利润同比：{fin.get('net_profit_yoy', 0):+.1%} | 营收同比：{fin.get('revenue_yoy', 0):+.1%}",
+            f"- PE 分位：{val.get('pe_percentile', 0.5):.1%} | PB 分位：{val.get('pb_percentile', 0.5):.1%}",
+        ]
+        if news_list:
+            swot_lines.append("- 近期新闻：" + "；".join(news_list[:3]))
+        swot_lines.append("（严格基于上述数据推导 SWOT，数据不足标注「数据不足」）")
+        supplement_parts.append("\n".join(swot_lines))
+
+    if peer_data:
+        peer_lines = [
+            "",
+            "## 补充：同板块 Alpha 快速评分",
+            "| 排名 | 代码 | Final_Score | 行情 | 建议 |",
+            "|------|------|-------------|------|------|",
+        ]
+        for r in peer_data[:8]:
+            peer_lines.append(
+                f"| {r.get('rank', '-')} | {r['code']} "
+                f"| {r.get('final_score', 0):+.3f} "
+                f"| {r.get('regime', '?')} "
+                f"| {r.get('verdict', '-')} |"
+            )
+        peer_lines.append("（基于以上数据生成同板块关注段落，逐条展示）")
+        supplement_parts.append("\n".join(peer_lines))
+
+    supplement = "\n".join(supplement_parts)
 
     return f"""请基于以下数据，为 {name}({code}) 生成盘中分析报告的第八章「盘中操作参考」。
 
@@ -267,11 +403,16 @@ def build_intraday_user_prompt(
 
 {snapshot_text}
 
+{supplement}
+
 ---
 
 ## 你的任务
 
 仅输出 **## 八、盘中操作参考（AI实时分析）** 这一章。
+如果提供了补充分析素材，在第八章之后还需输出：
+- **## 九、SWOT 竞争分析**（仅当提供了 SWOT 素材时）
+- **## 十、同板块关注**（仅当提供了同板块数据时）
 
 **核心分析框架**：T-1 日报告提供了经过严谨计算的 Alpha 得分、技术指标、回测结果——这是判断中长期方向的锚。盘中快照提供了实时价格位置和盘口数据——这是判断短期进出时机的关键。你的工作是**将两者交叉验证**，给出有数据支撑的盘中操作参考。
 
@@ -395,6 +536,18 @@ PREMARKET_SYSTEM_PROMPT = """你是一个专业的量化分析师，正在为一
 - **策略风格建议**：基于 T-1 回测绩效+盘前信号的综合判断
 - **仓位建议**：轻仓/中等/重仓+理由
 - **核心纪律**：2-3 条必须遵守的操作纪律
+
+## 补充章节（可选）
+
+如果用户 prompt 中提供了「补充：SWOT 竞争分析素材」或「补充：同板块 Alpha 快速评分」数据段，则在第八章之后额外输出：
+
+**九、SWOT 竞争分析**（仅当有 SWOT 素材时）：
+- 严格基于提供的财务数据和新闻摘要输出 SWOT 四象限表格
+- 禁止使用训练数据中的旧知识，数据不足标注「数据不足」
+
+**十、同板块关注**（仅当有同板块数据时）：
+- 用 Markdown 表格逐条展示所有同板块标的
+- 表格下方写 2-3 句板块整体判断，结合盘前宏观情绪给出开盘关注建议
 """
 
 
@@ -402,6 +555,8 @@ def build_premarket_user_prompt(
     t1_report_content: str,
     snapshot_text: str,
     stock_info: dict,
+    swot_data: dict | None = None,
+    peer_data: list[dict] | None = None,
 ) -> str:
     """构建盘前分析的 LLM user prompt。
 
@@ -409,9 +564,50 @@ def build_premarket_user_prompt(
         t1_report_content: T-1 日完整报告的全文（第 1-7 章）
         snapshot_text:     盘前快照的 Markdown 文本
         stock_info:        股票基本信息字典
+        swot_data:         实时 SWOT 素材（可选）
+        peer_data:         同板块快速评分（可选）
     """
     name = stock_info.get("name", "")
     code = stock_info.get("code", "")
+
+    # ── 补充分析段 ──
+    supplement_parts: list[str] = []
+
+    if swot_data:
+        fin = swot_data.get("financial", {})
+        val = swot_data.get("valuation", {})
+        news_list = swot_data.get("news", [])
+        swot_lines = [
+            "",
+            "## 补充：SWOT 竞争分析素材",
+            f"- 行业：{swot_data.get('industry', '未分类')}",
+            f"- ROE：{fin.get('roe', 0):.1%} | 毛利率：{fin.get('gross_margin', 0):.1%}",
+            f"- 净利润同比：{fin.get('net_profit_yoy', 0):+.1%} | 营收同比：{fin.get('revenue_yoy', 0):+.1%}",
+            f"- PE 分位：{val.get('pe_percentile', 0.5):.1%} | PB 分位：{val.get('pb_percentile', 0.5):.1%}",
+        ]
+        if news_list:
+            swot_lines.append("- 近期新闻：" + "；".join(news_list[:3]))
+        swot_lines.append("（严格基于上述数据推导 SWOT，数据不足标注「数据不足」）")
+        supplement_parts.append("\n".join(swot_lines))
+
+    if peer_data:
+        peer_lines = [
+            "",
+            "## 补充：同板块 Alpha 快速评分",
+            "| 排名 | 代码 | Final_Score | 行情 | 建议 |",
+            "|------|------|-------------|------|------|",
+        ]
+        for r in peer_data[:8]:
+            peer_lines.append(
+                f"| {r.get('rank', '-')} | {r['code']} "
+                f"| {r.get('final_score', 0):+.3f} "
+                f"| {r.get('regime', '?')} "
+                f"| {r.get('verdict', '-')} |"
+            )
+        peer_lines.append("（基于以上数据生成同板块关注段落，逐条展示，结合盘前情绪给出今日关注建议）")
+        supplement_parts.append("\n".join(peer_lines))
+
+    supplement = "\n".join(supplement_parts)
 
     return f"""请基于以下数据，为 {name}({code}) 生成盘前分析报告的第八章「盘前策略参考」。
 
@@ -423,11 +619,16 @@ def build_premarket_user_prompt(
 
 {snapshot_text}
 
+{supplement}
+
 ---
 
 ## 你的任务
 
 仅输出 **## 八、盘前策略参考（AI分析）** 这一章。
+如果提供了补充分析素材，在第八章之后还需输出：
+- **## 九、SWOT 竞争分析**（仅当提供了 SWOT 素材时）
+- **## 十、同板块关注**（仅当提供了同板块数据时）
 
 **核心分析框架**：盘前分析的独特之处在于——K 线还没有走出来，你需要在信息不完整的情况下做情景推演。T-1 日报告提供了中长期趋势框架，期货和盘前数据提供了短期方向线索。你的工作是**把两者结合，推演三种开盘情景并给出具体应对预案**。
 

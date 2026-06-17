@@ -107,6 +107,8 @@ def generate_report(
     active_strategies: list | None = None,
     skipped_strategies: list | None = None,
     param_tuning: dict | None = None,
+    swot_data: dict | None = None,
+    peer_data: list[dict] | None = None,
 ) -> str:
     """
     生成完整分析报告。market_regime 等回测元信息会体现在报告中。
@@ -236,6 +238,8 @@ def generate_report(
     user_prompt = build_user_prompt(
         stock_info, technical_summary, news_aggregation,
         bt_summary, bt_table, alpha_text, data_info, extra,
+        swot_data=swot_data,
+        peer_data=peer_data,
     )
 
     full_prompt = SYSTEM_PROMPT + "\n\n" + user_prompt
@@ -655,6 +659,8 @@ def generate_intraday_report(
     t1_report_content: str,
     snapshot_text: str,
     stock_info: dict,
+    swot_data: dict | None = None,
+    peer_data: list[dict] | None = None,
 ) -> str:
     """
     生成盘中分析报告。
@@ -663,14 +669,15 @@ def generate_intraday_report(
       ⚡ 盘中实时快照（纯计算，已格式化）
       → T-1 日报告第 1-7 章（复用）
       → 第八章：盘中操作参考（LLM 重新生成）
+      → 第九章：SWOT 竞争分析（可选，如有补充数据）
+      → 第十章：同板块关注（可选，如有补充数据）
 
     Args:
         t1_report_content: T-1 日完整报告的 Markdown 全文
         snapshot_text:     compute_intraday_snapshot() 返回的 Markdown 文本
         stock_info:        股票基本信息字典
-
-    Returns:
-        完整的盘中分析报告 Markdown 文本
+        swot_data:         实时 SWOT 素材（可选）
+        peer_data:         同板块快速评分（可选）
     """
     name = stock_info.get("name", "")
     code = stock_info.get("code", "")
@@ -690,7 +697,10 @@ def generate_intraday_report(
         try:
             from openai import OpenAI
             client = OpenAI(api_key=api_key, base_url=base_url, timeout=300.0)
-            user_prompt = build_intraday_user_prompt(t1_report_content, snapshot_text, stock_info)
+            user_prompt = build_intraday_user_prompt(
+                t1_report_content, snapshot_text, stock_info,
+                swot_data=swot_data, peer_data=peer_data,
+            )
             logger.info(f"调用 LLM 生成盘中操作参考: model={model}")
             response = client.chat.completions.create(
                 model=model,
@@ -777,6 +787,8 @@ def generate_premarket_report(
     t1_report_content: str,
     snapshot_text: str,
     stock_info: dict,
+    swot_data: dict | None = None,
+    peer_data: list[dict] | None = None,
 ) -> str:
     """
     生成盘前分析报告。
@@ -785,14 +797,15 @@ def generate_premarket_report(
       ⚡ 盘前快照（期货 + 盘前价格 + 隔夜新闻）
       → T-1 日报告第 1-7 章（复用）
       → 第八章：盘前策略参考（LLM 重新生成）
+      → 第九章：SWOT 竞争分析（可选）
+      → 第十章：同板块关注（可选）
 
     Args:
         t1_report_content: T-1 日完整报告的 Markdown 全文
         snapshot_text:     compute_premarket_snapshot() 返回的 Markdown 文本
         stock_info:        股票基本信息字典
-
-    Returns:
-        完整的盘前分析报告 Markdown 文本
+        swot_data:         实时 SWOT 素材（可选）
+        peer_data:         同板块快速评分（可选）
     """
     name = stock_info.get("name", "")
     code = stock_info.get("code", "")
@@ -812,7 +825,10 @@ def generate_premarket_report(
         try:
             from openai import OpenAI
             client = OpenAI(api_key=api_key, base_url=base_url, timeout=300.0)
-            user_prompt = build_premarket_user_prompt(t1_report_content, snapshot_text, stock_info)
+            user_prompt = build_premarket_user_prompt(
+                t1_report_content, snapshot_text, stock_info,
+                swot_data=swot_data, peer_data=peer_data,
+            )
             logger.info(f"调用 LLM 生成盘前策略参考: model={model}")
             response = client.chat.completions.create(
                 model=model,

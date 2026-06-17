@@ -76,7 +76,7 @@ def run_pipeline(
         AnalysisResult 包含全部计算结果
     """
     if strategy_names is None:
-        strategy_names = ["A", "B", "C", "D", "E", "F", "G"]
+        strategy_names = ["A", "B", "C", "D", "E", "F", "G", "H"]
 
     logger.info("=" * 50)
     logger.info(f"管道启动: {len(df)} 条K线, 市场={market}, 策略={strategy_names}")

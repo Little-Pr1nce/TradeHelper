@@ -206,3 +206,31 @@ def fetch_basic_metrics(token: str, code: str) -> dict | None:
     except Exception as e:
         logger.warning(f"Finnhub metric 失败 ({code}): {e}")
         return None
+
+
+# ── 同类股票 / 竞争对手 ──
+
+
+def fetch_peers(token: str, code: str) -> list[str]:
+    """
+    GET /stock/peers → 同类股票代码列表。
+
+    免费档可用，60 次/分钟。
+
+    Args:
+        token: Finnhub API Key
+        code:  美股代码（如 AMD）
+
+    Returns:
+        同类股票代码列表（含自身），如 ['NVDA', 'AVGO', 'AMD', ...]
+    """
+    try:
+        data = _get(token, "/stock/peers", {"symbol": code.upper()})
+        if isinstance(data, list):
+            logger.info(f"Finnhub peers: {code} → {len(data)} 只同类股")
+            return data
+        logger.warning(f"Finnhub /stock/peers 返回非列表: {type(data).__name__}")
+        return []
+    except Exception as e:
+        logger.warning(f"Finnhub /stock/peers 失败 ({code}): {e}")
+        return []
