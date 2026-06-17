@@ -155,20 +155,20 @@ def fetch_us_extended_quote(code: str) -> dict | None:
         if hist is None or hist.empty:
             return None
 
-        # 取最近一个有数据的交易日的 1 分钟 bar
+        # 价格取最新 bar（含无成交量的盘前/盘后报价）
+        # 当日统计（开/高/低/量）取最新 bar 所在日的数据
         hist_with_vol = hist[hist["Volume"] > 0]
-        if hist_with_vol.empty:
-            return None
+        price_bar = hist.iloc[-1]           # 最新价格（不含成交量过滤）
+        price = float(price_bar["Close"])
 
-        latest_bar = hist_with_vol.iloc[-1]
-        latest_day = latest_bar.name.date() if hasattr(latest_bar.name, "date") else None
+        # 确定当日数据范围
+        latest_day = price_bar.name.date() if hasattr(price_bar.name, "date") else None
         if latest_day:
             day_mask = hist.index.date == latest_day
             day_hist = hist[day_mask]
         else:
             day_hist = hist
 
-        price = float(latest_bar["Close"])
         volume = int(day_hist["Volume"].sum())
         day_open = float(day_hist.iloc[0]["Open"])
         day_high = float(day_hist["High"].max())
@@ -184,7 +184,7 @@ def fetch_us_extended_quote(code: str) -> dict | None:
             pass
 
         change_pct = (price - prev_close) / prev_close if prev_close > 0 else 0.0
-        ts = int(latest_bar.name.timestamp() * 1000) if hasattr(latest_bar, "name") else 0
+        ts = int(price_bar.name.timestamp() * 1000) if hasattr(price_bar, "name") else 0
         return {
             "code": code.upper(),
             "latest": round(price, 2),

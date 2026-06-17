@@ -99,7 +99,7 @@ class PortfolioService:
 
             df = pd.DataFrame([p.to_dict() for p in prices])
             df["date"] = pd.to_datetime(df["date"])
-            result = run_pipeline(df, news_df=None, market=market, w_tech=1.0, w_news=0.0)
+            result = run_pipeline(df, news_df=None, market=market, w_tech=1.0, w_news=0.0, skip_param_tuning=True)
             latest_score = 0.0
             if "Final_Score" in result.df.columns and not result.df["Final_Score"].dropna().empty:
                 latest_score = float(result.df["Final_Score"].dropna().iloc[-1])

@@ -218,7 +218,16 @@ class AnalysisService:
                     try:
                         yf_data = _fetch_premarket_from_yfinance(code)
                         if yf_data:
-                            q_prev = float(pipeline_result.df["close"].iloc[-1]) if "close" in pipeline_result.df.columns else 0
+                            # 优先用 yfinance 自带的 prev_close（每日数据），
+                            # 其次用 pipeline K 线最后一条收盘价（可能滞后）
+                            q_prev = (
+                                yf_data.get("prev_close", 0)
+                                or (
+                                    float(pipeline_result.df["close"].iloc[-1])
+                                    if "close" in pipeline_result.df.columns
+                                    else 0
+                                )
+                            )
                             realtime_quote = {
                                 "latest": yf_data["price"],
                                 "open": yf_data["open"],
@@ -233,7 +242,7 @@ class AnalysisService:
                                 "status": 0,
                                 "vwap": 0,
                             }
-                            logger.info(f"yfinance 延伸时段报价 ({code}): {yf_data['price']:.2f}")
+                            logger.info(f"yfinance 延伸时段报价 ({code}): {yf_data['price']:.2f} ({realtime_quote['change_pct']:+.4%})")
                         else:
                             logger.warning(f"yfinance 延伸时段数据为空 ({code})")
                             _progress("⚠️ yfinance 盘前/盘后数据不可用，涨跌幅/成交量可能为 0")
@@ -682,6 +691,7 @@ class AnalysisService:
                 peer_result = run_pipeline(
                     df, news_df=None, market=request.market,
                     w_tech=1.0, w_news=0.0,
+                    skip_param_tuning=True,
                 )
 
                 latest_score = 0.0

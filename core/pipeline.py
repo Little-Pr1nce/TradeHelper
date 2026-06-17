@@ -51,6 +51,7 @@ def run_pipeline(
     validation_mode: str = "eod",
     depth_score: float = 0.0,
     depth_available: bool = False,
+    skip_param_tuning: bool = False,
 ):
     """
     执行完整的量化分析计算管道（纯计算，无 I/O）。
@@ -60,7 +61,8 @@ def run_pipeline(
       │ ① 预计算 7 个技术指标（MA/MACD/RSI/布林/KDJ）    │
       │ ② Alpha 多因子打分（Z-Score + tanh + 加权合成）  │
       │ ③ Rank IC 计算（因子有效性检验）                 │
-      │ ④ 三策略并行回测（A/B/C，T+1 撮合）              │
+      │ ④ 多策略并行回测（T+1 撮合）                    │
+      │ ⑤ 策略参数扫参调优（可选，skip_param_tuning=True 跳过）│
       └──────────────────────────────────────────────┘
 
     Args:
@@ -71,6 +73,7 @@ def run_pipeline(
         strategy_names: 策略列表，默认 ["A", "B", "C"]
         w_tech: 技术面权重
         w_news: 新闻面权重
+        skip_param_tuning: True 时跳过⑤参数扫参调优（如：同板块快速分析）
 
     Returns:
         AnalysisResult 包含全部计算结果
@@ -169,33 +172,34 @@ def run_pipeline(
 
     # ---- ⑥ 参数扫参调优 ----
     param_tuning = {}
-    logger.info("  [管道 5/5] 策略参数扫参调优...")
-    for name in active_strategy_keys:
-        base = get_execution_strategy(name)
-        tunable = base.tunable_params()
-        if not tunable:
-            continue
-        # 只调第一个参数
-        p = tunable[0]
-        best_val = p["default"]
-        best_score = -999.0
-        for val in p["values"]:
-            kwargs = {p["name"]: val}
-            s = get_execution_strategy(name, **kwargs)
-            test_result = engine.run(df.copy(), s, news_df)
-            score = test_result.sharpe_ratio if test_result.total_trades > 0 else -999.0
-            if score > best_score:
-                best_score = score
-                best_val = val
-        param_tuning[name] = {
-            "param": p["name"], "default": p["default"],
-            "best_value": best_val,
-            "default_sharpe": results.get(base.name, results.get(name, None)),
-        }
-        default_r = results.get(base.name)
-        best_str = (f"默认 entry={p['default']:.2f} → {default_r.total_return*100:+.1f}%/{default_r.sharpe_ratio:.2f}"
-                    if default_r else f"默认 entry={p['default']:.2f}")
-        logger.info(f"  [调优] {name}: {best_str} | 最优 entry={best_val:.2f} → 夏普={best_score:.2f}")
+    if not skip_param_tuning:
+        logger.info("  [管道 5/5] 策略参数扫参调优...")
+        for name in active_strategy_keys:
+            base = get_execution_strategy(name)
+            tunable = base.tunable_params()
+            if not tunable:
+                continue
+            # 只调第一个参数
+            p = tunable[0]
+            best_val = p["default"]
+            best_score = -999.0
+            for val in p["values"]:
+                kwargs = {p["name"]: val}
+                s = get_execution_strategy(name, **kwargs)
+                test_result = engine.run(df.copy(), s, news_df)
+                score = test_result.sharpe_ratio if test_result.total_trades > 0 else -999.0
+                if score > best_score:
+                    best_score = score
+                    best_val = val
+            param_tuning[name] = {
+                "param": p["name"], "default": p["default"],
+                "best_value": best_val,
+                "default_sharpe": results.get(base.name, results.get(name, None)),
+            }
+            default_r = results.get(base.name)
+            best_str = (f"默认 entry={p['default']:.2f} → {default_r.total_return*100:+.1f}%/{default_r.sharpe_ratio:.2f}"
+                        if default_r else f"默认 entry={p['default']:.2f}")
+            logger.info(f"  [调优] {name}: {best_str} | 最优 entry={best_val:.2f} → 夏普={best_score:.2f}")
 
     logger.info(f"管道完成: 基准收益={benchmark_return*100:+.2f}%")
     logger.info("=" * 50)
