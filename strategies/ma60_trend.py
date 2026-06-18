@@ -47,10 +47,10 @@ class MA60TrendStrategy(BaseExecutionStrategy):
 
     def __init__(
         self,
-        risk_budget: float = 0.02,
+        risk_budget: float = 0.60,
         atr_stop_mult: float = 2.0,
         atr_trail_mult: float = 3.0,
-        max_hold_days: int = 120,
+        max_hold_days: int = 250,
     ):
         self.risk_budget = risk_budget
         self.atr_stop_mult = atr_stop_mult
@@ -127,6 +127,8 @@ class MA60TrendStrategy(BaseExecutionStrategy):
                         f"MA20({latest_ma20:.2f})>MA60 Score={score:+.3f} pct={latest_pct:.1%} "
                         f"止损={stop_loss:.2f} 股数={shares}"
                     ),
+                    time_stop_days=250,   # 中长期持有，不设短时间止损
+                    hard_stop_pct=0.25,   # 放宽硬止损至 25%
                 ))
                 logger.info(
                     f"[策略H] {df['date'].iloc[-1]} 开仓 | "
@@ -139,11 +141,11 @@ class MA60TrendStrategy(BaseExecutionStrategy):
             should_sell = False
             sell_reason = ""
 
-            # 条件 1：价格跌破 MA60（趋势破坏）
-            if latest_close < latest_ma60 and latest_ma60 > 0:
+            # 条件 1：价格有效跌破 MA60（2% 缓冲，避免反复穿越）
+            if latest_close < latest_ma60 * 0.98 and latest_ma60 > 0:
                 should_sell = True
                 sell_reason = (
-                    f"趋势破坏：close({latest_close:.2f})<MA60({latest_ma60:.2f})"
+                    f"趋势破坏：close({latest_close:.2f})<MA60({latest_ma60:.2f})×0.98"
                 )
 
             # 条件 2：MA20 死叉 MA60（中期趋势转空）

@@ -53,39 +53,134 @@ def _clean_llm_output(text: str) -> str:
     return text.strip()
 
 
-def _build_backtest_summary(bt_results: dict) -> str:
-    """将多策略回测结果格式化为可读文本（供 LLM 和回退模板使用）。"""
+def _build_backtest_summary(
+    bt_results: dict,
+    benchmark_return: float = 0.0,
+    market_regime: str = "unknown",
+    strategy_meta: dict | None = None,
+) -> str:
+    """将多策略回测结果格式化为可读文本，包含策略逻辑说明供 LLM 交叉分析。
+
+    Args:
+        bt_results: {策略名: BacktestResult}
+        benchmark_return: 买入持有基准收益
+        market_regime: 当前行情类型
+        strategy_meta: {策略key: {"name":..., "description":..., "suitable_regimes":[...]}}
+    """
     if not bt_results:
         return "回测数据不可用。"
 
-    lines = []
+    # 行情中文映射
+    regime_cn = {
+        "trending_volatile": "强趋势+高波动",
+        "trending_steady": "慢涨/弱趋势",
+        "trending": "趋势市",
+        "ranging": "震荡市",
+        "transitional": "过渡期",
+    }.get(market_regime, market_regime)
+
+    lines = [
+        f"**回测环境**：当前行情 = {regime_cn}（{market_regime}），基准收益（买入持有）= {benchmark_return*100:+.2f}%",
+        "",
+        "**重要提示**：以下每个策略都附带了其核心操作逻辑说明。你必须基于这些逻辑，在操作建议中告诉用户「如果要复制此策略的做法，现在应该怎么做」——把策略规则翻译成当前可执行的具体操作。",
+        "",
+    ]
+
+    # 分组
+    human_keys = set("IJKLMN")
+    quant_entries = []
+    human_entries = []
     for name, r in bt_results.items():
-        lines.append(
-            f"- **{name}**: 总收益 {r.total_return*100:+.2f}%, "
-            f"年化 {r.annual_return*100:+.2f}%, "
-            f"最大回撤 {r.max_drawdown*100:.2f}%, "
-            f"夏普比率 {r.sharpe_ratio:.2f}, "
-            f"胜率 {r.win_rate*100:.0f}%, "
-            f"交易 {r.total_trades} 次"
+        key = name[0] if name and name[0].isalpha() else ""
+        meta = (strategy_meta or {}).get(name, {})
+        desc = meta.get("description", "")
+        regimes = meta.get("suitable_regimes", [])
+        regime_note = ""
+        if regimes:
+            regime_note = f"（适配行情：{', '.join(regimes)}）"
+        elif key in human_keys:
+            regime_note = "（全行情通用—人类交易策略）"
+
+        # 构建交易记录（供 LLM 参考真实买卖时机和价位）
+        trade_log = ""
+        if r.trades:
+            trade_lines = ["", "  **实际交易记录**（回测期内的真实买卖）："]
+            for i, t in enumerate(r.trades, 1):
+                entry_d = t.get("entry_date", "?")
+                entry_p = t.get("entry_price", 0)
+                exit_d = t.get("exit_date", "?")
+                exit_p = t.get("exit_price", 0)
+                shares = t.get("shares", 0)
+                pnl = t.get("pnl", 0)
+                ret_pct = t.get("return_pct", 0)
+                reason_in = t.get("reason", "")
+                reason_out = t.get("exit_reason", "")
+                trade_lines.append(
+                    f"  · 第{i}笔：{entry_d} 买入 {shares}股 @ ${entry_p:.2f}（{reason_in}）"
+                    f" → {exit_d} 卖出 @ ${exit_p:.2f}（{reason_out}）"
+                    f" 盈亏 {pnl:+.0f}（{ret_pct:+.1f}%）"
+                )
+            trade_log = "\n".join(trade_lines) + "\n"
+
+        entry = (
+            f"### {name}\n"
+            f"- **核心逻辑**：{desc}\n"
+            f"- **适配行情说明**：{regime_note}\n"
+            f"- **回测绩效**：总收益 {r.total_return*100:+.2f}%，年化 {r.annual_return*100:+.2f}%，"
+            f"最大回撤 {r.max_drawdown*100:.2f}%，夏普 {r.sharpe_ratio:.2f}，"
+            f"Calmar {r.calmar_ratio:.2f}，胜率 {r.win_rate*100:.0f}%，交易 {r.total_trades} 次"
+            f"{trade_log}\n"
         )
+        if key in human_keys:
+            human_entries.append(entry)
+        else:
+            quant_entries.append(entry)
+
+    if quant_entries:
+        lines.append("## 量化策略（A-H，O）")
+        lines.extend(quant_entries)
+    if human_entries:
+        lines.append("## 人类策略（I-N）")
+        lines.append("（I/J/K = 新手，L/M/N = 老手）")
+        lines.extend(human_entries)
+
     return "\n".join(lines)
 
 
 def _build_backtest_markdown_table(bt_results: dict) -> str:
-    """生成 Markdown 格式的策略对比表。"""
+    """生成 Markdown 格式的策略对比表，量化策略和人类策略分两组。"""
     if not bt_results:
         return ""
 
+    HUMAN_KEYS = set("IJKLMN")
+
     header = "| 策略 | 总收益 | 年化收益 | 最大回撤 | 夏普比率 | Calmar | 胜率 | 交易次数 |"
     sep = "|------|--------|----------|----------|----------|--------|------|----------|"
-    rows = []
+
+    quant_rows = []
+    human_rows = []
     for name, r in bt_results.items():
-        rows.append(
+        key = name[0] if name and name[0].isalpha() else ""
+        row = (
             f"| {name} | {r.total_return*100:+.2f}% | {r.annual_return*100:+.2f}% | "
             f"{r.max_drawdown*100:.2f}% | {r.sharpe_ratio:.2f} | {r.calmar_ratio:.2f} | "
             f"{r.win_rate*100:.0f}% | {r.total_trades} |"
         )
-    return "\n".join([header, sep] + rows)
+        if key in HUMAN_KEYS:
+            human_rows.append(row)
+        else:
+            quant_rows.append(row)
+
+    parts = []
+    if quant_rows:
+        parts.append("### 量化策略\n")
+        parts.extend([header, sep] + quant_rows)
+    if human_rows:
+        if parts:
+            parts.append("")
+        parts.append("### 人类策略对比\n")
+        parts.extend([header, sep] + human_rows)
+    return "\n".join(parts)
 
 
 def generate_report(
@@ -125,6 +220,7 @@ def generate_report(
     api_key = settings.get("llm_api_key", "")
     base_url = settings.get("llm_base_url", "https://api.openai.com/v1")
     model = settings.get("llm_model", "gpt-4o")
+    enable_thinking = settings.get("llm_enable_thinking", False)
 
     if not api_key and "localhost" not in base_url and "127.0.0.1" not in base_url:
         return _generate_fallback_report(
@@ -134,10 +230,37 @@ def generate_report(
             realtime_quote=realtime_quote,
         )
 
+    # 构建策略元数据（供 LLM 理解每个策略的操作逻辑）
+    from strategies import get_execution_strategy
+    strategy_meta = {}
+    for key in (active_strategies or []) + (skipped_strategies or []):
+        try:
+            s = get_execution_strategy(key)
+            strategy_meta[key] = {
+                "name": s.name,
+                "description": s.description,
+                "suitable_regimes": s.suitable_regimes,
+            }
+        except Exception:
+            pass
+    # 回测结果中可能有关键名不是简单 key 的情况，补齐
+    for bt_name in backtest_results:
+        if bt_name not in strategy_meta:
+            # 尝试从策略名前缀匹配
+            for key in list(strategy_meta.keys()):
+                if bt_name.startswith(key):
+                    strategy_meta[bt_name] = strategy_meta[key]
+                    break
+
     # 构建 LLM 提示词
     news_text = news_aggregation.get("summary", "")
     top_news = news_aggregation.get("top_news", "")
-    bt_summary = _build_backtest_summary(backtest_results)
+    bt_summary = _build_backtest_summary(
+        backtest_results,
+        benchmark_return=benchmark_return,
+        market_regime=market_regime,
+        strategy_meta=strategy_meta,
+    )
     bt_table = _build_backtest_markdown_table(backtest_results)
 
     alpha_text = ""
@@ -248,7 +371,12 @@ def generate_report(
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=600.0)
-        logger.info(f"调用 LLM: model={model}")
+        logger.info(f"调用 LLM: model={model}, thinking={enable_thinking}")
+        extra = {}
+        if enable_thinking:
+            # DeepSeek extended thinking: 让模型在输出前先深度推理
+            # 兼容 deepseek-chat (V3/V3.1) 和 deepseek-reasoner (R1)
+            extra["extra_body"] = {"thinking": {"type": "enabled"}}
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -257,6 +385,7 @@ def generate_report(
             ],
             temperature=0.3,
             max_tokens=16000,
+            **extra,
         )
         choice = response.choices[0]
         finish = choice.finish_reason
@@ -385,7 +514,10 @@ def _generate_fallback_report(
 
     # 策略对比表
     bt_table = _build_backtest_markdown_table(backtest_results)
-    bt_summary = _build_backtest_summary(backtest_results)
+    bt_summary = _build_backtest_summary(
+        backtest_results, benchmark_return=benchmark_return,
+        market_regime="unknown", strategy_meta=None,
+    )
 
     # 综合建议
     recommendation = _derive_recommendation(backtest_results, alpha_stats, depth_factor,
@@ -690,6 +822,7 @@ def generate_intraday_report(
     api_key = settings.get("llm_api_key", "")
     base_url = settings.get("llm_base_url", "https://api.openai.com/v1")
     model = settings.get("llm_model", "gpt-4o")
+    enable_thinking = settings.get("llm_enable_thinking", False)
 
     # 尝试 LLM 生成第八章
     chapter_8 = None
@@ -701,7 +834,10 @@ def generate_intraday_report(
                 t1_report_content, snapshot_text, stock_info,
                 swot_data=swot_data, peer_data=peer_data,
             )
-            logger.info(f"调用 LLM 生成盘中操作参考: model={model}")
+            logger.info(f"调用 LLM 生成盘中操作参考: model={model}, thinking={enable_thinking}")
+            extra = {}
+            if enable_thinking:
+                extra["extra_body"] = {"thinking": {"type": "enabled"}}
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -710,6 +846,7 @@ def generate_intraday_report(
                 ],
                 temperature=0.3,
                 max_tokens=8000,
+                **extra,
             )
             choice = response.choices[0]
             finish = choice.finish_reason
@@ -818,6 +955,7 @@ def generate_premarket_report(
     api_key = settings.get("llm_api_key", "")
     base_url = settings.get("llm_base_url", "https://api.openai.com/v1")
     model = settings.get("llm_model", "gpt-4o")
+    enable_thinking = settings.get("llm_enable_thinking", False)
 
     # 尝试 LLM 生成第八章
     chapter_8 = None
@@ -829,7 +967,10 @@ def generate_premarket_report(
                 t1_report_content, snapshot_text, stock_info,
                 swot_data=swot_data, peer_data=peer_data,
             )
-            logger.info(f"调用 LLM 生成盘前策略参考: model={model}")
+            logger.info(f"调用 LLM 生成盘前策略参考: model={model}, thinking={enable_thinking}")
+            extra = {}
+            if enable_thinking:
+                extra["extra_body"] = {"thinking": {"type": "enabled"}}
             response = client.chat.completions.create(
                 model=model,
                 messages=[
@@ -838,6 +979,7 @@ def generate_premarket_report(
                 ],
                 temperature=0.3,
                 max_tokens=10000,
+                **extra,
             )
             choice = response.choices[0]
             finish = choice.finish_reason

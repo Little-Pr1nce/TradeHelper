@@ -29,6 +29,9 @@ class Order:
     stop_loss: float = 0.0   # 硬止损价格（买入时计算）
     take_profit: float = float("inf")  # 止盈价格
     reason: str = ""         # 触发原因（调试用）
+    # 策略级覆盖 Broker 默认值（0 = 使用 Broker 默认值）
+    time_stop_days: int = 0       # 覆盖时间止损天数（0=使用默认10天）
+    hard_stop_pct: float = 0.0    # 覆盖硬止损比例（0=使用默认8%）
 
 
 @dataclass
@@ -58,6 +61,9 @@ class Position:
     stop_loss: float = 0.0       # 当前硬止损价
     added_position: bool = False # 是否已加仓（策略C用）
     additions_count: int = 0     # 已加仓次数（策略F用）
+    # 策略级 Broker 参数覆盖（0 = 使用默认值）
+    time_stop_days: int = 0       # 覆盖 broker 时间止损天数
+    hard_stop_pct: float = 0.0    # 覆盖 broker 硬止损比例
 
 
 @dataclass

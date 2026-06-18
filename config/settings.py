@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
     "news_token_us": "",         # 美股新闻 Token（如 Finnhub）
     "news_token_a": "",          # A 股新闻 Token（如 Tushare）
     "finbert_model_path": "",    # 程序自动设置，用户无需关心
+    "llm_enable_thinking": False,  # 启用模型思考/推理模式（DeepSeek V3/V3.1 等支持 extended thinking 的模型）
 }
 
 # 必填配置项（未填时禁止使用分析功能）

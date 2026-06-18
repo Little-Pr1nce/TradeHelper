@@ -74,7 +74,10 @@ EQUAL_WEIGHTS = {col: 1.0 / len(INDICATOR_COLUMNS) for col in INDICATOR_COLUMNS}
 def detect_market_regime(df: pd.DataFrame, adx_threshold_high: float = 25,
                          adx_threshold_low: float = 20) -> tuple[str, dict[str, float]]:
     """
-    基于 ADX + 波动率判断市场状态，返回 (regime, weights)。
+    基于 ADX + 波动率 + 长期趋势判断市场状态，返回 (regime, weights)。
+
+    改进：使用近 20 日 ADX 均值替代单点值，避免短期盘整导致误判震荡。
+    同时加入长期趋势辅助判断（价 vs MA60），防止大涨后的横盘被误分类。
 
     Returns:
         regime: "trending_volatile" / "trending_steady" / "ranging" / "transitional" / "unknown"
@@ -87,39 +90,72 @@ def detect_market_regime(df: pd.DataFrame, adx_threshold_high: float = 25,
       - transitional:      过渡期 — 等权保守
       - unknown:           数据不足
     """
-    adx_val = _estimate_adx(df)
+    adx_val, adx_mean = _estimate_adx(df, return_mean=True)
     if adx_val is None:
         logger.debug("  [Regime] ADX 不可用 → unknown")
         return "unknown", EQUAL_WEIGHTS
 
+    # 长期趋势辅助判断：如果全周期涨幅显著且价格在 MA60 之上，至少视为慢涨
+    long_term_trending = False
+    if len(df) >= 60:
+        close = df["close"].astype(float)
+        ma60 = close.rolling(60).mean()
+        latest_close = float(close.iloc[-1])
+        latest_ma60 = float(ma60.iloc[-1]) if pd.notna(ma60.iloc[-1]) else 0
+        total_return = (latest_close - float(close.iloc[0])) / float(close.iloc[0]) if float(close.iloc[0]) > 0 else 0
+        # 总涨幅 > 50% 且价格在 MA60 之上 = 客观处于上升趋势中
+        if total_return > 0.50 and latest_close > latest_ma60 > 0:
+            long_term_trending = True
+
+    # 使用近 20 日均值作为主判断（避免单点 ADX 受短期盘整影响）
+    adx_judge = adx_mean if adx_mean is not None else adx_val
+
     # 计算波动率子类型
     atr_pct = _estimate_atr_pct(df)
 
-    if adx_val > adx_threshold_high:
+    if adx_judge > adx_threshold_high:
         if atr_pct is not None and atr_pct > 0.05:
-            logger.info(f"  [Regime] ADX={adx_val:.1f} ATR%={atr_pct:.1%} → 强趋势+高波")
+            logger.info(f"  [Regime] ADX={adx_val:.1f}(均值{adx_mean:.1f}) ATR%={atr_pct:.1%} → 强趋势+高波")
             return "trending_volatile", TRENDING_WEIGHTS
         else:
             atr_str = f"{atr_pct:.1%}" if atr_pct is not None else "?"
-            logger.info(f"  [Regime] ADX={adx_val:.1f} ATR%={atr_str} → 慢涨/弱趋势")
+            logger.info(f"  [Regime] ADX={adx_val:.1f}(均值{adx_mean:.1f}) ATR%={atr_str} → 慢涨/弱趋势")
             return "trending_steady", TRENDING_WEIGHTS
-    elif adx_val < adx_threshold_low:
-        logger.info(f"  [Regime] ADX={adx_val:.1f} < {adx_threshold_low} → 震荡市")
+    elif adx_judge < adx_threshold_low:
+        # 即使短期 ADX 低，若长期趋势明确向上，仍视为慢涨而非震荡
+        if long_term_trending:
+            logger.info(f"  [Regime] ADX={adx_val:.1f}(均值{adx_mean:.1f}) < {adx_threshold_low}"
+                        f" 但长期趋势向上 → 慢涨/弱趋势")
+            return "trending_steady", TRENDING_WEIGHTS
+        logger.info(f"  [Regime] ADX={adx_val:.1f}(均值{adx_mean:.1f}) < {adx_threshold_low} → 震荡市")
         return "ranging", RANGING_WEIGHTS
     else:
-        logger.info(f"  [Regime] ADX={adx_val:.1f} 在 [{adx_threshold_low}, {adx_threshold_high}] → 过渡期")
+        # 过渡期但长期趋势向上 → 升级为慢涨
+        if long_term_trending:
+            logger.info(f"  [Regime] ADX={adx_val:.1f}(均值{adx_mean:.1f}) 过渡期 + 长期向上 → 慢涨/弱趋势")
+            return "trending_steady", TRENDING_WEIGHTS
+        logger.info(f"  [Regime] ADX={adx_val:.1f}(均值{adx_mean:.1f}) 在 [{adx_threshold_low}, {adx_threshold_high}] → 过渡期")
         return "transitional", EQUAL_WEIGHTS
 
 
-def _estimate_adx(df: pd.DataFrame) -> float | None:
-    """估算最近一期的 ADX 值（优先使用已计算的 ADX 列，否则用 ta 库计算）。"""
+def _estimate_adx(df: pd.DataFrame, return_mean: bool = False) -> float | None | tuple[float | None, float | None]:
+    """估算最近一期 ADX 值（优先使用已计算的 ADX 列，否则用 ta 库计算）。
+
+    Args:
+        df: K 线 DataFrame
+        return_mean: True 时同时返回 (最新值, 近20日均值)
+    """
     import numpy as np
     # 优先查找已存在的 ADX 列
     for col_name in ["adx", "ADX"]:
         if col_name in df.columns:
             val = df[col_name].dropna()
             if len(val) > 0:
-                return float(val.iloc[-1])
+                latest = float(val.iloc[-1])
+                if return_mean:
+                    mean_val = float(val.iloc[-20:].mean()) if len(val) >= 5 else latest
+                    return latest, mean_val
+                return latest
     # 尝试用 ta 库计算
     try:
         import ta
@@ -132,9 +168,15 @@ def _estimate_adx(df: pd.DataFrame) -> float | None:
             if not adx_series.empty:
                 val = adx_series.dropna()
                 if len(val) > 0:
-                    return float(val.iloc[-1])
+                    latest = float(val.iloc[-1])
+                    if return_mean:
+                        mean_val = float(val.iloc[-20:].mean()) if len(val) >= 5 else latest
+                        return latest, mean_val
+                    return latest
     except Exception:
         pass
+    if return_mean:
+        return None, None
     return None
 
 

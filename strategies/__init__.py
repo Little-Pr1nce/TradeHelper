@@ -27,9 +27,19 @@ from strategies.dual_thrust import DualThrustStrategy
 from strategies.turtle_atr import TurtleATRStrategy
 from strategies.ma_crossover import MACrossoverStrategy
 from strategies.ma60_trend import MA60TrendStrategy
+from strategies.trend_rider import TrendRiderStrategy
+from strategies.human_strategies import (
+    ChaseMomentumStrategy,
+    PickBottomStrategy,
+    HoldUntilBreakevenStrategy,
+    TrendPullbackStrategy,
+    KeyReversalStrategy,
+    MACompressionBreakoutStrategy,
+)
 
 # 策略注册表
 _STRATEGY_REGISTRY: dict[str, type[BaseExecutionStrategy]] = {
+    # 量化策略 (A-H)
     "A": ThresholdTrendStrategy,
     "B": MeanReversionStrategy,
     "C": MomentumNewsStrategy,
@@ -38,6 +48,15 @@ _STRATEGY_REGISTRY: dict[str, type[BaseExecutionStrategy]] = {
     "F": TurtleATRStrategy,
     "G": MACrossoverStrategy,
     "H": MA60TrendStrategy,
+    "O": TrendRiderStrategy,          # 趋势满仓持有（对标基准）
+    # 人类策略 — 新手 (I-K)
+    "I": ChaseMomentumStrategy,
+    "J": PickBottomStrategy,
+    "K": HoldUntilBreakevenStrategy,
+    # 人类策略 — 老手 (L-N)
+    "L": TrendPullbackStrategy,
+    "M": KeyReversalStrategy,
+    "N": MACompressionBreakoutStrategy,
     # 别名
     "threshold_trend": ThresholdTrendStrategy,
     "mean_reversion": MeanReversionStrategy,
@@ -47,6 +66,13 @@ _STRATEGY_REGISTRY: dict[str, type[BaseExecutionStrategy]] = {
     "turtle_atr": TurtleATRStrategy,
     "ma_crossover": MACrossoverStrategy,
     "ma60_trend": MA60TrendStrategy,
+    "trend_rider": TrendRiderStrategy,
+    "chase_momentum": ChaseMomentumStrategy,
+    "pick_bottom": PickBottomStrategy,
+    "hold_breakeven": HoldUntilBreakevenStrategy,
+    "trend_pullback": TrendPullbackStrategy,
+    "key_reversal": KeyReversalStrategy,
+    "ma_compression": MACompressionBreakoutStrategy,
 }
 
 
@@ -73,13 +99,15 @@ def get_execution_strategy(name: str, **kwargs) -> BaseExecutionStrategy:
 
 def get_available_strategies() -> list[str]:
     """返回可用策略标识列表。"""
-    return ["A", "B", "C", "D", "E", "F", "G", "H"]
+    return ["A", "B", "C", "D", "E", "F", "G", "H", "O",
+            "I", "J", "K", "L", "M", "N"]
 
 
 def get_strategy_info() -> dict[str, dict]:
     """返回所有策略的名称和描述。"""
     result = {}
-    for key in ("A", "B", "C", "D", "E", "F", "G", "H"):
+    for key in ("A", "B", "C", "D", "E", "F", "G", "H", "O",
+                "I", "J", "K", "L", "M", "N"):
         s = get_execution_strategy(key)
         result[key] = {"name": s.name, "description": s.description}
     return result

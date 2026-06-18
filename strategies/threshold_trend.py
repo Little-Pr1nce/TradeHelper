@@ -48,7 +48,7 @@ class ThresholdTrendStrategy(BaseExecutionStrategy):
 
     def __init__(self, entry_pct: float = 0.80, exit_pct: float = 0.50,
                  cooldown_bars: int = 3, atr_period: int = 14,
-                 risk_budget: float = 0.02, lookback: int = 252):
+                 risk_budget: float = 0.60, lookback: int = 252):
         self.entry_pct = entry_pct
         self.exit_pct = exit_pct
         self.cooldown_bars = cooldown_bars
@@ -66,7 +66,7 @@ class ThresholdTrendStrategy(BaseExecutionStrategy):
             f"滚动 {self.lookback} 日百分位模式："
             f"Final_Score 处于 {self.entry_pct:.0%} 分位以上开仓，"
             f"跌破 {self.exit_pct:.0%} 分位平仓。"
-            f"冷却期 {self.cooldown_bars} 根 K 线，风险预算 {self.risk_budget:.1%}。"
+            f"冷却期 {self.cooldown_bars} 根 K 线，风险预算 {self.risk_budget:.0%}（高仓位）。"
         )
 
     def generate_orders(self, df: pd.DataFrame, context: StrategyContext) -> list[Order]:
@@ -121,6 +121,8 @@ class ThresholdTrendStrategy(BaseExecutionStrategy):
                 date=current_date, action="buy", shares=shares,
                 stop_loss=stop_loss,
                 reason=f"百分位({current_pct:.1%}) >= entry({self.entry_pct:.0%})",
+                time_stop_days=120,    # 趋势策略不设短时间止损
+                hard_stop_pct=0.20,    # 放宽硬止损至 20%
             )]
 
         return []

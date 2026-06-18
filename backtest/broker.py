@@ -108,6 +108,10 @@ class Broker:
         # 6. 扣除资金，更新持仓
         account.cash -= total_cost
 
+        # 策略级 Broker 参数覆盖
+        pos_time_stop = order.time_stop_days if order.time_stop_days > 0 else 0
+        pos_hard_stop = order.hard_stop_pct if order.hard_stop_pct > 0 else 0.0
+
         new_position = Position(
             shares=order.shares,
             avg_cost=fill_price,
@@ -117,6 +121,8 @@ class Broker:
             stop_loss=order.stop_loss if order.stop_loss > 0
                        else fill_price * (1 - cfg.hard_stop_pct),
             added_position=False,
+            time_stop_days=pos_time_stop,
+            hard_stop_pct=pos_hard_stop,
         )
         account.position = new_position
 
@@ -214,8 +220,9 @@ class Broker:
         exit_reason = None
         exit_price = None
 
-        # 硬止损：-8%
-        hard_stop = pos.entry_price * (1 - cfg.hard_stop_pct)
+        # 硬止损：优先使用策略级配置，否则用 Broker 默认 8%
+        hard_stop_pct = pos.hard_stop_pct if pos.hard_stop_pct > 0 else cfg.hard_stop_pct
+        hard_stop = pos.entry_price * (1 - hard_stop_pct)
         if low <= hard_stop:
             exit_reason = f"硬止损触发 low({low:.2f}) <= hard_stop({hard_stop:.2f})"
             exit_price = hard_stop
@@ -225,14 +232,15 @@ class Broker:
             exit_reason = f"止损触发 low({low:.2f}) <= stop({pos.stop_loss:.2f})"
             exit_price = pos.stop_loss
 
-        # 时间止损：10 个交易日
+        # 时间止损：优先使用策略级配置，否则用 Broker 默认 10 天
         elif pos.entry_date:
             try:
                 entry_dt = pd.Timestamp(pos.entry_date)
                 current_dt = pd.Timestamp(current_date)
                 holding = (current_dt - entry_dt).days
-                if holding >= cfg.time_stop_days:
-                    exit_reason = f"时间止损 持仓{holding}天 ≥ {cfg.time_stop_days}天"
+                time_stop = pos.time_stop_days if pos.time_stop_days > 0 else cfg.time_stop_days
+                if holding >= time_stop:
+                    exit_reason = f"时间止损 持仓{holding}天 ≥ {time_stop}天"
                     exit_price = close
             except Exception:
                 pass

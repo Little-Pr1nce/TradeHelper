@@ -351,6 +351,7 @@ class BacktestEngine:
             "BollingerBreakoutStrategy": 3,
             "DualThrustStrategy": 3,
             "TurtleATRStrategy": 5,
+            "TrendRiderStrategy": 1,     # 满仓策略仅 1 根冷却，快速重新入场
         }
         cls_name = type(strategy).__name__
         bars = cooldown_map.get(cls_name, 3)

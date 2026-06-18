@@ -87,6 +87,10 @@ class SettingsPage(ft.Container):
             value=settings.get("llm_model", ""),
             hint_text="如 gpt-4o, deepseek-chat 等（必填）",
         )
+        self._llm_thinking = ft.Switch(
+            label="启用模型深度思考（Extended Thinking）",
+            value=settings.get("llm_enable_thinking", False),
+        )
 
         # ========== 数据源配置 ==========
         self._stock_token_us = ft.TextField(
@@ -151,6 +155,7 @@ class SettingsPage(ft.Container):
                 self._llm_base_url,
                 self._llm_api_key,
                 self._llm_model,
+                self._llm_thinking,
                 ft.Text("使用 OpenAI 兼容 API 格式。\n"
                         "本地 Ollama: URL=http://localhost:11434/v1, Key=ollama, Model=qwen2.5",
                         size=12, color=ft.Colors.GREY_600),
@@ -201,6 +206,7 @@ class SettingsPage(ft.Container):
         settings.set("llm_base_url", self._llm_base_url.value)
         settings.set("llm_api_key", self._llm_api_key.value)
         settings.set("llm_model", self._llm_model.value)
+        settings.set("llm_enable_thinking", self._llm_thinking.value)
         settings.set("stock_token_us", self._stock_token_us.value)
         settings.set("stock_token_a", self._stock_token_a.value)
         settings.set("news_token_us", self._news_token_us.value)
