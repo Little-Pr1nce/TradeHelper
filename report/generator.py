@@ -793,9 +793,18 @@ def generate_intraday_report(
     stock_info: dict,
     swot_data: dict | None = None,
     peer_data: list[dict] | None = None,
+    pre_report_content: str | None = None,
 ) -> str:
     """
     生成盘中分析报告。
+
+    Args:
+        t1_report_content: T-1 EOD 报告全文
+        snapshot_text: 盘中实时快照
+        stock_info: 股票基本信息
+        swot_data: 实时 SWOT 素材
+        peer_data: 同板块快速评分
+        pre_report_content: 盘前报告全文（用于承上启下）
 
     结构：
       ⚡ 盘中实时快照（纯计算，已格式化）
@@ -833,6 +842,7 @@ def generate_intraday_report(
             user_prompt = build_intraday_user_prompt(
                 t1_report_content, snapshot_text, stock_info,
                 swot_data=swot_data, peer_data=peer_data,
+                pre_report_content=pre_report_content,
             )
             logger.info(f"调用 LLM 生成盘中操作参考: model={model}, thinking={enable_thinking}")
             extra = {}

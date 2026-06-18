@@ -941,6 +941,7 @@ class AnalysisService:
             stock_info=info.to_dict(),
             swot_data=swot_data,
             peer_data=peer_data,
+            pre_report_content=pre_report_content,
         )
         if not report_content:
             report_content = "盘中报告生成失败，请稍后重试。"
@@ -1321,23 +1322,14 @@ class AnalysisService:
         pre_report = None
         pre_prediction = None
         try:
-            t1_date = self._previous_trading_day()
             eod_reports = Database().get_reports_by_code(
                 code, mode="eod", since_hours=168,
             )
-            for r in eod_reports:
-                # 找到第一份真正 T-1 日期的报告（已按时间倒序，第一个=最新）
-                report_date = (r.create_time or "")[:10]
-                if report_date == t1_date:
-                    eod_report = r.content
-                    logger.info(f"复用 T-1({t1_date}) 盘后缓存报告: {r.create_time}, "
-                                f"同日期共{sum(1 for x in eod_reports if (x.create_time or '')[:10]==t1_date)}份，取最新")
-                    break
-            if eod_reports and not eod_report:
-                # 有缓存但不是 T-1 的 → 跳过，提示将重新生成
-                latest = eod_reports[0]
-                latest_date = (latest.create_time or "")[:10]
-                logger.info(f"缓存报告日期({latest_date})≠T-1({t1_date})，弃用缓存，将重新生成 T-1 分析")
+            if eod_reports:
+                # 直接取最新一份 EOD 报告（已按时间倒序排列）
+                eod_report = eod_reports[0].content
+                logger.info(f"复用最新盘后缓存报告: {eod_reports[0].create_time}, "
+                            f"共 {len(eod_reports)} 份候选")
 
             # 查询最近的盘前报告（12 小时内）
             pre_reports = Database().get_reports_by_code(
