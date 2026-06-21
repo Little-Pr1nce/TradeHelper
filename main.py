@@ -62,6 +62,8 @@ def main(page: ft.Page):
     page.window.min_width = 1000
     page.window.min_height = 650
     page.padding = 20        # 页面内边距
+    # 设置应用图标（优先使用 PyInstaller 打包的图标）
+    page.icon = "assets/tradehelper.png"  # Flet 自动从 assets/ 加载
 
     # ========== 初始化全局服务 ==========
     config_path = Settings.default_config_path()

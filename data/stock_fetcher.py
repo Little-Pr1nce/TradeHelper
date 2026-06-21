@@ -12,6 +12,7 @@
 import logging
 import os
 import re
+import sys
 import subprocess
 import time
 from abc import ABC, abstractmethod
@@ -61,31 +62,58 @@ def _without_system_proxy():
             os.environ.pop(k, None)
         os.environ.update(saved)
 
+def _detect_system_proxy() -> str:
+    """跨平台系统 HTTP 代理检测。"""
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.check_output(["scutil", "--proxy"], text=True, timeout=3)
+            if "HTTPEnable : 1" not in out and "HTTPSEnable : 1" not in out:
+                return ""
+            host_m = re.search(r"HTTPProxy : (\S+)", out)
+            port_m = re.search(r"HTTPPort : (\d+)", out)
+            if host_m and port_m:
+                return f"http://{host_m.group(1)}:{port_m.group(1)}"
+        except Exception:
+            pass
+        return ""
 
-def _detect_macos_http_proxy() -> str:
-    """读取 macOS 系统 HTTP 代理（MonoProxy/Surge 等开启「系统代理」时可用）。"""
-    try:
-        out = subprocess.check_output(["scutil", "--proxy"], text=True, timeout=3)
-        if "HTTPEnable : 1" not in out and "HTTPSEnable : 1" not in out:
-            return ""
-        host_m = re.search(r"HTTPProxy : (\S+)", out)
-        port_m = re.search(r"HTTPPort : (\d+)", out)
-        if host_m and port_m:
-            return f"http://{host_m.group(1)}:{port_m.group(1)}"
-    except Exception:
-        pass
-    return ""
+    elif sys.platform == "win32":
+        for env_key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            val = os.environ.get(env_key, "").strip()
+            if val:
+                return val
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+            ) as key:
+                proxy_enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+                if proxy_enable:
+                    proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
+                    if proxy_server:
+                        return f"http://{proxy_server}"
+        except Exception:
+            pass
+        return ""
+
+    else:
+        for env_key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+            val = os.environ.get(env_key, "").strip()
+            if val:
+                return val
+        return ""
 
 
 def _resolve_proxy_url() -> str:
-    """优先 Settings，否则回退 macOS 系统 HTTP 代理。"""
+    """优先 Settings，否则回退系统 HTTP 代理检测。"""
     from config.settings import Settings
     configured = (Settings().get("proxy", "") or "").strip()
     if configured:
         return configured
-    detected = _detect_macos_http_proxy()
+    detected = _detect_system_proxy()
     if detected:
-        logger.debug(f"Using macOS system HTTP proxy: {detected}")
+        logger.debug(f"Using system HTTP proxy: {detected}")
     return detected
 
 
@@ -102,7 +130,7 @@ def _apply_proxy():
     """
     将代理应用到 yfinance（海外服务）。
 
-    来源：Settings.proxy → macOS 系统 HTTP 代理（8118 等）。
+    来源：Settings.proxy → 系统 HTTP 代理检测。
     """
     proxy_url = _resolve_proxy_url()
     if _PROXY_STATE["applied"] == proxy_url:
