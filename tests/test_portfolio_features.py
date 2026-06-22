@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from data.database import Database
-from data.models import AnalysisReport, PortfolioHolding
+from data.models import AnalysisReport, Holding, WatchItem, AccountBalance
 from services.signal_stabilizer import SignalStabilizer
 
 
@@ -49,23 +49,34 @@ def test_signal_stabilizer_reuses_small_move():
     assert decision.previous_report is not None
 
 
-def test_portfolio_crud():
+def test_holdings_watchlist_balance_crud():
     db = fresh_db()
-    pid = db.create_portfolio("Tech", "demo", 0.08)
-    db.upsert_portfolio_holding(PortfolioHolding(
-        portfolio_id=pid, code="AAPL", name="Apple", market="US", industry="Tech", weight=0.5,
+    # 测试持仓
+    db.upsert_holding(Holding(
+        code="AAPL", name="Apple", market="US", shares=100, cost_price=150.0,
     ))
-    holdings = db.list_portfolio_holdings(pid)
+    holdings = db.list_holdings("US")
     assert len(holdings) == 1
     assert holdings[0].code == "AAPL"
-    assert db.get_portfolio(pid).name == "Tech"
+
+    # 测试关注
+    db.upsert_watch_item(WatchItem(code="NVDA", name="NVIDIA", market="US"))
+    watchlist = db.list_watchlist("US")
+    assert len(watchlist) == 1
+    assert watchlist[0].code == "NVDA"
+
+    # 测试余额
+    db.save_balance(AccountBalance(us_balance=50000.0, a_balance=100000.0))
+    b = db.get_balance()
+    assert b.us_balance == 50000.0
+    assert b.a_balance == 100000.0
 
 
 if __name__ == "__main__":
     tests = [
         test_filter_reports_by_market_mode_period_rating,
         test_signal_stabilizer_reuses_small_move,
-        test_portfolio_crud,
+        test_holdings_watchlist_balance_crud,
     ]
     for test in tests:
         test()

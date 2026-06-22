@@ -163,44 +163,20 @@ class NewsItem:
 
 
 @dataclass
-class Portfolio:
-    """组合定义。"""
+class Holding:
+    """用户持仓（我的持仓页面）。"""
     id: Optional[int] = None
-    name: str = ""
-    description: str = ""
-    risk_stop_pct: float = 0.08
-    create_time: str = ""
-    update_time: str = ""
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "Portfolio":
-        result = {}
-        for name, field_def in cls.__dataclass_fields__.items():
-            value = d.get(name)
-            result[name] = value if value is not None else field_def.default
-        return cls(**result)
-
-
-@dataclass
-class PortfolioHolding:
-    """组合持仓/候选标的。"""
-    id: Optional[int] = None
-    portfolio_id: int = 0
     code: str = ""
     name: str = ""
     market: str = "US"
-    industry: str = ""
-    weight: float = 0.0
-    note: str = ""
+    shares: float = 0.0
+    cost_price: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "PortfolioHolding":
+    def from_dict(cls, d: dict) -> "Holding":
         result = {}
         for name, field_def in cls.__dataclass_fields__.items():
             value = d.get(name)
@@ -209,22 +185,37 @@ class PortfolioHolding:
 
 
 @dataclass
-class PortfolioAnalysis:
-    """组合分析快照。"""
+class WatchItem:
+    """关注股票（我的持仓页面）。"""
     id: Optional[int] = None
-    portfolio_id: int = 0
-    create_time: str = ""
-    summary: str = ""
-    industry_exposure: str = "{}"
-    max_drawdown: float = 0.0
-    risk_triggered: bool = False
-    candidates_json: str = "[]"
+    code: str = ""
+    name: str = ""
+    market: str = "US"
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "PortfolioAnalysis":
+    def from_dict(cls, d: dict) -> "WatchItem":
+        result = {}
+        for name, field_def in cls.__dataclass_fields__.items():
+            value = d.get(name)
+            result[name] = value if value is not None else field_def.default
+        return cls(**result)
+
+
+@dataclass
+class AccountBalance:
+    """账户余额（单条记录，id=1）。"""
+    id: Optional[int] = None
+    us_balance: float = 0.0
+    a_balance: float = 0.0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "AccountBalance":
         result = {}
         for name, field_def in cls.__dataclass_fields__.items():
             value = d.get(name)

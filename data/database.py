@@ -28,7 +28,7 @@ from typing import Optional
 
 from data.models import (
     StockInfo, PriceData, AnalysisReport, NewsItem,
-    Portfolio, PortfolioHolding, PortfolioAnalysis,
+    Holding, WatchItem, AccountBalance,
 )
 from config.settings import Settings
 
@@ -105,46 +105,38 @@ CREATE TABLE IF NOT EXISTS news_sentiment (
 CREATE INDEX IF NOT EXISTS idx_news_code ON news_sentiment(code);
 CREATE INDEX IF NOT EXISTS idx_news_date ON news_sentiment(date);
 
--- 组合定义表
-CREATE TABLE IF NOT EXISTS portfolios (
+-- 用户持仓表
+CREATE TABLE IF NOT EXISTS holdings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT DEFAULT '',
-    risk_stop_pct REAL DEFAULT 0.08,
-    create_time TEXT NOT NULL,
-    update_time TEXT NOT NULL
-);
-
--- 组合持仓/候选池
-CREATE TABLE IF NOT EXISTS portfolio_holdings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    portfolio_id INTEGER NOT NULL,
     code TEXT NOT NULL,
     name TEXT DEFAULT '',
     market TEXT DEFAULT 'US',
-    industry TEXT DEFAULT '',
-    weight REAL DEFAULT 0.0,
-    note TEXT DEFAULT '',
-    UNIQUE(portfolio_id, code),
-    FOREIGN KEY(portfolio_id) REFERENCES portfolios(id) ON DELETE CASCADE
+    shares REAL DEFAULT 0.0,
+    cost_price REAL DEFAULT 0.0,
+    UNIQUE(code)
 );
 
-CREATE INDEX IF NOT EXISTS idx_portfolio_holdings_pid ON portfolio_holdings(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_holdings_market ON holdings(market);
 
--- 组合分析快照
-CREATE TABLE IF NOT EXISTS portfolio_analyses (
+-- 关注股票表
+CREATE TABLE IF NOT EXISTS watchlist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    portfolio_id INTEGER NOT NULL,
-    create_time TEXT NOT NULL,
-    summary TEXT DEFAULT '',
-    industry_exposure TEXT DEFAULT '{}',
-    max_drawdown REAL DEFAULT 0.0,
-    risk_triggered INTEGER DEFAULT 0,
-    candidates_json TEXT DEFAULT '[]',
-    FOREIGN KEY(portfolio_id) REFERENCES portfolios(id) ON DELETE CASCADE
+    code TEXT NOT NULL UNIQUE,
+    name TEXT DEFAULT '',
+    market TEXT DEFAULT 'US'
 );
 
-CREATE INDEX IF NOT EXISTS idx_portfolio_analyses_pid ON portfolio_analyses(portfolio_id);
+CREATE INDEX IF NOT EXISTS idx_watchlist_market ON watchlist(market);
+
+-- 账户余额表（单条记录 id=1）
+CREATE TABLE IF NOT EXISTS account_balance (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    us_balance REAL DEFAULT 0.0,
+    a_balance REAL DEFAULT 0.0
+);
+
+-- 确保单条记录存在
+INSERT OR IGNORE INTO account_balance (id, us_balance, a_balance) VALUES (1, 0.0, 0.0);
 """
 
 
@@ -476,88 +468,72 @@ class Database:
         ).fetchall()
         return [AnalysisReport.from_dict(dict(r)) for r in rows]
 
-    # ======================== 组合管理 ========================
+    # ======================== 我的持仓 ========================
 
-    def create_portfolio(self, name: str, description: str = "", risk_stop_pct: float = 0.08) -> int:
-        """创建组合，名称重复时返回已有组合 ID。"""
-        now = datetime.now().isoformat()
-        with self._write_lock:
-            self.conn.execute(
-                """INSERT OR IGNORE INTO portfolios
-                   (name, description, risk_stop_pct, create_time, update_time)
-                   VALUES (?, ?, ?, ?, ?)""",
-                (name, description, risk_stop_pct, now, now),
-            )
-            self.conn.execute(
-                """UPDATE portfolios SET description = ?, risk_stop_pct = ?, update_time = ?
-                   WHERE name = ?""",
-                (description, risk_stop_pct, now, name),
-            )
-            self.conn.commit()
-            row = self.conn.execute("SELECT id FROM portfolios WHERE name = ?", (name,)).fetchone()
-        return int(row[0])
+    def list_holdings(self, market: str = "") -> list[Holding]:
+        """列出持仓，可按市场筛选。"""
+        if market:
+            rows = self.execute(
+                "SELECT * FROM holdings WHERE market = ? ORDER BY code ASC", (market,),
+            ).fetchall()
+        else:
+            rows = self.execute("SELECT * FROM holdings ORDER BY market ASC, code ASC").fetchall()
+        return [Holding.from_dict(dict(r)) for r in rows]
 
-    def list_portfolios(self) -> list[Portfolio]:
-        rows = self.execute("SELECT * FROM portfolios ORDER BY update_time DESC").fetchall()
-        return [Portfolio.from_dict(dict(r)) for r in rows]
-
-    def get_portfolio(self, portfolio_id: int) -> Portfolio | None:
-        row = self.execute("SELECT * FROM portfolios WHERE id = ?", (portfolio_id,)).fetchone()
-        return Portfolio.from_dict(dict(row)) if row else None
-
-    def delete_portfolio(self, portfolio_id: int):
-        self._execute_write("DELETE FROM portfolios WHERE id = ?", (portfolio_id,))
-
-    def upsert_portfolio_holding(self, holding: PortfolioHolding):
+    def upsert_holding(self, holding: Holding):
+        """插入或更新持仓。"""
         self._execute_write(
-            """INSERT INTO portfolio_holdings
-               (portfolio_id, code, name, market, industry, weight, note)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(portfolio_id, code) DO UPDATE SET
-                 name=excluded.name, market=excluded.market, industry=excluded.industry,
-                 weight=excluded.weight, note=excluded.note""",
+            """INSERT INTO holdings (code, name, market, shares, cost_price)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(code) DO UPDATE SET
+                 name=excluded.name, market=excluded.market,
+                 shares=excluded.shares, cost_price=excluded.cost_price""",
             (
-                holding.portfolio_id, holding.code.upper(), holding.name, holding.market,
-                holding.industry, holding.weight, holding.note,
+                holding.code.upper(), holding.name, holding.market,
+                holding.shares, holding.cost_price,
             ),
         )
+
+    def delete_holding(self, holding_id: int):
+        self._execute_write("DELETE FROM holdings WHERE id = ?", (holding_id,))
+
+    def list_watchlist(self, market: str = "") -> list[WatchItem]:
+        """列出关注股票，可按市场筛选。"""
+        if market:
+            rows = self.execute(
+                "SELECT * FROM watchlist WHERE market = ? ORDER BY code ASC", (market,),
+            ).fetchall()
+        else:
+            rows = self.execute("SELECT * FROM watchlist ORDER BY market ASC, code ASC").fetchall()
+        return [WatchItem.from_dict(dict(r)) for r in rows]
+
+    def upsert_watch_item(self, item: WatchItem):
+        """插入或更新关注股票。"""
         self._execute_write(
-            "UPDATE portfolios SET update_time = ? WHERE id = ?",
-            (datetime.now().isoformat(), holding.portfolio_id),
+            """INSERT INTO watchlist (code, name, market)
+               VALUES (?, ?, ?)
+               ON CONFLICT(code) DO UPDATE SET
+                 name=excluded.name, market=excluded.market""",
+            (item.code.upper(), item.name, item.market),
         )
 
-    def delete_portfolio_holding(self, holding_id: int):
-        self._execute_write("DELETE FROM portfolio_holdings WHERE id = ?", (holding_id,))
+    def delete_watch_item(self, item_id: int):
+        self._execute_write("DELETE FROM watchlist WHERE id = ?", (item_id,))
 
-    def list_portfolio_holdings(self, portfolio_id: int) -> list[PortfolioHolding]:
-        rows = self.execute(
-            "SELECT * FROM portfolio_holdings WHERE portfolio_id = ? ORDER BY weight DESC, code ASC",
-            (portfolio_id,),
-        ).fetchall()
-        return [PortfolioHolding.from_dict(dict(r)) for r in rows]
+    def get_balance(self) -> AccountBalance:
+        """获取账户余额（单条记录）。"""
+        row = self.execute("SELECT * FROM account_balance WHERE id = 1").fetchone()
+        if row:
+            return AccountBalance.from_dict(dict(row))
+        return AccountBalance(id=1, us_balance=0.0, a_balance=0.0)
 
-    def insert_portfolio_analysis(self, analysis: PortfolioAnalysis) -> int:
-        cursor = self._execute_write(
-            """INSERT INTO portfolio_analyses
-               (portfolio_id, create_time, summary, industry_exposure, max_drawdown,
-                risk_triggered, candidates_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                analysis.portfolio_id, analysis.create_time, analysis.summary,
-                analysis.industry_exposure, analysis.max_drawdown,
-                1 if analysis.risk_triggered else 0,
-                analysis.candidates_json,
-            ),
+    def save_balance(self, balance: AccountBalance):
+        """保存账户余额。"""
+        self._execute_write(
+            """INSERT OR REPLACE INTO account_balance (id, us_balance, a_balance)
+               VALUES (1, ?, ?)""",
+            (balance.us_balance, balance.a_balance),
         )
-        return cursor.lastrowid
-
-    def list_portfolio_analyses(self, portfolio_id: int, limit: int = 20) -> list[PortfolioAnalysis]:
-        rows = self.execute(
-            """SELECT * FROM portfolio_analyses WHERE portfolio_id = ?
-               ORDER BY create_time DESC LIMIT ?""",
-            (portfolio_id, limit),
-        ).fetchall()
-        return [PortfolioAnalysis.from_dict(dict(r)) for r in rows]
 
 
     def insert_news(self, news_list: list[NewsItem]):

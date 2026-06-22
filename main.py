@@ -6,7 +6,7 @@ TradeHelper - 股票分析助手 应用入口
 应用架构：
   ┌──────────────────────────────────────────┐
   │              NavigationBar               │
-  │    [分析]      [历史报告]      [设置]      │
+  │   [分析]   [历史报告]  [我的持仓]  [设置]  │
   ├──────────────────────────────────────────┤
   │              Stack (页面容器)              │
   │  ┌──────────┐ ┌──────────┐ ┌──────────┐ │
@@ -171,7 +171,7 @@ def main(page: ft.Page):
             ),
             ft.NavigationBarDestination(
                 icon=ft.Icons.ACCOUNT_BALANCE_WALLET,
-                label="组合",
+                label="我的持仓",
                 disabled=not _fully_configured,
             ),
             ft.NavigationBarDestination(

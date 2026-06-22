@@ -741,3 +741,300 @@ f'''**重要**：T-1 报告为自动生成的基础版，缺少 SWOT 和同板�
 - 每个情景下的操作建议要具体到价位和条件，不要泛泛而谈
 - 期货走势是判断开盘方向最重要的输入，必须重点解读并说明依据
 - 盘前价格与期货的相对强弱关系，是判断个股是否有独立资金行为的关键"""
+
+
+# ============================================================
+#  持仓综合分析（我的持仓页面）
+# ============================================================
+
+PORTFOLIO_SYSTEM_PROMPT = """你是一个专业的全持仓分析师和资产配置顾问。请基于下面提供的**真实数据**，为用户生成一份全面的持仓综合分析报告。
+
+## 重要规则
+1. **全部使用中文输出** — 如果原始数据中有英文内容，请准确翻译为中文呈现，不得修改原意。
+2. **严禁编造数据** — 所有分析必须基于我提供的数据。每只股票的每个数值（涨跌幅、技术指标、回测收益等）都必须来自我提供的数据。找不到就写「数据未提供，无法判断」，不准编假数字。
+3. **每个结论必须有依据** — 不得只给光秃秃的结论。每个判断、每个操作建议，都必须附上分析过程和理由。说「建议卖出 AAPL」就要说明：是因为它跑输了哪个关注股、还是回测收益不佳、还是浮盈已达止盈点。
+4. **不可直接给出投资建议** — 报告中用「建议关注」「可考虑」等表述，最后必须注明「以上分析仅供参考，不构成投资建议」。
+5. **报告格式** — 使用 Markdown 格式输出。
+6. **每个价位必须是精确数字，不是区间** — 入场价、止损价、止盈价、关键点位，全部给精确到小数点后两位的单一数字。每条价位后面注明它是怎么算出来的。
+7. **禁忌词必须替换为数值描述** — 以下词汇禁止单独出现（必须写出数值标准）：「企稳」「放量」「缩量」「阳线」「阴线」「强势」「弱势」「恐慌性抛售」「探底回升」「回调到位」「确认支撑」。例如不能说「放量阳线企稳后入场」，必须说「当日涨幅 +2.3%、成交量较前5日均量放大40%、价格连续3日未创新低后，在 $935.01 入场」。
+8. **资金流向必须可追溯** — 每个调仓操作必须说明：资金来源（卖出谁、用多少余额）、资金去向（买入谁、多少股、什么价位）。保守方案和激进方案各自独立核算，不能出现卖了 $100,000 却只买 $80,000 的情况。
+9. **「调整后持仓结构」表格的成本字段** — 表格必须包含两列成本：①「原始成本（每股）」——美股不摊薄，卖出不影响剩余持仓的每股成本，A股同理；②「摊薄成本（每股）」——将卖出已实现的盈利/亏损摊入剩余持仓后得到的成本价（国内券商常用算法）。计算公式：(该股票总买入成本 - 卖出回收金额) ÷ 剩余股数。表格后加注脚说明两列的区别。
+
+## 报告结构
+1. **账户概览** — 账户总资产（现金 + 持仓市值）、各市场持仓结构、行业分布、现金比例、集中度风险
+2. **持仓个股逐只分析** — 每只持仓股：当前盈亏状态（从成本价算起）、技术面快照、行情状态（震荡/趋势）、因子有效性（Rank IC）、基本面估值（PE/PB/ROE）、最佳回测策略、与关注股的横向对比、持有/减仓/清仓建议及理由。**必须交叉印证：技术面、基本面、回测绩效、因子有效性四个维度，任一维度矛盾时须明确指出来。**
+3. **关注股票逐只分析** — 每只关注股：技术面快照、行情状态、因子有效性、基本面估值、最佳回测策略、与当前持仓的横向对比、是否值得买入及理由。**判断逻辑与持仓股一致，确保每只股票的分析深度相同。**
+4. **策略回测横向对比** — 所有股票（持仓+关注）的策略回测排名，最佳策略-股票组合推荐
+5. **综合调仓方案** — 这是报告的核心，必须给出两套完整的、可执行的方案：
+    - 🛡️ 保守方案：以保住现有利润、控制风险为主，变动较少
+    - 🚀 激进方案：以追求更高收益为主，仓位调整更积极
+    - 每个方案必须包含：卖出清单（代码、数量、价格、原因）、买入清单（代码、数量、价格、资金来源）、调整后的持仓结构概览
+    - 每个操作必须标注对标策略编号（如「基于策略 O 的 MA60 中长期持有逻辑」）
+    - 每笔操作都要说明理由（为什么在这个价位、为什么这个数量）
+    - **⚠️ 自检规则**：在完成综合调仓方案后，你必须逐只对照第二章和第三章中给出的操作建议，检查第五章的方案是否与前面的建议一致。如果激进方案的决策与前面的建议不同，必须在该操作的理由中明确解释为什么做了不同的选择。如果方案中的买卖数量与前面建议的股数范围不同，必须说明原因。不得出现前后的操作方向矛盾且不给解释的情况。
+    - **⚠️ 价位一致性规则**：第二章和第三章中给出的建议入场价、止损价、止盈价，第五章的买卖价格必须与之一一对应。如果第五章选择了不同于建议价位的价格，必须在操作理由中明确说明原因。不得出现前面给了精确建议价位、后面直接用另一个价格操作且不给理由的情况。
+"""
+
+
+def build_portfolio_user_prompt(
+    balance: dict,
+    holdings_data: list[dict],
+    watchlist_data: list[dict],
+    market: str,
+    period: str,
+    mode: str = "eod",
+) -> str:
+    """构建持仓综合分析的用户提示词。
+
+    Args:
+        balance: {"us_balance": float, "a_balance": float}
+        holdings_data: 每只持仓的完整分析数据列表，每个元素包含：
+            - holding: Holding dataclass
+            - current_price: float | None (最新价格)
+            - price_date: str (价格对应的日期)
+            - price_source: str (价格来源说明，如"K线收盘价（2026-06-17）"或"实时报价（2026-06-18 14:30:00）")
+            - technical: str (技术面摘要)
+            - backtest: dict (回测结果)
+            - alpha_score: float | None
+            - news_summary: str (新闻情感摘要)
+            - market_regime: str (行情状态中文标签)
+            - rank_ic_info: str (因子有效性 IC/IR)
+            - fund_info: str (基本面 PE/PB/ROE/毛利率)
+            - benchmark_return: float (买入持有基准收益)
+            - regime_adapt_info: str (策略适配信息)
+        watchlist_data: 每只关注股的完整分析数据，结构同上（无 holding 字段，用 watch_item 替代）
+        market: "US" | "A"
+        period: 回测周期
+        mode: 分析模式
+    """
+    market_label = "美股" if market == "US" else "A股"
+    currency = "$" if market == "US" else "¥"
+
+    # ── 账户余额 ──
+    if market == "US":
+        cash = balance.get("us_balance", 0)
+    else:
+        cash = balance.get("a_balance", 0)
+
+    lines = [
+        f"## 当前时间与报告类型",
+        f"这是一份**{market_label}持仓综合分析报告**（{period} 回测周期，分析模式={mode}）。",
+        f"请基于以下所有数据，输出完整报告。",
+        "",
+        f"## 账户资金",
+        f"- {market_label}可用资金：**{currency}{cash:,.2f}**",
+        "",
+    ]
+
+    # ── 当前持仓 ──
+    lines.append(f"## {market_label}当前持仓")
+    lines.append("以下是用户当前持有的股票：")
+    # 收集所有价格来源以便在下方标注
+    price_sources = set()
+    total_cost = 0.0
+    total_market_value = 0.0
+    for i, hd in enumerate(holdings_data, 1):
+        h = hd["holding"]
+        cp = hd.get("current_price")
+        ps = hd.get("price_source", "K线收盘价")
+        price_sources.add(ps)
+        cost = h.shares * h.cost_price
+        total_cost += cost
+        pnl_str = ""
+        market_value = 0
+        if cp and cp > 0:
+            market_value = h.shares * cp
+            total_market_value += market_value
+            pnl = (cp - h.cost_price) / h.cost_price
+            pnl_str = f" | 现价={currency}{cp:.2f} | 市值={currency}{market_value:,.2f} | 浮盈/亏={pnl:+.2%} | 价格来源：{ps}"
+        else:
+            pnl_str = " | 现价=数据未获取 | 浮盈/亏=无法计算"
+
+        lines.append(
+            f"{i}. **{h.code} {h.name}** | 市场={market_label} | "
+            f"持有 {h.shares:,.0f} 股 | 成本价={currency}{h.cost_price:.2f}"
+            f"{pnl_str}"
+        )
+
+    lines.append(f"\n持仓总成本：{currency}{total_cost:,.2f}")
+    if total_market_value > 0:
+        lines.append(f"持仓总市值：{currency}{total_market_value:,.2f}")
+        total_pnl = (total_market_value - total_cost) / total_cost if total_cost > 0 else 0
+        lines.append(f"账户总资产（现金+持仓）：{currency}{cash + total_market_value:,.2f}")
+        lines.append(f"整体浮盈/亏：{total_pnl:+.2%}")
+    # 标注价格来源汇总
+    if price_sources:
+        lines.append(f"⚠️ 价格数据来源：{'、'.join(price_sources)}")
+    lines.append("")
+
+    # ── 持仓个股详细数据 ──
+    lines.append("---")
+    lines.append("## 持仓个股详细分析数据")
+    for hd in holdings_data:
+        h = hd["holding"]
+        lines.append(f"### {h.code} {h.name}（持仓）")
+        lines.append(f"- 持有数量：{h.shares:,.0f} 股")
+        lines.append(f"- 成本价：{currency}{h.cost_price:.2f}")
+        if hd.get("current_price"):
+            cp = hd["current_price"]
+            pnl = (cp - h.cost_price) / h.cost_price
+            ps = hd.get("price_source", "K线收盘价")
+            lines.append(f"- 当前价：{currency}{cp:.2f}（浮盈/亏 {pnl:+.2%}）| 价格来源：{ps}")
+        if hd.get("alpha_score") is not None:
+            lines.append(f"- Alpha Final_Score：{hd['alpha_score']:+.3f}")
+        if hd.get("market_regime"):
+            lines.append(f"- 行情状态：{hd['market_regime']}")
+        if hd.get("rank_ic_info"):
+            lines.append(f"- 因子有效性：{hd['rank_ic_info']}")
+        if hd.get("fund_info"):
+            lines.append(f"- {hd['fund_info']}")
+        if hd.get("benchmark_return") is not None and hd["benchmark_return"] != 0:
+            lines.append(f"- 买入持有基准收益：{hd['benchmark_return']*100:+.2f}%")
+        if hd.get("regime_adapt_info"):
+            lines.append(f"- 策略适配：{hd['regime_adapt_info']}")
+        if hd.get("technical"):
+            lines.append(f"- 技术面摘要：\n{hd['technical']}")
+        if hd.get("backtest"):
+            bt = hd["backtest"]
+            lines.append("- 策略回测绩效：")
+            for strat_name, result in bt.items():
+                lines.append(
+                    f"  - {strat_name}：总收益={result.total_return*100:+.2f}% | "
+                    f"年化={result.annual_return*100:+.2f}% | "
+                    f"最大回撤={result.max_drawdown*100:.2f}% | "
+                    f"夏普={result.sharpe_ratio:.2f} | 交易{result.total_trades}次"
+                )
+                # 附上交易记录
+                if result.trades:
+                    for t in result.trades[:3]:  # 最多3笔
+                        entry_d = t.get("entry_date", "?")
+                        entry_p = t.get("entry_price", 0)
+                        exit_d = t.get("exit_date", "?")
+                        exit_p = t.get("exit_price", 0)
+                        pnl_t = t.get("pnl", 0)
+                        ret_t = t.get("return_pct", 0)
+                        lines.append(
+                            f"    · {entry_d} 买入→{exit_d} 卖出，"
+                            f"盈亏 {pnl_t:+.0f}（{ret_t:+.1f}%）"
+                        )
+        if hd.get("news_summary"):
+            lines.append(f"- 新闻情感摘要：{hd['news_summary']}")
+        lines.append("")
+
+    # ── 关注股票详细数据 ──
+    if watchlist_data:
+        lines.append("---")
+        lines.append("## 关注股票详细分析数据")
+        for wd in watchlist_data:
+            w = wd["watch_item"]
+            lines.append(f"### {w.code} {w.name}（关注）")
+            lines.append(f"- 市场：{market_label}")
+            if wd.get("current_price"):
+                ps = wd.get("price_source", "K线收盘价")
+                lines.append(f"- 当前价：{currency}{wd['current_price']:.2f} | 价格来源：{ps}")
+            if wd.get("alpha_score") is not None:
+                lines.append(f"- Alpha Final_Score：{wd['alpha_score']:+.3f}")
+            if wd.get("market_regime"):
+                lines.append(f"- 行情状态：{wd['market_regime']}")
+            if wd.get("rank_ic_info"):
+                lines.append(f"- 因子有效性：{wd['rank_ic_info']}")
+            if wd.get("fund_info"):
+                lines.append(f"- {wd['fund_info']}")
+            if wd.get("benchmark_return") is not None and wd["benchmark_return"] != 0:
+                lines.append(f"- 买入持有基准收益：{wd['benchmark_return']*100:+.2f}%")
+            if wd.get("regime_adapt_info"):
+                lines.append(f"- 策略适配：{wd['regime_adapt_info']}")
+            if wd.get("technical"):
+                lines.append(f"- 技术面摘要：\n{wd['technical']}")
+            if wd.get("backtest"):
+                bt = wd["backtest"]
+                lines.append("- 策略回测绩效：")
+                for strat_name, result in bt.items():
+                    lines.append(
+                        f"  - {strat_name}：总收益={result.total_return*100:+.2f}% | "
+                        f"年化={result.annual_return*100:+.2f}% | "
+                        f"最大回撤={result.max_drawdown*100:.2f}% | "
+                        f"夏普={result.sharpe_ratio:.2f} | 交易{result.total_trades}次"
+                    )
+                    if result.trades:
+                        for t in result.trades[:3]:
+                            entry_d = t.get("entry_date", "?")
+                            entry_p = t.get("entry_price", 0)
+                            exit_d = t.get("exit_date", "?")
+                            exit_p = t.get("exit_price", 0)
+                            pnl_t = t.get("pnl", 0)
+                            ret_t = t.get("return_pct", 0)
+                            lines.append(
+                                f"    · {entry_d} 买入→{exit_d} 卖出，"
+                                f"盈亏 {pnl_t:+.0f}（{ret_t:+.1f}%）"
+                            )
+            if wd.get("news_summary"):
+                lines.append(f"- 新闻情感摘要：{wd['news_summary']}")
+            lines.append("")
+
+    # ── 横向对比数据 ──
+    lines.append("---")
+    lines.append("## 横向对比排名")
+    all_stocks = []
+    for hd in holdings_data:
+        h = hd["holding"]
+        all_stocks.append({
+            "code": h.code,
+            "name": h.name,
+            "type": "持仓",
+            "alpha_score": hd.get("alpha_score"),
+            "best_return": max(
+                (r.total_return for r in (hd.get("backtest") or {}).values()), default=0
+            ),
+        })
+    for wd in watchlist_data:
+        w = wd["watch_item"]
+        all_stocks.append({
+            "code": w.code,
+            "name": w.name,
+            "type": "关注",
+            "alpha_score": wd.get("alpha_score"),
+            "best_return": max(
+                (r.total_return for r in (wd.get("backtest") or {}).values()), default=0
+            ),
+        })
+
+    # 按 best_return 排序
+    all_stocks.sort(key=lambda s: s["best_return"], reverse=True)
+    lines.append("| 排名 | 类型 | 代码 | 名称 | Alpha Score | 最佳策略收益 |")
+    lines.append("|------|------|------|------|-------------|-------------|")
+    for rank, s in enumerate(all_stocks, 1):
+        score_str = f"{s['alpha_score']:+.3f}" if s['alpha_score'] is not None else "N/A"
+        lines.append(
+            f"| {rank} | {s['type']} | {s['code']} | {s['name']} | "
+            f"{score_str} | {s['best_return']*100:+.2f}% |"
+        )
+
+    lines.append("")
+    lines.append("---")
+    lines.append("## 你的任务")
+    lines.append(
+        f"请基于以上全部真实数据，生成完整的{market_label}持仓综合分析报告（严格按照 SYSTEM_PROMPT 中的 5 章结构输出）。"
+    )
+    lines.append("")
+    lines.append("**核心要点**：")
+    lines.append(
+        "- 你的第 5 章「综合调仓方案」是整份报告最有价值的部分。必须给出具体可操作的计划。"
+    )
+    lines.append(
+        f"- 用户有 {currency}{cash:,.2f} 可用资金。每笔买入必须说明资金来源。"
+    )
+    lines.append(
+        "- 持仓股的卖出建议必须基于数据：浮盈是否过大需要止盈？回测是否显示策略不佳？"
+        "是否有关注股比它更好值得替换？——每个理由都要有数据支撑。"
+    )
+    lines.append(
+        "- 关注股的买入建议也必须基于数据：回测收益是否显著高于现有持仓？"
+        "Alpha 得分是否更高？技术面是否发出入场信号？——不能只说「值得关注」就完了。"
+    )
+    lines.append(
+        "- 保守方案和激进方案的区别要明显：保守方案变动少（可能只减仓/加仓 1-2 只），"
+        "激进方案敢做大动作（卖弱买强、集中仓位）。"
+    )
+
+    return "\n".join(lines)
