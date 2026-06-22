@@ -8,6 +8,7 @@
 """
 
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
@@ -160,13 +161,34 @@ class PortfolioService:
                 on_progress(f"正在分析 {code}（{i+1}/{len(all_codes)}）...")
 
             try:
-                # 获取价格
+                # 获取价格（与 tab1 _fetch_prices 逻辑一致：缓存 + 增量更新）
                 prices = self.db.get_prices(code, start, end)
+
                 if not prices:
-                    prices = fetcher.fetch_price_history(code, start, end)
-                    if prices:
-                        self.db.insert_prices(prices)
+                    # 缓存为空 → 全量拉取
+                    logger.info(f"{code} 缓存为空，联网拉取 {start}~{end}")
+                    new_prices = fetcher.fetch_price_history(code, start, end)
+                    if new_prices:
+                        self.db.insert_prices(new_prices)
+                    prices = self.db.get_prices(code, start, end)
+                else:
+                    last_date = prices[-1].date
+                    logger.info(f"{code} 缓存: {len(prices)} 条 ({prices[0].date}~{last_date})")
+
+                    # 增量拉取
+                    from datetime import date as dt_date, timedelta
+                    next_day = (dt_date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
+                    today_str = dt_date.today().isoformat()
+                    logger.info(f"{code} 检查增量 {next_day}~{today_str}")
+                    new_prices = fetcher.fetch_price_history(code, next_day, today_str)
+                    latest_new_date = max((p.date for p in new_prices), default="")
+                    if latest_new_date > last_date:
+                        self.db.insert_prices(new_prices)
                         prices = self.db.get_prices(code, start, end)
+                        new_count = sum(1 for p in new_prices if p.date > last_date)
+                        logger.info(f"{code} 增量获取 {new_count} 条新数据（最新 {latest_new_date}）")
+                    else:
+                        logger.info(f"{code} 无增量数据（缓存最新 {last_date}，数据源最新 {latest_new_date or '无'}）")
 
                 if not prices or len(prices) < 20:
                     logger.warning(f"{code} 数据不足（<20条），跳过")
@@ -191,11 +213,38 @@ class PortfolioService:
                 except Exception:
                     pass
 
+                # 获取基本面数据
+                fundamental_data = None
+                try:
+                    from alpha.fundamental import fetch_fundamental_factors
+                    settings = Settings()
+                    # 从 holding/watch_item 中取股票名称
+                    stock_name = ""
+                    if is_holding and i < len(holdings):
+                        stock_name = holdings[i].name
+                    elif not is_holding:
+                        watch_idx = i - len(holdings)
+                        if watch_idx < len(watchlist):
+                            stock_name = watchlist[watch_idx].name
+                    fundamental_data = fetch_fundamental_factors(
+                        name=stock_name, code=code, market=market,
+                        model=settings.get("llm_model", ""),
+                        base_url=settings.get("llm_base_url", ""),
+                        api_key=settings.get("llm_api_key", ""),
+                        finnhub_token=settings.get("news_token_us", ""),
+                    )
+                except Exception as e:
+                    logger.warning(f"{code} 基本面数据获取失败: {e}")
+
                 # 跑量化管道（跳过度参数，加速）
                 result = run_pipeline(
                     df, news_df=news_df, market=market,
+                    fundamental_data=fundamental_data,
                     skip_param_tuning=True,
                 )
+
+                # API 调用间短暂延迟，避免触发频率限制
+                time.sleep(0.5)
 
                 # 提取 K 线最新收盘价及日期
                 latest_date = str(df["date"].iloc[-1].strftime("%Y-%m-%d"))
@@ -300,13 +349,15 @@ class PortfolioService:
         if not holdings_data and not watchlist_data:
             raise RuntimeError("所有股票的数据获取均失败，无法生成报告。")
 
-        # Step 1.5: 尝试获取实时报价（仅盘中/盘前模式）
-        # 盘后分析直接用 K 线收盘价，不需要实时报价
-        # 美股：盘前/盘后用 yfinance 延伸时段，盘中用 TickFlow
-        # A 股：用 TickFlow 实时行情
-        if mode in ("intraday", "pre") and Settings().get(
+        # Step 1.5: 获取最新价格（覆盖 K 线收盘价）
+        # 美股盘前 → yfinance 延伸时段（盘前可获取）
+        # 美股盘中 → TickFlow 实时数据
+        # 美股盘后/EOD → 保持 K 线收盘价（yfinance 夜盘拿不到）
+        # A 股 → TickFlow 实时行情（如有 token）
+        should_fetch_quote = mode in ("intraday", "pre") and Settings().get(
             "stock_token_us" if market == "US" else "stock_token_a", ""
-        ):
+        )
+        if should_fetch_quote:
             if on_progress:
                 on_progress("正在获取实时报价...")
             from utils.session import detect_session
@@ -321,7 +372,7 @@ class PortfolioService:
                 try:
                     rt_price = None
                     rt_timestamp = 0
-                    rt_source = "实时报价"
+                    rt_source = ""
 
                     # 先尝试 TickFlow 获取 tick/quote（用于检测交易时段）
                     tick = fetcher.fetch_stock_tick(code) if hasattr(fetcher, 'fetch_stock_tick') else None
@@ -330,28 +381,30 @@ class PortfolioService:
                     if market == "US":
                         # 检测当前交易时段
                         session = detect_session("US", stock_tick=tick, stock_quote=quote)
-                        use_yfinance = session != "intraday"
+                        # 只有盘前用 yfinance（夜盘/盘后 yfinance 拿不到）
+                        use_yfinance = session == "pre"
 
                         if use_yfinance:
-                            # 美股盘前/盘后/休市 → yfinance 延伸时段数据
                             yf_data = fetch_us_extended_quote(code)
                             if yf_data and yf_data.get("price", 0) > 0:
                                 rt_price = yf_data["price"]
                                 rt_timestamp = yf_data.get("timestamp", 0)
-                                rt_source = f"yfinance延伸时段（{session}）"
+                                rt_source = f"yfinance盘前数据"
                                 logger.info(
-                                    f"yfinance 延伸时段 ({code}): {rt_price:.2f}, session={session}"
+                                    f"yfinance 盘前 ({code}): {rt_price:.2f}, session={session}"
                                 )
                             else:
-                                logger.warning(f"yfinance 延伸时段数据为空 ({code})，回退到K线收盘价")
-
-                        else:
+                                logger.warning(f"yfinance 盘前数据为空 ({code})，回退到K线收盘价")
+                        elif session == "intraday":
                             # 盘中 → TickFlow 实时数据
                             if tick and tick.get("latest", 0) > 0:
                                 rt_price = tick["latest"]
                                 rt_timestamp = tick.get("timestamp", 0)
                                 rt_source = "TickFlow实时报价"
                                 logger.info(f"TickFlow 实时报价 ({code}): {rt_price:.2f}")
+                        else:
+                            # 盘后/休市 → 保持 K 线收盘价
+                            pass
                     else:
                         # A 股：TickFlow 实时行情
                         if tick and tick.get("latest", 0) > 0:
