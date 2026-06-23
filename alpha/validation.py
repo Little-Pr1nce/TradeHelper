@@ -145,12 +145,15 @@ def apply_factor_weights(
     indicator_values: dict[str, pd.Series],
     validation: dict[str, dict],
     regime_weights: dict[str, float] | None = None,
+    prediction_reliability: float = 1.0,
 ) -> pd.Series:
     """
     应用因子检验结果 + 市场状态权重，加权合成技术面得分。
 
-    综合两层权重：
+    综合三层权重：
       1. 检验权重（multiplier）：D 级剔除 ×0.0，C 级半权 ×0.5，A/B 级全权 ×1.0
+      2. 方向正确性降权：direction_correct=False → multiplier /= 2
+      3. 预测可靠性降权：prediction_reliability < 0.5 → 所有 multiplier *= reliability
       2. 市场状态权重（regime）：趋势市 MACD/ADX 高权重，震荡市 RSI/KDJ 高权重
 
     Args:
@@ -167,12 +170,20 @@ def apply_factor_weights(
 
     weighted = []
     total_weight = 0.0
+    # 预测可靠性因子：当近期预测正确率低时，系统性地降低所有因子权重
+    reliability_mult = max(prediction_reliability, 0.3)
     for col, series in indicator_values.items():
         v = validation.get(col, {})
         mult = v.get("multiplier", 1.0)
         if mult == 0.0:
             logger.debug(f"  因子 {col} D 级剔除，不参与打分")
             continue
+        # 方向性错误的因子降权
+        if not v.get("direction_correct", True):
+            mult = max(mult / 2, 0.25)
+            logger.debug(f"  因子 {col} 方向错误，降权至 {mult:.2f}")
+        # 预测可靠性全局降权
+        mult = mult * reliability_mult
         rw = regime_weights.get(col, 1.0 / len(indicator_values))
         combined_weight = mult * rw
         weighted.append(series * combined_weight)

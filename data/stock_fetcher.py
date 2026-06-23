@@ -3,7 +3,8 @@
 
 统一股票行情数据源：
   - TickFlowFetcher: 第一且唯一的股市信息/K线/盘中报价来源
-  - yfinance: 仅用于美股盘前/盘后延伸交易时段价格补充
+  - Nasdaq.com API: 美股盘前/盘后延伸交易时段价格（首选，免费无 Key）
+  - yfinance: 美股盘前/盘后降级方案（Nasdaq 不可用时自动切换）
 
 新闻源不在本模块处理：A 股使用 akshare，美股使用 Finnhub。
 数据源由 get_stock_fetcher(market) 自动选择。
@@ -168,8 +169,103 @@ def _retry(func: Callable[[], T], max_retries=3, label="") -> T:
 
 
 
-def fetch_us_extended_quote(code: str) -> dict | None:
-    """用 yfinance 获取美股盘前/盘后延伸时段价格。
+def fetch_nasdaq_extended_quote(code: str) -> dict | None:
+    """从 Nasdaq.com 公开 API 获取美股盘前/盘后延伸时段价格。
+
+    免费、无需 API Key，覆盖 NASDAQ + NYSE 全量美股。
+    primaryData = 当前最新报价（盘前/盘中/盘后），isRealTime 标识是否实时。
+    secondaryData = 上一交易日收盘数据（prev_close 来源）。
+    """
+    try:
+        import urllib.request
+        import json
+
+        url = f"https://api.nasdaq.com/api/quote/{code.upper()}/info?assetclass=stocks"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Accept": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        if not data.get("data"):
+            logger.warning(f"Nasdaq.com 返回空数据 ({code})")
+            return None
+
+        inner = data["data"]
+        primary = inner.get("primaryData") or {}
+        secondary = inner.get("secondaryData") or {}
+
+        # 最新价格
+        price_str = primary.get("lastSalePrice", "")
+        if not price_str or price_str == "NA":
+            logger.warning(f"Nasdaq.com 无有效价格 ({code}): lastSalePrice={price_str}")
+            return None
+        price = float(price_str.replace("$", "").replace(",", ""))
+
+        # 前收盘价（取 secondaryData，即上一交易日常规时段收盘价）
+        prev_close = 0.0
+        prev_str = secondary.get("lastSalePrice", "")
+        if prev_str and prev_str.startswith("$"):
+            prev_close = float(prev_str.replace("$", "").replace(",", ""))
+
+        # 涨跌
+        change = price - prev_close if prev_close > 0 else 0.0
+        change_pct = round(change / prev_close, 6) if prev_close > 0 else 0.0
+
+        # 成交量（盘前/盘后也有成交量）
+        vol_str = primary.get("volume", "0")
+        volume = 0
+        try:
+            volume = int(float(vol_str.replace(",", "")))
+        except (ValueError, TypeError):
+            pass
+
+        # 时间戳：解析 lastTradeTimestamp 例如 "Jun 22, 2026 4:19 AM ET"
+        ts = 0
+        ts_str = primary.get("lastTradeTimestamp", "")
+        if ts_str:
+            try:
+                from datetime import datetime as _dt
+                # 去掉时区后缀 " ET"
+                ts_clean = ts_str.replace(" ET", "").replace("Closed at ", "")
+                parsed = _dt.strptime(ts_clean, "%b %d, %Y %I:%M %p")
+                ts = int(parsed.timestamp() * 1000)
+            except Exception:
+                pass
+
+        market_status = inner.get("marketStatus", "Unknown")
+
+        logger.info(
+            f"Nasdaq.com 延伸时段 ({code}): price={price:.2f}, "
+            f"prev_close={prev_close:.2f}, change_pct={change_pct:.4%}, "
+            f"实时={primary.get('isRealTime', False)}, 时段={market_status}"
+        )
+
+        return {
+            "code": code.upper(),
+            "latest": round(price, 2),
+            "price": round(price, 2),
+            # Nasdaq /info 不提供盘前盘后的 open/high/low，填 0
+            "open": 0.0,
+            "high": 0.0,
+            "low": 0.0,
+            "prev_close": round(prev_close, 2),
+            "change": round(change, 2),
+            "change_pct": change_pct,
+            "volume": volume,
+            "amount": 0,
+            "timestamp": ts,
+            "status": 0,
+            "vwap": 0,
+        }
+    except Exception as e:
+        logger.warning(f"Nasdaq.com 延伸时段获取失败 ({code}): {e}")
+        return None
+
+
+def _fetch_yfinance_extended_quote(code: str) -> dict | None:
+    """用 yfinance 获取美股盘前/盘后延伸时段价格（降级方案）。
 
     使用 period=\"5d\" 而非 \"1d\"，以兼容凌晨时段（美东 00:00-04:00）
     「今天」尚未开盘导致 yfinance 返回空 DataFrame 的边界情况。
@@ -181,12 +277,11 @@ def fetch_us_extended_quote(code: str) -> dict | None:
         ticker = yf.Ticker(code.upper())
         hist = ticker.history(period="5d", interval="1m", prepost=True)
         if hist is None or hist.empty:
+            logger.debug(f"yfinance 无延伸时段数据 ({code}): DataFrame 为空")
             return None
 
         # 价格取最新 bar（含无成交量的盘前/盘后报价）
-        # 当日统计（开/高/低/量）取最新 bar 所在日的数据
-        hist_with_vol = hist[hist["Volume"] > 0]
-        price_bar = hist.iloc[-1]           # 最新价格（不含成交量过滤）
+        price_bar = hist.iloc[-1]
         price = float(price_bar["Close"])
 
         # 确定当日数据范围
@@ -213,6 +308,12 @@ def fetch_us_extended_quote(code: str) -> dict | None:
 
         change_pct = (price - prev_close) / prev_close if prev_close > 0 else 0.0
         ts = int(price_bar.name.timestamp() * 1000) if hasattr(price_bar, "name") else 0
+
+        logger.info(
+            f"yfinance 延伸时段 ({code}): price={price:.2f}, "
+            f"prev_close={prev_close:.2f}, change_pct={change_pct:.4%}"
+        )
+
         return {
             "code": code.upper(),
             "latest": round(price, 2),
@@ -230,8 +331,24 @@ def fetch_us_extended_quote(code: str) -> dict | None:
             "vwap": 0,
         }
     except Exception as e:
-        logger.warning(f"yfinance 延伸时段数据获取失败 ({code}): {e}")
+        logger.warning(f"yfinance 延伸时段获取失败 ({code}): {e}")
         return None
+
+
+def fetch_us_extended_quote(code: str) -> dict | None:
+    """获取美股盘前/盘后延伸时段价格。
+
+    策略：Nasdaq.com 公开 API 优先（免费、无需 Key、覆盖 NASDAQ+NYSE），
+    不可用时自动降级到 yfinance。
+    """
+    # 优先 Nasdaq.com
+    result = fetch_nasdaq_extended_quote(code)
+    if result is not None:
+        return result
+
+    # 降级 yfinance
+    logger.info(f"Nasdaq.com 不可用，降级到 yfinance ({code})")
+    return _fetch_yfinance_extended_quote(code)
 
 class TickFlowFetcher(BaseStockFetcher):
     """
@@ -257,6 +374,7 @@ class TickFlowFetcher(BaseStockFetcher):
     def __init__(self, api_key: str = ""):
         from tickflow import TickFlow
         self._api_key = (api_key or "").strip()
+        self._quote_cache: dict[str, tuple[float, dict]] = {}  # (timestamp, data)
         if self._api_key:
             self._tf = TickFlow(api_key=self._api_key, base_url="https://api.tickflow.org")
             logger.info("TickFlow 完整服务已初始化（日K线 + 实时行情）")
@@ -373,6 +491,13 @@ class TickFlowFetcher(BaseStockFetcher):
             logger.warning("TickFlow 免费层不支持实时行情，需要 API Key")
             return None
 
+        # 30 秒内同一代码直接返回缓存（避免 fetch_stock_tick + fetch_quote 双重调用）
+        now_ts = time.time()
+        if code in self._quote_cache:
+            cached_ts, cached_data = self._quote_cache[code]
+            if now_ts - cached_ts < 30:
+                return cached_data
+
         try:
             symbol = self._to_symbol(code)
             quotes = self._tf.quotes.get(symbols=[symbol])
@@ -384,7 +509,7 @@ class TickFlowFetcher(BaseStockFetcher):
             prev_close = float(q.get("prev_close", 0))
             own_chp = (latest - prev_close) / prev_close if latest and prev_close else 0.0
 
-            return {
+            result = {
                 "code": str(code),
                 "latest": latest,
                 "open": float(q.get("open", 0)),
@@ -399,6 +524,8 @@ class TickFlowFetcher(BaseStockFetcher):
                 "status": 0,
                 "vwap": float(q.get("vwap", 0)) if q.get("vwap") else 0.0,
             }
+            self._quote_cache[code] = (time.time(), result)
+            return result
         except Exception as e:
             logger.error(f"TickFlow fetch_quote 失败 ({code}): {e}")
             return None
@@ -442,19 +569,6 @@ class TickFlowFetcher(BaseStockFetcher):
         logger.info(f"TickFlow 期货报价→ETF: {region}:{code} → {etf_code}")
         return self.fetch_quote(etf_code)
 
-    def fetch_future_kline(self, region: str, code: str,
-                           kType: int = 2, limit: int = 12) -> list[dict]:
-        """
-        期货分钟 K 线 → 不再使用，返回空列表。
-
-        盘前分析中 NQ/ES 5 分钟 K 线走势形态占 futures_score 权重仅 30%，
-        去掉后影响微乎其微。
-        """
-        logger.info(f"TickFlow 不获取期货分钟K线 ({region}:{code})，"
-                     f"futures_score 纯靠涨跌方向")
-        return []
-
-
 
 def check_tickflow_available(market: str = "US", code: str | None = None) -> dict:
     """检测 TickFlow K线/实时接口是否可用，返回结构化状态。"""
@@ -477,18 +591,78 @@ def check_tickflow_available(market: str = "US", code: str | None = None) -> dic
         return {"source": "TickFlow", "ok": False, "error": str(e)}
 
 
-def check_yfinance_available(code: str = "AAPL") -> dict:
-    """检测 yfinance 美股延伸时段接口是否可用。"""
+def check_extended_quote_available(code: str = "AAPL") -> dict:
+    """检测美股延伸时段接口是否可用（Nasdaq.com 优先 → yfinance 降级）。"""
     try:
         quote = fetch_us_extended_quote(code)
         return {
-            "source": "yfinance",
+            "source": "Nasdaq.com (yfinance fallback)",
             "ok": quote is not None and quote.get("latest", 0) > 0,
             "extended_quote_ok": quote is not None,
             "error": "",
         }
     except Exception as e:
-        return {"source": "yfinance", "ok": False, "error": str(e)}
+        return {"source": "Nasdaq.com (yfinance fallback)", "ok": False, "error": str(e)}
+
+def fetch_cached_prices(
+    code: str, market: str, start: str, end: str,
+    db=None, min_records: int = 0,
+) -> "pd.DataFrame | None":
+    """缓存优先的 K 线获取：DB 缓存 → 增量拉取 → 全量拉取降级。
+
+    与 Tab1 _fetch_prices / Tab3 analyze_portfolio 原来的逻辑完全一致。
+
+    Args:
+        code: 股票代码
+        market: "US" / "A"
+        start: 起始日期
+        end: 结束日期
+        db: Database 实例（必传）
+        min_records: 最少需要的 K 线条数（不足则返回 None）
+
+    Returns:
+        排序好的 DataFrame（含 date 列为 datetime），数据不足则返回 None
+    """
+    import pandas as pd
+    from datetime import date as dt_date, timedelta
+    from data.database import Database
+
+    if db is None:
+        db = Database()
+
+    prices = db.get_prices(code, start, end)
+    fetcher = get_stock_fetcher(market)
+
+    if not prices:
+        logger.info(f"{code} 缓存为空，联网拉取 {start}~{end}")
+        new_prices = fetcher.fetch_price_history(code, start, end)
+        if new_prices:
+            db.insert_prices(new_prices)
+        prices = db.get_prices(code, start, end)
+    else:
+        last_date = prices[-1].date
+        logger.info(f"{code} 缓存: {len(prices)} 条 ({prices[0].date}~{last_date})")
+
+        next_day = (dt_date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
+        today_str = dt_date.today().isoformat()
+        logger.info(f"{code} 检查增量 {next_day}~{today_str}")
+        new_prices = fetcher.fetch_price_history(code, next_day, today_str)
+        latest_new_date = max((p.date for p in new_prices), default="")
+        if latest_new_date > last_date:
+            db.insert_prices(new_prices)
+            prices = db.get_prices(code, start, end)
+            new_count = sum(1 for p in new_prices if p.date > last_date)
+            logger.info(f"{code} 增量获取 {new_count} 条新数据（最新 {latest_new_date}）")
+        else:
+            logger.info(f"{code} 无增量数据（缓存最新 {last_date}，数据源最新 {latest_new_date or '无'}）")
+
+    if not prices or (min_records > 0 and len(prices) < min_records):
+        return None
+
+    df = pd.DataFrame([p.to_dict() for p in prices])
+    df["date"] = pd.to_datetime(df["date"])
+    return df.sort_values("date").reset_index(drop=True)
+
 
 def get_stock_fetcher(market: str = "US") -> BaseStockFetcher:
     """

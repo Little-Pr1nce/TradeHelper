@@ -37,6 +37,10 @@ class AnalysisResult:
     active_strategies: list = field(default_factory=list)   # 当前激活的策略名
     skipped_strategies: list = field(default_factory=list)  # 被跳过的策略名
     param_tuning: dict = field(default_factory=dict)        # 参数调优结果
+    strategy_audit: "StrategyAuditReport | None" = None     # 策略时间切分审计报告
+    strategy_pool: "StrategyPoolResult | None" = None       # 策略池扩展+审计结果
+    operation_plan: str | None = None                       # 代码生成的操作方案 Markdown
+    signal_check: list | None = None                        # 各策略信号状态 list[dict]
 
 
 def run_pipeline(
@@ -52,31 +56,38 @@ def run_pipeline(
     depth_score: float = 0.0,
     depth_available: bool = False,
     skip_param_tuning: bool = False,
+    prediction_reliability: float = 1.0,
+    expand_pool: bool = True,
+    stock_code: str = "",
 ):
     """
-    执行完整的量化分析计算管道（纯计算，无 I/O）。
+    执行完整的量化分析计算管道。
 
-    管道步骤：
+    expand_pool: True 时启用策略池扩展 + 缓存 + 自适应最佳参数（推荐）。
+    stock_code: 股票代码，用于 per_stock_params 和 bt_variant_cache 查询。
+
+    管道步骤:
       ┌──────────────────────────────────────────────┐
-      │ ① 预计算 7 个技术指标（MA/MACD/RSI/布林/KDJ）    │
-      │ ② Alpha 多因子打分（Z-Score + tanh + 加权合成）  │
-      │ ③ Rank IC 计算（因子有效性检验）                 │
-      │ ④ 多策略并行回测（T+1 撮合）                    │
-      │ ⑤ 策略参数扫参调优（可选，skip_param_tuning=True 跳过）│
+      | ① 预计算 7 个技术指标 (MA/MACD/RSI/布林/KDJ)    |
+      | ② Alpha 多因子打分 (Z-Score + tanh + 加权合成)  |
+      | ③ Rank IC 计算 (因子有效性检验)                  |
+      | ④ 多策略并行回测 (T+1 撮合)                     |
+      | ⑤ 策略参数扫参调优 (可选, skip_param_tuning=True 跳过)|
       └──────────────────────────────────────────────┘
 
     Args:
-        df: 原始 OHLCV DataFrame（必须含 date/open/high/low/close/volume）
-        news_df: 新闻情感 DataFrame（date + finbert_score），可选
-        initial_capital: 初始资金（默认 10 万）
-        market: "A" 或 "US"，影响涨跌停规则
-        strategy_names: 策略列表，默认 ["A", "B", "C"]
+        df: 原始OHLCV DataFrame
+        news_df: 新闻情感DataFrame, 可选
+        initial_capital: 初始资金, 默认10万
+        market: A或US
+        strategy_names: 策略列表
         w_tech: 技术面权重
         w_news: 新闻面权重
-        skip_param_tuning: True 时跳过⑤参数扫参调优（如：同板块快速分析）
+        skip_param_tuning: True时跳过参数扫参调优
+        prediction_reliability: 预测可靠性0~1, <0.5时降权
 
     Returns:
-        AnalysisResult 包含全部计算结果
+        AnalysisResult
     """
     if strategy_names is None:
         strategy_names = ["A", "B", "C", "D", "E", "F", "G", "H", "O",
@@ -93,12 +104,17 @@ def run_pipeline(
     logger.info(f"  [管道 1/4] 完成，共 {len(indicator_cols)} 个指标列")
 
     # ---- ② Alpha 因子打分 ----
-    logger.info(f"  [管道 2/4] Alpha 多因子打分 (w_tech={w_tech}, w_news={w_news})...")
+    # 提前检测行情状态 → calc_final_score 内部做估值因子动态降权
+    from alpha.scoring import detect_market_regime
+    market_regime, _ = detect_market_regime(df)
+    logger.info(f"  [管道 2/4] Alpha 多因子打分 (w_tech={w_tech}, w_news={w_news}, regime={market_regime})...")
     df = calc_final_score(df, news_df, w_tech=w_tech, w_news=w_news,
                           fundamental_data=fundamental_data,
                           validation_mode=validation_mode,
                           depth_score=depth_score,
-                          depth_available=depth_available)
+                          depth_available=depth_available,
+                          market_regime=market_regime,
+                          prediction_reliability=prediction_reliability)
 
     # ---- ③ Rank IC 计算（多周期：1/5/10 日远期收益） ----
     logger.info("  [管道 3/4] 计算多周期 Rank IC（因子有效性）...")
@@ -127,6 +143,15 @@ def run_pipeline(
             f"5日={rank_ic_5d['rank_ic_mean']:+.4f} "
             f"10日={rank_ic_10d['rank_ic_mean']:+.4f}"
         )
+
+        # IC 显著为负 → 因子预测方向反了 → 反转 Final_Score
+        ic_mean_1d = rank_ic.get("rank_ic_mean", 0) or 0
+        if ic_mean_1d < -0.05:
+            df["Final_Score"] = -df["Final_Score"]
+            df["_ic_inverted"] = True
+            logger.warning(
+                f"  [管道 3/4] ⚠️ Rank IC 1日={ic_mean_1d:+.4f} 显著为负 → Final_Score 方向已反转"
+            )
     else:
         logger.warning("  [管道 3/4] 缺少 close 列，跳过 Rank IC 计算")
 
@@ -139,8 +164,6 @@ def run_pipeline(
         )
 
     # ---- ⑤ 行情检测 + 策略过滤 ----
-    from alpha.scoring import detect_market_regime
-    market_regime, _ = detect_market_regime(df)
     active_strategy_keys = []
     skipped_strategy_keys = []
     active_strategies = []  # Strategy 实例列表
@@ -202,6 +225,103 @@ def run_pipeline(
                         if default_r else f"默认 entry={p['default']:.2f}")
             logger.info(f"  [调优] {name}: {best_str} | 最优 entry={best_val:.2f} → 夏普={best_score:.2f}")
 
+    # ---- ⑦ 策略时间切分审计 ----
+    strategy_audit = None
+    if active_strategy_keys and results:
+        try:
+            from core.strategy_audit import run_strategy_audit
+            strategy_audit = run_strategy_audit(
+                df=df,
+                strategy_keys=active_strategy_keys,
+                backtest_results=results,
+                initial_capital=initial_capital,
+            )
+            logger.info(
+                f"  [管道 6/6] 策略审计: PASS={strategy_audit.summary.get('pass', 0)}, "
+                f"COND={strategy_audit.summary.get('conditional', 0)}, "
+                f"FAIL={strategy_audit.summary.get('fail', 0)}, "
+                f"OVERFIT={strategy_audit.summary.get('overfit', 0)}"
+            )
+        except Exception as e:
+            logger.warning(f"策略审计失败（非致命）: {e}")
+
+    # ---- ⑧ 策略池扩展 + 信号检查 + 操作方案生成 (新架构 Phase 2-5) ----
+    strategy_pool_result = None
+    operation_plan = None
+    signal_check_results = None
+
+    # 选取用于信号检查的策略变体
+    check_variants = []
+
+    if expand_pool and active_strategy_keys:
+        # 完整模式：扩展策略池 → 回测 → 审计 → 筛选
+        try:
+            from core.strategy_pool import expand_and_audit
+            from data.database import Database
+            pool = expand_and_audit(
+                df=df, strategy_keys=active_strategy_keys,
+                market=market, stock_code=stock_code,
+                initial_capital=initial_capital,
+                news_df=news_df,
+                db=Database() if stock_code else None,
+            )
+            strategy_pool_result = pool
+            logger.info(
+                f"  [管道 7/7] 策略池: {pool.total_backtests} 变体回测, "
+                f"PASS={len(pool.pass_variants)}, COND={len(pool.conditional_variants)}"
+            )
+            if pool.pass_variants or pool.conditional_variants:
+                check_variants = pool.pass_variants + pool.conditional_variants
+        except Exception as e:
+            logger.warning(f"策略池扩展失败（非致命）: {e}", exc_info=True)
+
+    elif active_strategy_keys:
+        # 快速模式：用默认策略检查信号（不扩展池）
+        for key in active_strategy_keys:
+            try:
+                s = get_execution_strategy(key)
+                from core.strategy_pool import StrategyVariant
+                check_variants.append(StrategyVariant(
+                    base_key=key, variant_label=key,
+                    strategy=s, params={}, is_default=True,
+                ))
+            except Exception:
+                pass
+
+    # 运行信号检查（快速和完整模式通用）
+    if check_variants:
+        try:
+            from core.signal_check import run_signal_check
+            current_fs = (
+                float(df["Final_Score"].dropna().iloc[-1])
+                if "Final_Score" in df.columns and not df["Final_Score"].dropna().empty
+                else 0.0
+            )
+            ranked, plan = run_signal_check(
+                df=df, variants=check_variants, market=market,
+                audit_entries=(
+                    strategy_audit.entries if strategy_audit else
+                    strategy_pool_result.audit_report.entries if strategy_pool_result and strategy_pool_result.audit_report else
+                    None
+                ),
+                backtest_results=(
+                    strategy_pool_result.backtest_results if strategy_pool_result else
+                    results
+                ),
+                final_score=current_fs,
+            )
+            signal_check_results = [r.to_dict() for r in ranked]
+            if plan:
+                operation_plan = plan.markdown
+            buy_count = sum(1 for r in ranked if r.signal == "buy")
+            logger.info(
+                f"  [管道 7/7] 信号检查: {len(ranked)} 策略, "
+                f"{buy_count} 个买入信号, "
+                f"操作方案 {'已生成' if operation_plan else '无信号'}"
+            )
+        except Exception as e:
+            logger.warning(f"信号检查失败（非致命）: {e}", exc_info=True)
+
     logger.info(f"管道完成: 基准收益={benchmark_return*100:+.2f}%")
     logger.info("=" * 50)
 
@@ -226,6 +346,10 @@ def run_pipeline(
         active_strategies=active_strategy_keys,
         skipped_strategies=skipped_strategy_keys,
         param_tuning=param_tuning,
+        strategy_audit=strategy_audit,
+        strategy_pool=strategy_pool_result,
+        operation_plan=operation_plan,
+        signal_check=signal_check_results,
     )
 
 
@@ -679,21 +803,14 @@ def compute_premarket_snapshot(
         """小数 → 百分数显示字符串，如 0.0069 → '+0.69%'。"""
         return f"{val * 100:+.2f}%"
 
-    nq_kline = (nq or {}).get("kline_5min", [])
-    es_kline = (es or {}).get("kline_5min", [])
-
     # ── 期货宏观情绪因子得分 ──
-    from alpha.scoring import score_futures_factor, _compute_kline_trend
-    nq_trend = _compute_kline_trend(nq_kline)
-    es_trend = _compute_kline_trend(es_kline)
+    # 仅用期货涨跌幅判断情绪，不再使用 5 分钟 K 线走势（TickFlow 不支持）
+    from alpha.scoring import score_futures_factor
     futures_score = score_futures_factor(
         nq_change_pct=nq_change,
         es_change_pct=es_change,
-        nq_kline_trend=nq_trend,
-        es_kline_trend=es_trend,
     )
-    logger.info(f"  期货因子得分: NQ={nq_change:+.4f} ES={es_change:+.4f} "
-                f"trend(NQ={nq_trend:+.2f} ES={es_trend:+.2f}) → {futures_score:+.3f}")
+    logger.info(f"  期货因子得分: NQ={nq_change:+.4f} ES={es_change:+.4f} → {futures_score:+.3f}")
 
     # ── T-1 日关键信号 ──
     last = df.iloc[-1] if len(df) > 0 else None

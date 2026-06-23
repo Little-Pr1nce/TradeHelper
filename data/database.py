@@ -28,7 +28,7 @@ from typing import Optional
 
 from data.models import (
     StockInfo, PriceData, AnalysisReport, NewsItem,
-    Holding, WatchItem, AccountBalance,
+    Holding, WatchItem, AccountBalance, PredictionLog,
 )
 from config.settings import Settings
 
@@ -137,6 +137,66 @@ CREATE TABLE IF NOT EXISTS account_balance (
 
 -- 确保单条记录存在
 INSERT OR IGNORE INTO account_balance (id, us_balance, a_balance) VALUES (1, 0.0, 0.0);
+
+-- 预测追踪表（预测→验证→反馈闭环）
+CREATE TABLE IF NOT EXISTS prediction_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'eod',
+    report_id INTEGER,
+    predict_time TEXT NOT NULL,
+    direction TEXT NOT NULL DEFAULT '',
+    final_score REAL DEFAULT 0.0,
+    predicted_price REAL DEFAULT 0.0,
+    key_reason TEXT DEFAULT '',
+    confidence TEXT DEFAULT '',
+    conservative_entry REAL DEFAULT 0.0,
+    aggressive_entry REAL DEFAULT 0.0,
+    stop_loss REAL DEFAULT 0.0,
+    verify_after_days INTEGER DEFAULT 5,
+    validated INTEGER DEFAULT 0,
+    actual_return REAL DEFAULT 0.0,
+    actual_direction TEXT DEFAULT '',
+    entry_triggered INTEGER DEFAULT 0,
+    verified_at TEXT DEFAULT '',
+    strategy_name TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_prediction_code ON prediction_log(code);
+CREATE INDEX IF NOT EXISTS idx_prediction_validated ON prediction_log(validated, predict_time);
+
+-- 策略变体回测缓存表：加速 expand_pool，避免重复计算
+CREATE TABLE IF NOT EXISTS bt_variant_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code TEXT NOT NULL,
+    strategy_key TEXT NOT NULL,
+    params_json TEXT NOT NULL DEFAULT '{}',
+    data_start TEXT NOT NULL,
+    data_end TEXT NOT NULL,
+    data_length INTEGER NOT NULL DEFAULT 0,
+    sharpe_ratio REAL DEFAULT 0.0,
+    total_return REAL DEFAULT 0.0,
+    max_drawdown REAL DEFAULT 0.0,
+    win_rate REAL DEFAULT 0.0,
+    total_trades INTEGER DEFAULT 0,
+    result_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT '',
+    UNIQUE(stock_code, strategy_key, params_json, data_start, data_end)
+);
+CREATE INDEX IF NOT EXISTS idx_bt_cache_lookup ON bt_variant_cache(stock_code, strategy_key, data_start, data_end);
+
+-- 每股票每策略最佳参数表：自适应优化的核心存储
+CREATE TABLE IF NOT EXISTS per_stock_params (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code TEXT NOT NULL,
+    strategy_key TEXT NOT NULL,
+    best_params_json TEXT NOT NULL DEFAULT '{}',
+    best_sharpe REAL DEFAULT 0.0,
+    source TEXT NOT NULL DEFAULT 'audit_pass',
+    updated_at TEXT NOT NULL DEFAULT '',
+    UNIQUE(stock_code, strategy_key)
+);
+CREATE INDEX IF NOT EXISTS idx_per_stock_lookup ON per_stock_params(stock_code, strategy_key);
 """
 
 
@@ -229,6 +289,12 @@ class Database:
         _ensure_column(conn, "reports", "prediction_data", "TEXT", "''")
         _ensure_column(conn, "news_sentiment", "content", "TEXT", "''")
         _ensure_column(conn, "news_sentiment", "is_macro", "INTEGER", "0")
+        _ensure_column(conn, "prediction_log", "strategy_name", "TEXT", "''")
+        # 索引必须在列迁移完成后创建（旧库没有 strategy_name 列，不能放在 DDL 里）
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prediction_strategy "
+            "ON prediction_log(code, strategy_name)"
+        )
         _ensure_unique_news_index(conn)
         conn.commit()
         return conn
@@ -237,6 +303,10 @@ class Database:
         """对外建立连接入口（首次 init 时调用）。"""
         self._conn = self._open(db_path)
         self._db_path = db_path
+        try:
+            self.cleanup_stale_cache()
+        except Exception:
+            pass  # 表可能还没建（首次启动），忽略
         logger.info(f"Database connected: {db_path}")
 
     @property
@@ -600,3 +670,389 @@ class Database:
             (code, cutoff, limit)
         ).fetchall()
         return [NewsItem.from_dict(dict(r)) for r in rows]
+
+    # ═══════════════════════════════════════════════════════════════
+    # 预测追踪 (prediction_log) CRUD
+    # ═══════════════════════════════════════════════════════════════
+
+    def insert_prediction(self, pred: PredictionLog) -> int:
+        d = pred.to_dict()
+        d.pop("id", None)
+        # 防护：旧数据库还没有 strategy_name 列时，移除该字段
+        cols = {r[1] for r in self.execute("PRAGMA table_info(prediction_log)").fetchall()}
+        if "strategy_name" not in cols:
+            d.pop("strategy_name", None)
+        columns = ", ".join(d.keys())
+        placeholders = ", ".join(["?"] * len(d))
+        cursor = self._execute_write(
+            f"INSERT INTO prediction_log ({columns}) VALUES ({placeholders})",
+            tuple(d.values()),
+        )
+        return cursor.lastrowid or 0
+
+    def delete_prediction(self, pred_id: int):
+        """删除一条预测记录。"""
+        self._execute_write("DELETE FROM prediction_log WHERE id = ?", (pred_id,))
+
+    def clear_predictions(self):
+        """清空预测追踪表（调试用）。"""
+        self._execute_write("DELETE FROM prediction_log")
+
+    def batch_verify_expired(self) -> int:
+        rows = self.execute(
+            """SELECT * FROM prediction_log WHERE validated = 0"""
+        ).fetchall()
+        if not rows:
+            return 0
+        verified_count = 0
+        for row in rows:
+            pred = PredictionLog.from_dict(dict(row))
+            new_rows = self.execute(
+                """SELECT COUNT(*) as cnt, MAX(close) as latest_close
+                   FROM price_history WHERE code = ? AND date > ?""",
+                (pred.code, pred.predict_time[:10]),
+            ).fetchone()
+            if new_rows is None:
+                continue
+            cnt = new_rows["cnt"]
+            if cnt >= pred.verify_after_days:
+                latest_close = new_rows["latest_close"] or 0
+                if latest_close > 0 and pred.predicted_price > 0:
+                    pred.actual_return = (latest_close - pred.predicted_price) / pred.predicted_price
+                if pred.actual_return > 0.01:
+                    pred.actual_direction = "bullish"
+                elif pred.actual_return < -0.01:
+                    pred.actual_direction = "bearish"
+                else:
+                    pred.actual_direction = "neutral"
+
+                # 检查入场价是否触发
+                entry = pred.conservative_entry or pred.aggressive_entry
+                if entry > 0:
+                    min_max = self.execute(
+                        "SELECT MIN(low) as min_l, MAX(high) as max_h FROM price_history WHERE code=? AND date>?",
+                        (pred.code, pred.predict_time[:10]),
+                    ).fetchone()
+                    if min_max:
+                        if pred.direction == "bullish":
+                            # 等回调买入 → 最低价是否低于入场价（有机会买到）
+                            pred.entry_triggered = 1 if min_max["min_l"] and min_max["min_l"] <= entry else 0
+                        elif pred.direction == "bearish":
+                            # 等反弹卖出 → 最高价是否高于入场价
+                            pred.entry_triggered = 1 if min_max["max_h"] and min_max["max_h"] >= entry else 0
+                from datetime import datetime as _dt
+                pred.validated = 1
+                pred.verified_at = _dt.now().isoformat()
+                self._execute_write(
+                    """UPDATE prediction_log SET validated=1, actual_return=?,
+                       actual_direction=?, entry_triggered=?, verified_at=?
+                       WHERE id=?""",
+                    (pred.actual_return, pred.actual_direction,
+                     pred.entry_triggered, pred.verified_at, pred.id),
+                )
+                verified_count += 1
+        if verified_count > 0:
+            logger.info(f"prediction_log 批量验证：{verified_count} 条")
+        return verified_count
+
+    def get_prediction_stats(self, code: str, limit: int = 10) -> "PredictionStats":
+        from data.models import PredictionStats
+        rows = self.execute(
+            """SELECT * FROM prediction_log
+               WHERE code = ? AND validated = 1
+               ORDER BY predict_time DESC LIMIT ?""",
+            (code, limit),
+        ).fetchall()
+        stats = PredictionStats(code=code, total_predictions=len(rows))
+        if not rows:
+            return stats
+        correct = sum(
+            1 for r in rows
+            if r["direction"] and r["actual_direction"]
+            and r["direction"] == r["actual_direction"]
+        )
+        stats.direction_accuracy_10 = correct / len(rows) if rows else 0.0
+        returns = [r["actual_return"] for r in rows if r["actual_return"] != 0]
+        stats.avg_predicted_return = sum(returns) / len(returns) if returns else 0.0
+        all_rows = self.execute(
+            """SELECT * FROM prediction_log WHERE code = ? AND validated = 1""",
+            (code,),
+        ).fetchall()
+        all_correct = sum(
+            1 for r in all_rows
+            if r["direction"] and r["actual_direction"]
+            and r["direction"] == r["actual_direction"]
+        )
+        stats.total_predictions = len(all_rows)
+        stats.direction_accuracy_all = all_correct / len(all_rows) if all_rows else 0.0
+        if len(rows) >= 10:
+            recent_5 = rows[:5]
+            older_5 = rows[5:10]
+            recent_acc = sum(
+                1 for r in recent_5
+                if r["direction"] and r["actual_direction"]
+                and r["direction"] == r["actual_direction"]
+            ) / 5
+            older_acc = sum(
+                1 for r in older_5
+                if r["direction"] and r["actual_direction"]
+                and r["direction"] == r["actual_direction"]
+            ) / 5
+            if recent_acc > older_acc + 0.1:
+                stats.accuracy_trend = "improving"
+            elif recent_acc < older_acc - 0.1:
+                stats.accuracy_trend = "declining"
+            else:
+                stats.accuracy_trend = "stable"
+        if stats.direction_accuracy_10 >= 0.60:
+            stats.status = "reliable"
+        elif stats.direction_accuracy_10 >= 0.45:
+            stats.status = "unstable"
+        else:
+            stats.status = "unreliable"
+        from datetime import datetime as _dt
+        stats.updated_at = _dt.now().isoformat()
+        return stats
+
+    def get_latest_unverified_prediction(self, code: str) -> "PredictionLog | None":
+        row = self.execute(
+            """SELECT * FROM prediction_log
+               WHERE code = ? AND validated = 0
+               ORDER BY predict_time DESC LIMIT 1""",
+            (code,),
+        ).fetchone()
+        if row:
+            return PredictionLog.from_dict(dict(row))
+        return None
+
+    def get_validated_predictions(self, code: str, limit: int = 10) -> list[PredictionLog]:
+        rows = self.execute(
+            """SELECT * FROM prediction_log
+               WHERE code = ? AND validated = 1
+               ORDER BY predict_time DESC LIMIT ?""",
+            (code, limit),
+        ).fetchall()
+        return [PredictionLog.from_dict(dict(r)) for r in rows]
+
+    def get_strategy_prediction_stats(
+        self, code: str, strategy_name: str, limit: int = 20
+    ) -> "PredictionStats":
+        """按策略+股票统计预测准确率（供策略池持续优化使用）。"""
+        from data.models import PredictionStats
+        # 防护：旧数据库可能还没有 strategy_name 列
+        cols = {r[1] for r in self.execute("PRAGMA table_info(prediction_log)").fetchall()}
+        if "strategy_name" not in cols:
+            return PredictionStats(code=f"{code}#{strategy_name}")
+        rows = self.execute(
+            """SELECT * FROM prediction_log
+               WHERE code = ? AND strategy_name = ? AND validated = 1
+               ORDER BY predict_time DESC LIMIT ?""",
+            (code, strategy_name, limit),
+        ).fetchall()
+        stats = PredictionStats(code=f"{code}#{strategy_name}", total_predictions=len(rows))
+        if not rows:
+            return stats
+        correct = sum(
+            1 for r in rows
+            if r["direction"] and r["actual_direction"]
+            and r["direction"] == r["actual_direction"]
+        )
+        stats.direction_accuracy_10 = correct / len(rows) if rows else 0.0
+        stats.direction_accuracy_all = stats.direction_accuracy_10  # 无全量数据时用近期近似
+        returns = [r["actual_return"] for r in rows if r["actual_return"] != 0]
+        stats.avg_predicted_return = sum(returns) / len(returns) if returns else 0.0
+        # 趋势判断
+        if len(rows) >= 10:
+            recent_5 = rows[:5]
+            older_5 = rows[5:10]
+            recent_acc = sum(
+                1 for r in recent_5
+                if r["direction"] and r["actual_direction"]
+                and r["direction"] == r["actual_direction"]
+            ) / 5 if len(recent_5) == 5 else 0
+            older_acc = sum(
+                1 for r in older_5
+                if r["direction"] and r["actual_direction"]
+                and r["direction"] == r["actual_direction"]
+            ) / 5 if len(older_5) == 5 else 0
+            if recent_acc > older_acc + 0.1:
+                stats.accuracy_trend = "improving"
+            elif recent_acc < older_acc - 0.1:
+                stats.accuracy_trend = "declining"
+            else:
+                stats.accuracy_trend = "stable"
+        if stats.direction_accuracy_10 >= 0.60:
+            stats.status = "reliable"
+        elif stats.direction_accuracy_10 >= 0.45:
+            stats.status = "unstable"
+        else:
+            stats.status = "unreliable"
+        from datetime import datetime as _dt
+        stats.updated_at = _dt.now().isoformat()
+        return stats
+
+    def get_strategy_health_report(self, code: str) -> list[dict]:
+        """持续优化：按策略统计预测准确率，返回健康报告。"""
+        # 防护：旧数据库可能还没有 strategy_name 列
+        cols = {r[1] for r in self.execute("PRAGMA table_info(prediction_log)").fetchall()}
+        if "strategy_name" not in cols:
+            return []
+
+        rows = self.execute(
+            """SELECT strategy_name, COUNT(*) as cnt,
+                      SUM(CASE WHEN direction = actual_direction AND actual_direction != '' THEN 1 ELSE 0 END) as correct_cnt
+               FROM prediction_log
+               WHERE code = ? AND validated = 1 AND strategy_name != ''
+               GROUP BY strategy_name
+               HAVING cnt >= 3
+               ORDER BY cnt DESC""",
+            (code,),
+        ).fetchall()
+
+        result = []
+        for row in rows:
+            sname = row["strategy_name"]
+            total = row["cnt"]
+            correct = row["correct_cnt"] or 0
+            accuracy = correct / total if total > 0 else 0
+
+            # 判断趋势：对比最近 5 条 vs 全部
+            recent = self.execute(
+                """SELECT direction, actual_direction FROM prediction_log
+                   WHERE code=? AND strategy_name=? AND validated=1
+                   ORDER BY predict_time DESC LIMIT 5""",
+                (code, sname),
+            ).fetchall()
+            recent_correct = sum(
+                1 for r in recent
+                if r["direction"] and r["actual_direction"] and r["direction"] == r["actual_direction"]
+            )
+            recent_acc = recent_correct / len(recent) if recent else 0
+
+            # 判定
+            if accuracy >= 0.60 and recent_acc >= 0.50:
+                action = "keep"
+                status = "reliable"
+            elif accuracy >= 0.45 and recent_acc >= 0.40:
+                action = "watch"
+                status = "unstable"
+            elif recent_acc < 0.30 and total >= 5:
+                action = "demote"
+                status = "unreliable"
+            else:
+                action = "watch"
+                status = "unstable"
+
+            result.append({
+                "strategy_name": sname,
+                "total": total,
+                "accuracy": round(accuracy, 3),
+                "recent_accuracy": round(recent_acc, 3),
+                "trend": "declining" if recent_acc < accuracy - 0.1 else (
+                    "improving" if recent_acc > accuracy + 0.1 else "stable"
+                ),
+                "status": status,
+                "action": action,
+            })
+
+        return result
+
+    # ═══════════════════════════════════════════════════════════════
+    # 策略池缓存 (bt_variant_cache) + 最佳参数 (per_stock_params) CRUD
+    # ═══════════════════════════════════════════════════════════════
+
+    def get_cached_backtest(
+        self, stock_code: str, strategy_key: str,
+        params_json: str, data_start: str, data_end: str,
+    ) -> dict | None:
+        """查询缓存的回测结果。返回 result_json 字典或 None。"""
+        row = self.execute(
+            """SELECT result_json FROM bt_variant_cache
+               WHERE stock_code=? AND strategy_key=? AND params_json=?
+                 AND data_start=? AND data_end=?""",
+            (stock_code, strategy_key, params_json, data_start, data_end),
+        ).fetchone()
+        if row:
+            import json
+            return json.loads(row["result_json"])
+        return None
+
+    def save_backtest_cache(
+        self, stock_code: str, strategy_key: str,
+        params_json: str, data_start: str, data_end: str,
+        data_length: int, sharpe_ratio: float, total_return: float,
+        max_drawdown: float, win_rate: float, total_trades: int,
+        result_json: str,
+    ):
+        """写入回测缓存。"""
+        from datetime import datetime as _dt
+        self._execute_write(
+            """INSERT OR IGNORE INTO bt_variant_cache
+               (stock_code, strategy_key, params_json, data_start, data_end,
+                data_length, sharpe_ratio, total_return, max_drawdown,
+                win_rate, total_trades, result_json, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (stock_code, strategy_key, params_json, data_start, data_end,
+             data_length, sharpe_ratio, total_return, max_drawdown,
+             win_rate, total_trades, result_json,
+             _dt.now().isoformat()),
+        )
+
+    def get_best_params(
+        self, stock_code: str, strategy_key: str,
+    ) -> dict | None:
+        """查询某股票某策略的最佳参数。"""
+        row = self.execute(
+            """SELECT best_params_json, best_sharpe, source, updated_at
+               FROM per_stock_params WHERE stock_code=? AND strategy_key=?""",
+            (stock_code, strategy_key),
+        ).fetchone()
+        if row:
+            import json
+            return {
+                "params": json.loads(row["best_params_json"]),
+                "sharpe": row["best_sharpe"],
+                "source": row["source"],
+                "updated_at": row["updated_at"],
+            }
+        return None
+
+    def save_best_params(
+        self, stock_code: str, strategy_key: str,
+        params_json: str, sharpe: float, source: str = "audit_pass",
+    ):
+        """保存/更新最佳参数。auto_tuned 有保护。"""
+        from datetime import datetime as _dt
+        now = _dt.now().isoformat()
+        existing = self.execute(
+            """SELECT best_sharpe, source FROM per_stock_params
+               WHERE stock_code=? AND strategy_key=?""",
+            (stock_code, strategy_key),
+        ).fetchone()
+
+        if existing and existing["source"] == "auto_tuned":
+            if sharpe < (existing["best_sharpe"] or 0) + 0.1:
+                return  # 小波动不覆盖自适应结果
+
+        self._execute_write(
+            """INSERT OR REPLACE INTO per_stock_params
+               (stock_code, strategy_key, best_params_json, best_sharpe,
+                source, updated_at)
+               VALUES (?,?,?,?,?,?)""",
+            (stock_code, strategy_key, params_json, sharpe, source, now),
+        )
+
+    def cleanup_stale_cache(self, days: int = 30):
+        """清理过期回测缓存。"""
+        self._execute_write(
+            f"DELETE FROM bt_variant_cache WHERE created_at < date('now', '-{days} days')"
+        )
+
+    def is_strategy_demoted(self, stock_code: str, strategy_key: str) -> bool:
+        """检查策略是否被永久降级。"""
+        row = self.execute(
+            """SELECT source FROM per_stock_params
+               WHERE stock_code=? AND strategy_key=? AND source='demoted'""",
+            (stock_code, strategy_key),
+        ).fetchone()
+        return row is not None

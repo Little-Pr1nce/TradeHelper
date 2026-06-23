@@ -1,9 +1,8 @@
 """
-基本面与估值因子 — akshare 真实数据优先，LLM 兜底。
+基本面与估值因子。
 
-股票数据源：
-  - A 股：akshare stock_value_em（PE/PB 3年历史）+ stock_financial_analysis_indicator（财务）
-  - 美股：Finnhub /stock/metric（优先）→ akshare（兜底）→ LLM 估算
+美股数据源：Finnhub /stock/metric（优先）→ yfinance（降级）→ LLM 兜底
+A 股数据源：baostock（优先）→ akshare（降级）→ LLM 兜底
 """
 
 import logging
@@ -35,6 +34,34 @@ def fetch_fundamental_factors(
                 fin = _extract_financials_from_finnhub(metrics)
                 pe_pb = _extract_pe_pb_from_finnhub(metrics)
                 if fin and pe_pb:
+                    # 负债比率：Finnhub 不返回 totalDebt/totalEquity 时用 yfinance 补齐
+                    if fin.get("debt_ratio", 0) == 0:
+                        try:
+                            fin_yf, _ = _fetch_fundamentals_yfinance(code)
+                            if fin_yf and fin_yf.get("debt_ratio", 0) > 0:
+                                fin["debt_ratio"] = fin_yf["debt_ratio"]
+                                logger.info(f"负债比率: yfinance 补齐 → {fin['debt_ratio']:.1%}")
+                        except Exception:
+                            pass
+
+                    # PE/PB 分位需要至少 3 个历史点，Finnhub 只返回当前值 →
+                    # 用百度股市通 3 年历史补齐分位计算
+                    if len(pe_pb) < 3:
+                        pe_pb_history = _fetch_pe_pb_us_baidu(code)
+                        if pe_pb_history and len(pe_pb_history) >= 3:
+                            # 百度提供 3 年历史，但它的当前 PE 是 TTM；
+                            # 用 Finnhub 的当前值（含 forward PE）替换最后一条，
+                            # 确保 PE 混合计算能拿到 forwardPE。
+                            finnhub_current = pe_pb[-1]
+                            pe_pb = pe_pb_history
+                            pe_pb[-1] = finnhub_current
+                            logger.info(
+                                f"PE/PB 分位: Finnhub 当前值(PE={finnhub_current['pe']:.1f}, "
+                                f"PB={finnhub_current['pb']:.1f}) "
+                                f"+ 百度 {len(pe_pb_history)} 条历史"
+                            )
+                        else:
+                            logger.info("PE/PB 分位数据不足（<3条），使用默认 50%")
                     style = _calc_style_factors(pe_pb)
                     logger.info(
                         f"基本面(Finnhub): PE分位={style['pe_percentile']:.1%}, "
@@ -56,7 +83,8 @@ def fetch_fundamental_factors(
 
         style = _calc_style_factors(pe_pb) if pe_pb else {"pe_percentile": 0.5, "pb_percentile": 0.5}
         fin = financials or {"roe": 0, "gross_margin": 0, "debt_ratio": 0,
-                             "net_profit_yoy": 0, "revenue_yoy": 0}
+                             "net_profit_yoy": 0, "revenue_yoy": 0, "ev_ebitda": 0,
+                             "gross_margin_5y": 0, "net_profit_yoy_5y": 0, "revenue_yoy_5y": 0}
 
         if financials and pe_pb:
             source = "baostock"
@@ -80,21 +108,36 @@ def fetch_fundamental_factors(
         )
         return {"style_factors": style, "fundamental_factors": fin, "source": source}
 
-    # ── 美股：Finnhub → akshare ──
-    financials = _fetch_financials_akshare(code, market)
-    pe_pb = _fetch_pe_pb_akshare(code, market)
+    # ── 美股：Finnhub → yfinance → akshare → LLM ──
+    fin_from_yf = False
+    pe_from_yf = False
+    if market == "US":
+        logger.info(f"Finnhub 不可用，降级到 yfinance ({code})")
+        financials, pe_pb = _fetch_fundamentals_yfinance(code)
+        fin_from_yf = financials is not None
+        pe_from_yf = pe_pb is not None
+
+    # yfinance 拿不到 → akshare 兜底
+    if not financials:
+        financials = _fetch_financials_akshare(code, market)
+    if not pe_pb:
+        pe_pb = _fetch_pe_pb_akshare(code, market)
 
     # PE/PB 估值分位 + 财务指标各自独立取，各自缺失互不影响
     style = _calc_style_factors(pe_pb) if pe_pb else {"pe_percentile": 0.5, "pb_percentile": 0.5}
     fin = financials or {"roe": 0, "gross_margin": 0, "debt_ratio": 0,
-                         "net_profit_yoy": 0, "revenue_yoy": 0}
+                         "net_profit_yoy": 0, "revenue_yoy": 0, "ev_ebitda": 0,
+                         "gross_margin_5y": 0, "net_profit_yoy_5y": 0, "revenue_yoy_5y": 0}
 
+    # 确定来源标签（美股 yfinance + akshare 各自可能提供不同部分）
+    fin_label = "yfinance" if fin_from_yf else "akshare"
+    pe_label = "yfinance" if pe_from_yf else "akshare"
     if financials and pe_pb:
-        source = "akshare"
+        source = fin_label if fin_label == pe_label else f"{pe_label}(估值)+{fin_label}(财务)"
     elif pe_pb:
-        source = "akshare(估值)"
+        source = f"{pe_label}(估值)"
     elif financials:
-        source = "akshare(财务)"
+        source = f"{fin_label}(财务)"
     else:
         # 全部缺失 → LLM 兜底
         if api_key:
@@ -123,10 +166,10 @@ def _extract_financials_from_finnhub(metrics: dict) -> dict | None:
 
     metric 字段常用 key（Finnhub 命名规范）：
       - roeRfy              → ROE
-      - grossMarginTTM      → 毛利率
+      - grossMarginAnnual   → 毛利率（年报值，比 TTM 更稳定，与券商口径一致）
       - totalDebt/totalEquity → 负债比率（需计算）
       - roaRfy              → ROA（备用）
-      - revenueGrowthTTMYoy → 营收增速（可能不存在，需从 series 算）
+      - revenueGrowthTTMYoy → 营收增速
       - epsGrowthTTMYoy     → 利润增速（替代 net_profit_yoy）
 
     返回 None 表示关键字段缺失过多。
@@ -136,7 +179,7 @@ def _extract_financials_from_finnhub(metrics: dict) -> dict | None:
         return None
 
     roe = _safe_float(m.get("roeRfy"))
-    gross_margin = _safe_float(m.get("grossMarginTTM"))
+    gross_margin = _safe_float(m.get("grossMarginAnnual")) or _safe_float(m.get("grossMarginTTM"))
 
     # Finnhub 返回的 ROE/grossMargin 等百分比字段是"数值百分数"（如 76.33 = 76.33%），
     # 需要除以 100 转为小数（0.7633），以便跟 akshare 的数据格式保持一致。
@@ -163,16 +206,29 @@ def _extract_financials_from_finnhub(metrics: dict) -> dict | None:
     if roe == 0 and gross_margin == 0:
         return None
 
+    # 5 年均值作为历史基准参考（不参与评分，仅提供给 LLM 判断周期位置）
+    gross_margin_5y = _safe_float(m.get("grossMargin5Y")) / 100 if _safe_float(m.get("grossMargin5Y")) > 1 else _safe_float(m.get("grossMargin5Y"))
+    np_yoy_5y = _safe_float(m.get("epsGrowth5Y")) / 100 if _safe_float(m.get("epsGrowth5Y")) > 1 else _safe_float(m.get("epsGrowth5Y"))
+    rev_yoy_5y = _safe_float(m.get("revenueGrowth5Y")) / 100 if _safe_float(m.get("revenueGrowth5Y")) > 1 else _safe_float(m.get("revenueGrowth5Y"))
+
     logger.info(
-        f"Finnhub 财务: ROE={roe:.1%}, margin={gross_margin:.1%}, "
-        f"debt={debt_ratio:.1%}, np_yoy={net_profit_yoy:.1%}, rev_yoy={revenue_yoy:.1%}"
+        f"Finnhub 财务: ROE={roe:.1%}, margin={gross_margin:.1%}(5Y均={gross_margin_5y:.1%}), "
+        f"debt={debt_ratio:.1%}, np_yoy={net_profit_yoy:.1%}(5Y均={np_yoy_5y:.1%}), rev_yoy={revenue_yoy:.1%}(5Y均={rev_yoy_5y:.1%})"
     )
+    # EV/EBITDA（企业价值/息税折旧摊销前利润）— 资本结构中性估值指标
+    ev_ebitda = _safe_float(m.get("evToEbitdaTTM")) or _safe_float(m.get("evEbitdaAnnual"))
+
     return {
         "roe": roe,
         "gross_margin": gross_margin,
         "debt_ratio": debt_ratio,
         "net_profit_yoy": net_profit_yoy,
         "revenue_yoy": revenue_yoy,
+        "ev_ebitda": ev_ebitda,
+        # 5 年均值 — LLM 自主判断是否处于周期高位
+        "gross_margin_5y": gross_margin_5y,
+        "net_profit_yoy_5y": np_yoy_5y,
+        "revenue_yoy_5y": rev_yoy_5y,
     }
 
 
@@ -203,9 +259,13 @@ def _extract_pe_pb_from_finnhub(metrics: dict) -> list[dict] | None:
     if not pe_series and not pb_series:
         # 只有当前值，构造单条记录
         pe_current = _safe_float(m.get("peBasicExclExtraTTM"))
-        pb_current = _safe_float(m.get("pbAnnual"))
+        pb_current = _safe_float(m.get("pb"))  # pb=当前市净率，pbAnnual 是年报值（偏低）
+        pe_forward = _safe_float(m.get("forwardPE"))  # 远期 PE，用于混合 PE 计算
         if pe_current > 0 or pb_current > 0:
-            return [{"date": date.today().isoformat(), "pe": pe_current, "pb": pb_current}]
+            item = {"date": date.today().isoformat(), "pe": pe_current, "pb": pb_current}
+            if pe_forward > 0:
+                item["pe_forward"] = pe_forward
+            return [item]
         return None
 
     # 对齐日期
@@ -394,6 +454,63 @@ def _fetch_stock_industry_baostock(code: str) -> str:
     return ""
 
 
+# ── yfinance 数据获取（美股基本面降级） ──
+
+
+def _fetch_fundamentals_yfinance(code: str) -> tuple[dict | None, list[dict] | None]:
+    """从 yfinance Ticker.info 提取美股财务指标和 PE/PB 历史。
+
+    Returns:
+        (financials_dict | None, pe_pb_history | None)
+        financials_dict: {roe, gross_margin, debt_ratio, net_profit_yoy, revenue_yoy}
+        pe_pb_history: [{date, pe, pb}, ...]（单条，当前值）
+    """
+    try:
+        import yfinance as yf
+
+        ticker = yf.Ticker(code)
+        info = ticker.info or {}
+
+        if not info:
+            logger.debug(f"yfinance info 为空 ({code})")
+            return None, None
+
+        # ── 财务指标 ──
+        roe = _safe_float(info.get("returnOnEquity", 0))
+        gross_margin = _safe_float(info.get("grossMargins", 0))
+        debt_to_equity = _safe_float(info.get("debtToEquity", 0))
+        revenue_growth = _safe_float(info.get("revenueGrowth", 0))
+        profit_growth = _safe_float(info.get("earningsGrowth", 0))
+
+        has_any = any(v > 0 for v in [roe, gross_margin, debt_to_equity])
+        financials = None
+        if has_any:
+            financials = {
+                "roe": roe,
+                "gross_margin": gross_margin,
+                "debt_ratio": debt_to_equity,
+                "net_profit_yoy": profit_growth,
+                "revenue_yoy": revenue_growth,
+            }
+
+        # ── PE/PB ──
+        pe = _safe_float(info.get("trailingPE", 0)) or _safe_float(info.get("forwardPE", 0))
+        pb = _safe_float(info.get("priceToBook", 0))
+
+        pe_pb = None
+        if pe > 0 or pb > 0:
+            pe_pb = [{"date": date.today().isoformat(), "pe": pe, "pb": pb}]
+
+        logger.info(
+            f"yfinance 基本面 ({code}): PE={pe:.1f}, PB={pb:.1f}, "
+            f"ROE={roe:.1%}, 毛利率={gross_margin:.1%}"
+        )
+        return financials, pe_pb
+    except Exception as e:
+        logger.warning(f"yfinance 基本面获取失败 ({code}): {e}")
+        return None, None
+
+
 # ── akshare 数据获取（兜底） ──
 
 
@@ -490,7 +607,7 @@ def _fetch_pe_pb_us_baidu(code: str) -> list[dict] | None:
                 if d not in result:
                     result[d] = {}
                 result[d]["date"] = d
-                result[d]["pe" if indicator == "市盈率(TTM)" else "pb"] = row[1]
+                result[d]["pe" if indicator == "市盈率(TTM)" else "pb"] = float(row[1])
         except Exception as e:
             logger.warning(f"百度 {indicator} 获取失败 ({code}): {e}")
 
@@ -505,35 +622,91 @@ def _fetch_pe_pb_us_baidu(code: str) -> list[dict] | None:
 
 
 def _calc_style_factors(pe_pb_history: list[dict]) -> dict:
-    # 最低 3 条（Finnhub 年数据）或 12 条（akshare 月数据）
+    """从 PE/PB 历史序列计算当前值所处的历史分位。
+
+    当 forward PE 可用时，当前 PE 使用 (trailing + forward) / 2 混合值，
+    避免周期股因盈利波动导致的 trailing PE 极端值误判。
+
+    最低要求 3 条数据。PE/PB 值可以是 float 或字符串（兼容百度 API 返回值）。
+    """
     min_entries = 3
     if not pe_pb_history or len(pe_pb_history) < min_entries:
         return {"pe_percentile": 0.5, "pb_percentile": 0.5}
-    pes = [d["pe"] for d in pe_pb_history if d.get("pe") and not np.isnan(d["pe"])]
-    pbs = [d["pb"] for d in pe_pb_history if d.get("pb") and not np.isnan(d["pb"])]
-    if not pes or not pbs:
+
+    def _safe_pe_pb(val) -> float | None:
+        """转 float，排除 nan/inf/非数字字符串。"""
+        try:
+            v = float(val)
+        except (ValueError, TypeError):
+            return None
+        if np.isnan(v) or np.isinf(v):
+            return None
+        return v
+
+    pes = [_safe_pe_pb(d.get("pe")) for d in pe_pb_history]
+    pes = [p for p in pes if p is not None]
+    pbs = [_safe_pe_pb(d.get("pb")) for d in pe_pb_history]
+    pbs = [p for p in pbs if p is not None]
+
+    if len(pes) < min_entries or len(pbs) < min_entries:
         return {"pe_percentile": 0.5, "pb_percentile": 0.5}
+
+    # 当前 PE 混合：如果有远期 PE，用 (trailing + forward) / 2 替代纯 trailing
+    pe_current = pes[-1]
+    last_item = pe_pb_history[-1]
+    pe_forward = _safe_pe_pb(last_item.get("pe_forward"))
+    if pe_forward and pe_forward > 0:
+        pe_blended = (pe_current + pe_forward) / 2
+        pes[-1] = pe_blended
+        logger.info(
+            f"PE 混合: trailing={pe_current:.1f}, forward={pe_forward:.1f} → blended={pe_blended:.1f}"
+        )
+
     return {
         "pe_percentile": round(sum(1 for p in pes if p < pes[-1]) / len(pes), 4),
         "pb_percentile": round(sum(1 for p in pbs if p < pbs[-1]) / len(pbs), 4),
     }
 
 
-def score_style_factor(pe_pct: float, pb_pct: float) -> float:
-    return round(np.tanh((0.5 - (pe_pct + pb_pct) / 2) * 4), 4)
+def score_style_factor(pe_pct: float, pb_pct: float, ev_ebitda: float = 0.0) -> float:
+    """多指标估值风格得分：PE 分位 + PB 分位 + EV/EBITDA。
+
+    - PE/PB 分位 ∈ [0,1]：高分位 = 偏贵 → 负得分
+    - EV/EBITDA：<10 偏便宜，>20 偏贵，映射到 [-1,+1]
+    - 三项等权平均
+
+    如果 ev_ebitda=0（数据缺失），仅用 PE+PB 两项。
+    """
+    pe_pb_score = np.tanh((0.5 - (pe_pct + pb_pct) / 2) * 4)
+
+    if ev_ebitda > 0:
+        # EV/EBITDA 映射：15 为中性（tanh(0)=0），<5 便宜（+1），>25 贵（-1）
+        ev_score = np.tanh((0.5 - ev_ebitda / 30) * 4)
+        return round(float(np.mean([pe_pb_score, ev_score])), 4)
+
+    return round(float(pe_pb_score), 4)
 
 
 def score_fundamental_factor(
     roe: float, gross_margin: float, debt_ratio: float,
     net_profit_yoy: float, revenue_yoy: float,
 ) -> float:
-    scores = [
-        np.tanh((roe - 0.10) * 8),
-        np.tanh((gross_margin - 0.30) * 5),
-        np.tanh((0.40 - debt_ratio) * 5),
-        np.tanh(net_profit_yoy * 4),
-        np.tanh(revenue_yoy * 4),
+    """基本面因子得分，缺失数据（0 或 NaN）自动排除不参与平均。"""
+    raw = [roe, gross_margin, debt_ratio, net_profit_yoy, revenue_yoy]
+    funcs = [
+        lambda v: np.tanh((v - 0.10) * 8),       # ROE: 中性线 10%
+        lambda v: np.tanh((v - 0.30) * 5),       # 毛利率: 中性线 30%
+        lambda v: np.tanh((0.40 - v) * 5),       # 负债率: 中性线 40%
+        lambda v: np.tanh(v * 4),                 # 净利润增速
+        lambda v: np.tanh(v * 4),                 # 营收增速
     ]
+    scores = []
+    for val, fn in zip(raw, funcs):
+        if val is None or (isinstance(val, float) and (np.isnan(val) or val == 0)):
+            continue  # 缺失数据 → 跳过
+        scores.append(fn(val))
+    if not scores:
+        return 0.0
     return round(float(np.mean(scores)), 4)
 
 
@@ -546,3 +719,35 @@ def _pct(val) -> float:
         return v / 100 if abs(v) > 1 else v
     except (ValueError, TypeError):
         return 0.0
+
+
+# ── 基本面数据 24h 缓存 + 便捷包装 ──
+
+_fundamental_cache: dict[str, tuple[float, dict]] = {}
+
+
+def get_fundamental_data(name: str, code: str, market: str) -> dict | None:
+    """获取基本面数据的便捷包装，带 24h 内存缓存。
+
+    自动读取 Settings 中的 LLM 和 Finnhub 配置，消除 3 处重复的参数组装代码。
+    同一 (code, market) 在 24h 内直接返回缓存，避免重复 API 调用。
+    """
+    cache_key = f"{code}:{market}"
+    now_ts = __import__("time").time()
+    if cache_key in _fundamental_cache:
+        cached_ts, cached_data = _fundamental_cache[cache_key]
+        if now_ts - cached_ts < 86400:  # 24h
+            logger.debug(f"基本面缓存命中 ({cache_key})")
+            return cached_data
+
+    from config.settings import Settings
+    settings = Settings()
+    result = fetch_fundamental_factors(
+        name=name, code=code, market=market,
+        model=settings.get("llm_model", ""),
+        base_url=settings.get("llm_base_url", ""),
+        api_key=settings.get("llm_api_key", ""),
+        finnhub_token=settings.get("news_token_us", ""),
+    )
+    _fundamental_cache[cache_key] = (now_ts, result)
+    return result

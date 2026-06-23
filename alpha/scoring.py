@@ -20,11 +20,25 @@ DEFAULT_W_NEWS = 0.4
 # 盘口因子权重（叠加于默认/扩展权重之上）
 W_DEPTH = 0.10
 
-# 扩展权重（含基本面）
+# 扩展权重（含基本面）— 默认（震荡市/过渡期）
 W_TECH_EXT = 0.35
 W_STYLE = 0.15
 W_FUND = 0.25
 W_NEWS_EXT = 0.25
+
+# 行情自适应权重：趋势市中弱化估值因子（强趋势下 PE/PB 分位参考价值降低），
+# 震荡市中恢复默认权重（估值锚定更关键）。
+# 所有权重和 = 1.0（不含盘口因子 10%）。
+_REGIME_WEIGHT_MAP = {
+    # 强趋势+高波动：趋势跟踪 > 估值，风格因子仅 5%
+    "trending_volatile": {"tech": 0.40, "style": 0.05, "fund": 0.30, "news": 0.25},
+    # 弱趋势/慢涨：估值参考价值中等
+    "trending_steady":  {"tech": 0.38, "style": 0.10, "fund": 0.27, "news": 0.25},
+    "trending":         {"tech": 0.38, "style": 0.10, "fund": 0.27, "news": 0.25},
+    # 震荡市/过渡期：默认权重，估值因子恢复 15%
+    "ranging":          {"tech": 0.35, "style": 0.15, "fund": 0.25, "news": 0.25},
+    "transitional":     {"tech": 0.35, "style": 0.15, "fund": 0.25, "news": 0.25},
+}
 
 # 7 个独立技术指标
 INDICATOR_COLUMNS = ["rsi", "dif", "macd_bar", "bb_pct", "k", "d", "j"]
@@ -33,17 +47,12 @@ INDICATOR_COLUMNS = ["rsi", "dif", "macd_bar", "bb_pct", "k", "d", "j"]
 def score_futures_factor(
     nq_change_pct: float,
     es_change_pct: float,
-    nq_kline_trend: float = 0.0,
-    es_kline_trend: float = 0.0,
 ) -> float:
     """
-    将盘前期指数据映射为宏观情绪因子得分 [-1, +1]。
+    将盘前期指涨跌幅映射为宏观情绪因子得分 [-1, +1]。
 
-    Args:
-        nq_change_pct: 纳指期货涨跌幅（小数，如 0.008 = +0.8%）
-        es_change_pct: 标普期货涨跌幅（小数）
-        nq_kline_trend: NQ 5分钟K线趋势得分（阳线占比映射到 [-1,+1]）
-        es_kline_trend: ES 5分钟K线趋势得分
+    仅用期货涨跌幅判断情绪（tanh 映射），不再使用 5 分钟 K 线走势
+    （TickFlow 不支持期货分钟 K 线）。
 
     Returns:
         宏观情绪得分，正值偏暖、负值偏冷
@@ -52,13 +61,7 @@ def score_futures_factor(
 
     # 涨跌幅 → 情绪得分（tanh 映射，1% ≈ +0.29, 2% ≈ +0.54）
     avg_change = (nq_change_pct + es_change_pct) / 2 if nq_change_pct and es_change_pct else nq_change_pct or es_change_pct
-    macro_score = float(np.tanh(avg_change * 30))
-
-    # K线趋势得分：期货分时走势反映机构布局方向
-    avg_trend = (nq_kline_trend + es_kline_trend) / 2 if nq_kline_trend and es_kline_trend else nq_kline_trend or es_kline_trend
-
-    # 合成：涨跌幅 70% + 走势形态 30%
-    combined = 0.7 * macro_score + 0.3 * avg_trend
+    combined = float(np.tanh(avg_change * 30))
     return round(float(np.clip(combined, -1.0, 1.0)), 4)
 
 
@@ -201,33 +204,10 @@ def _estimate_atr_pct(df: pd.DataFrame, window: int = 20) -> float | None:
     return None
 
 
-def _compute_kline_trend(kline_list: list | None) -> float:
-    """从 5 分钟 K 线列表计算走势得分（阳线占比映射到 [-1, +1]）。"""
-    import numpy as np
-    if not kline_list or len(kline_list) < 3:
-        return 0.0
-    up_bars = 0
-    total = 0
-    for bar in kline_list:
-        if not isinstance(bar, dict):
-            continue
-        o = bar.get("o", bar.get("open", 0))
-        c = bar.get("c", bar.get("close", 0))
-        if not o or not c:
-            continue
-        total += 1
-        if c >= o:
-            up_bars += 1
-    if total < 3:
-        return 0.0
-    ratio = up_bars / total
-    # 映射：ratio=0.5 → 0, ratio=1.0 → +1, ratio=0 → -1
-    return round(float(np.tanh((ratio - 0.5) * 4)), 4)
-
-
 def compute_technical_normalized(
     df: pd.DataFrame, window: int = 60, validate: bool = True,
     validation_mode: str = "eod",
+    prediction_reliability: float = 1.0,
 ) -> pd.DataFrame:
     result = df.copy()
     available = [c for c in INDICATOR_COLUMNS if c in result.columns]
@@ -260,6 +240,7 @@ def compute_technical_normalized(
         indicator_values = {col: result[f"{col}_norm"] for col in available}
         result["Tech_Normalized_Score"] = apply_factor_weights(
             indicator_values, validation, regime_weights,
+            prediction_reliability=prediction_reliability,
         )
     else:
         result["Tech_Normalized_Score"] = result[normalized_cols].mean(axis=1)
@@ -336,12 +317,15 @@ def calc_final_score(
     validation_mode: str = "eod",
     depth_score: float = 0.0,
     depth_available: bool = False,
+    market_regime: str = "",
+    prediction_reliability: float = 1.0,
 ) -> pd.DataFrame:
     result = df.copy()
 
     if "Tech_Normalized_Score" not in result.columns:
         result = compute_technical_normalized(result, validate=validate,
-                                               validation_mode=validation_mode)
+                                               validation_mode=validation_mode,
+                                               prediction_reliability=prediction_reliability)
 
     finbert_series = align_finbert_scores(result, news_df)
     tech_score = result["Tech_Normalized_Score"].fillna(0.0)
@@ -357,21 +341,34 @@ def calc_final_score(
         from alpha.fundamental import score_style_factor, score_fundamental_factor
         style = fundamental_data["style_factors"]
         fund = fundamental_data["fundamental_factors"]
+
+        # ── 行情自适应权重：趋势市弱化估值因子 ──
+        rw = _REGIME_WEIGHT_MAP.get(market_regime, _REGIME_WEIGHT_MAP["ranging"])
+        w_tech_ext = rw["tech"]
+        w_style = rw["style"]
+        w_fund = rw["fund"]
+        w_news_ext = rw["news"]
+
         style_score = score_style_factor(
-            style.get("pe_percentile", 0.5), style.get("pb_percentile", 0.5))
+            style.get("pe_percentile", 0.5), style.get("pb_percentile", 0.5),
+            fund.get("ev_ebitda", 0))
         fund_score = score_fundamental_factor(
             fund.get("roe", 0), fund.get("gross_margin", 0),
             fund.get("debt_ratio", 0), fund.get("net_profit_yoy", 0),
             fund.get("revenue_yoy", 0))
 
-        logger.info(f"  [Alpha] 合成(扩展): tech={W_TECH_EXT} style={W_STYLE} fund={W_FUND} news={W_NEWS_EXT} depth={W_DEPTH if depth_available else 0}")
+        logger.info(
+            f"  [Alpha] 合成(扩展, regime={market_regime}): "
+            f"tech={w_tech_ext} style={w_style} fund={w_fund} news={w_news_ext} "
+            f"depth={W_DEPTH if depth_available else 0}"
+        )
         logger.info(f"  [Alpha] style={style_score:.3f} fund={fund_score:.3f}")
         result["Style_Score"] = style_score
         result["Fundamental_Score"] = fund_score
         base = (
             (1.0 - W_DEPTH if depth_available else 1.0) * (
-                W_TECH_EXT * tech_score + W_STYLE * style_score
-                + W_FUND * fund_score + W_NEWS_EXT * finbert_score
+                w_tech_ext * tech_score + w_style * style_score
+                + w_fund * fund_score + w_news_ext * finbert_score
             )
         )
         result["Final_Score"] = (base + depth_adj).clip(-1.0, 1.0)

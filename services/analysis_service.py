@@ -17,14 +17,16 @@ from typing import Callable
 
 import pandas as pd
 
+from config.settings import Settings
 from data.database import Database
-from data.stock_fetcher import get_stock_fetcher
+from data.stock_fetcher import get_stock_fetcher, fetch_us_extended_quote
 from data.news_fetcher import fetch_news
 from data.models import StockInfo, PriceData, AnalysisReport
 from indicators.technical import calc_all_indicators, summarize
 from indicators.sentiment import analyze, aggregate
 from core.pipeline import run_pipeline, AnalysisResult as PipelineResult
 from core.pipeline import compute_intraday_snapshot, compute_premarket_snapshot
+from strategies import get_execution_strategy
 from report.chart import generate_kline_chart
 from report.generator import generate_report, generate_intraday_report, generate_premarket_report
 from utils.dates import get_backtest_dates
@@ -35,11 +37,13 @@ from utils.session import detect_session
 logger = logging.getLogger(__name__)
 
 
-def _fetch_premarket_from_yfinance(code: str) -> dict | None:
-    """兼容旧调用名：美股盘前/盘后价格统一走 yfinance helper。"""
-    from data.stock_fetcher import fetch_us_extended_quote
-
-    return fetch_us_extended_quote(code)
+def _extract_direction(report_content: str, final_score: float = 0.0) -> str:
+    """从 Final_Score 的符号直接判断预测方向。"""
+    if final_score > 0.05:
+        return "bullish"
+    elif final_score < -0.05:
+        return "bearish"
+    return "neutral"
 
 
 @dataclass
@@ -116,6 +120,15 @@ class AnalysisService:
                 return True
             return False
 
+        # ---- 0. 预测追踪：补验证历史预测 ----
+        prediction_stats = None
+        validated_predictions = []
+        try:
+            db = Database()
+            db.batch_verify_expired()
+        except Exception as e:
+            logger.warning(f"预测追踪验证失败: {e}")
+
         # ---- 1. 搜索股票代码 ----
         code = self._resolve_code(request.raw_input, request.market, _progress)
         if _stop(): return self._empty_response(code)
@@ -124,6 +137,13 @@ class AnalysisService:
         _progress("正在获取股票信息...")
         info = self._fetch_stock_info(code, request.market)
         if _stop(): return self._empty_response(code)
+
+        # 预测追踪统计（需要 code 已知后才能查）
+        try:
+            prediction_stats = Database().get_prediction_stats(code)
+            validated_predictions = Database().get_validated_predictions(code, limit=5)
+        except Exception:
+            pass
 
         # ---- 3. 获取股价数据（含缓存） ----
         _progress("正在获取股价数据...")
@@ -149,17 +169,9 @@ class AnalysisService:
         # ---- 4.5. 获取基本面数据（估值 + 财务） ----
         fundamental_data = None
         try:
-            from config.settings import Settings
-            from alpha.fundamental import fetch_fundamental_factors
-            settings = Settings()
+            from alpha.fundamental import get_fundamental_data
             _progress("正在获取基本面数据...")
-            fundamental_data = fetch_fundamental_factors(
-                name=info.name, code=code, market=request.market,
-                model=settings.get("llm_model", ""),
-                base_url=settings.get("llm_base_url", ""),
-                api_key=settings.get("llm_api_key", ""),
-                finnhub_token=settings.get("news_token_us", ""),
-            )
+            fundamental_data = get_fundamental_data(info.name, code, request.market)
         except Exception as e:
             logger.warning(f"基本面数据获取失败: {e}")
 
@@ -172,12 +184,15 @@ class AnalysisService:
         market_type = detect_market(code) or request.market
         depth_score = depth_factor.get("depth_score", 0.0) if depth_factor else 0.0
         depth_avail = depth_factor.get("available", False) if depth_factor else False
+        pred_rel = prediction_stats.direction_accuracy_10 if prediction_stats else 1.0
         pipeline_result = run_pipeline(
             df, news_df, market=market_type,
             w_tech=w_tech, w_news=w_news,
             fundamental_data=fundamental_data,
             depth_score=depth_score,
             depth_available=depth_avail,
+            prediction_reliability=max(pred_rel, 0.3) if pred_rel > 0 else 1.0,
+            stock_code=code,
         )
         if _stop(): return self._empty_response(code)
 
@@ -209,19 +224,19 @@ class AnalysisService:
 
                 # 检测当前交易时段
                 # 美股：只有盘中（regular hours）用 TickFlow 实时数据，
-                # 盘前/盘后/休市都用 yfinance（TickFlow 不支持延伸时段）
+                # 盘前/盘后/休市用延伸时段数据（Nasdaq.com 优先 → yfinance 降级）
                 session = detect_session(request.market, stock_tick=tick, stock_quote=quote)
-                use_yfinance = request.market == "US" and session != "intraday"
+                use_extended = request.market == "US" and session != "intraday"
 
-                # 美股盘前/盘后：TickFlow 不支持延伸时段，用 yfinance
-                if use_yfinance:
+                # 美股盘前/盘后：TickFlow 不支持延伸时段，用 Nasdaq.com / yfinance
+                if use_extended:
                     try:
-                        yf_data = _fetch_premarket_from_yfinance(code)
-                        if yf_data:
-                            # 优先用 yfinance 自带的 prev_close（每日数据），
+                        ext_data = fetch_us_extended_quote(code)
+                        if ext_data:
+                            # 优先用延伸时段自带的 prev_close，
                             # 其次用 pipeline K 线最后一条收盘价（可能滞后）
                             q_prev = (
-                                yf_data.get("prev_close", 0)
+                                ext_data.get("prev_close", 0)
                                 or (
                                     float(pipeline_result.df["close"].iloc[-1])
                                     if "close" in pipeline_result.df.columns
@@ -229,26 +244,26 @@ class AnalysisService:
                                 )
                             )
                             realtime_quote = {
-                                "latest": yf_data["price"],
-                                "open": yf_data["open"],
-                                "high": yf_data["high"],
-                                "low": yf_data["low"],
+                                "latest": ext_data["price"],
+                                "open": ext_data["open"],
+                                "high": ext_data["high"],
+                                "low": ext_data["low"],
                                 "prev_close": q_prev,
-                                "change": yf_data["price"] - q_prev,
-                                "change_pct": round((yf_data["price"] - q_prev) / q_prev, 6) if q_prev > 0 else 0.0,
-                                "volume": yf_data["volume"],
+                                "change": ext_data["price"] - q_prev,
+                                "change_pct": round((ext_data["price"] - q_prev) / q_prev, 6) if q_prev > 0 else 0.0,
+                                "volume": ext_data["volume"],
                                 "amount": 0,
-                                "timestamp": yf_data["timestamp"],
+                                "timestamp": ext_data["timestamp"],
                                 "status": 0,
                                 "vwap": 0,
                             }
-                            logger.info(f"yfinance 延伸时段报价 ({code}): {yf_data['price']:.2f} ({realtime_quote['change_pct']:+.4%})")
+                            logger.info(f"延伸时段报价 ({code}): {ext_data['price']:.2f} ({realtime_quote['change_pct']:+.4%})")
                         else:
-                            logger.warning(f"yfinance 延伸时段数据为空 ({code})")
-                            _progress("⚠️ yfinance 盘前/盘后数据不可用，涨跌幅/成交量可能为 0")
+                            logger.warning(f"延伸时段数据为空 ({code})")
+                            _progress("⚠️ 盘前/盘后数据不可用，涨跌幅/成交量可能为 0")
                     except Exception as e:
-                        logger.warning(f"yfinance 延伸时段报价失败 ({code}): {e}")
-                        _progress("⚠️ yfinance 盘前/盘后数据不可用，涨跌幅/成交量可能为 0")
+                        logger.warning(f"延伸时段报价失败 ({code}): {e}")
+                        _progress("⚠️ 盘前/盘后数据不可用，涨跌幅/成交量可能为 0")
 
                 # 盘中/非美股 → 用 TickFlow（实时）
                 if realtime_quote is None and tick:
@@ -297,14 +312,108 @@ class AnalysisService:
             param_tuning=pipeline_result.param_tuning,
             swot_data=swot_data,
             peer_data=peer_data,
+            operation_plan=pipeline_result.operation_plan,
         )
         if not report_content:
             report_content = "报告生成失败，请稍后重试。"
+
+        # ── 执行摘要（插入报告顶部）──
+        try:
+            from report.prompts import build_executive_summary
+            sc = pipeline_result.signal_check or []
+            fs = float(pipeline_result.df["Final_Score"].dropna().iloc[-1]) if "Final_Score" in pipeline_result.df.columns and not pipeline_result.df["Final_Score"].dropna().empty else 0
+            bias = "bullish" if fs > 0.05 else ("bearish" if fs < -0.05 else "neutral")
+            exec_summary = build_executive_summary(
+                audit_report=pipeline_result.strategy_audit,
+                operation_plan_signal_count=(len(sc), sum(1 for s in sc if s.get("signal") == "buy")),
+                market_bias=bias, final_score=fs,
+            )
+            if exec_summary:
+                report_content = exec_summary + "\n" + report_content
+        except Exception as e:
+            logger.warning(f"执行摘要构建失败: {e}")
+
+        # ── 策略审计 + 系统操作方案注入第七章和第八章之间 ──
+        code_sections = []
+        try:
+            from report.prompts import build_strategy_audit_section
+            if pipeline_result.strategy_audit:
+                sec = build_strategy_audit_section(pipeline_result.strategy_audit)
+                if sec:
+                    code_sections.append(sec)
+        except Exception:
+            pass
+        if pipeline_result.operation_plan:
+            code_sections.append(pipeline_result.operation_plan)
+        if code_sections:
+            section_block = "\n".join(code_sections)
+            section_marker = "<!-- SECTION_8_BOUNDARY -->"
+            if section_marker in report_content:
+                parts = report_content.split(section_marker, 1)
+                report_content = parts[0].strip() + "\n\n" + section_block + "\n\n" + section_marker + "\n\n" + parts[1].strip()
+            else:
+                report_content += "\n" + section_block
+
+        # ── 预测追踪 + 健康度（报告末尾）──
+        unverified = db.get_latest_unverified_prediction(code)
+        report_content += self._build_prediction_footer(
+            code, prediction_stats, validated_predictions,
+            unverified_count=1 if unverified else 0)
+
+        try:
+            health = db.get_strategy_health_report(code)
+            if health:
+                from report.prompts import build_strategy_health_section
+                health_section = build_strategy_health_section(health)
+                if health_section:
+                    report_content += health_section
+        except Exception as e:
+            logger.warning(f"策略健康度章节构建失败: {e}")
 
         # ---- 9. 持久化到数据库 ----
         _progress("正在保存报告...")
         report_id = self._persist_report(info, request.market, request.period,
                                           report_content, chart_path)
+
+        # ---- 9.5 预测追踪：存入预测记录 ----
+        try:
+            fs = float(pipeline_result.df["Final_Score"].dropna().iloc[-1])
+            pp = float(pipeline_result.df["close"].iloc[-1])
+            last_date = str(pipeline_result.df["date"].iloc[-1])[:10]
+
+            # 整体预测（兼容旧逻辑）
+            self._save_prediction(
+                code=code, market=request.market, mode="eod",
+                report_id=report_id,
+                direction=_extract_direction(report_content, fs),
+                final_score=fs,
+                predicted_price=pp,
+                prediction_stats=prediction_stats,
+                report_content=report_content,
+            )
+            # 按策略写入预测（统计各策略信号准确率的基础）
+            for strat_key in pipeline_result.active_strategies:
+                try:
+                    bt = pipeline_result.backtest
+                    s = get_execution_strategy(strat_key)
+                    result = bt.get(s.name) if bt else None
+                    if result and result.trades:
+                        last_trade = result.trades[-1]
+                        if str(last_trade.get("entry_date", ""))[:10] == last_date:
+                            self._save_prediction(
+                                code=code, market=request.market, mode="eod",
+                                report_id=report_id,
+                                direction="bullish",  # 入场 = 看多
+                                final_score=fs,
+                                predicted_price=pp,
+                                prediction_stats=prediction_stats,
+                                report_content=report_content,
+                                strategy_name=strat_key,
+                            )
+                except Exception:
+                    pass  # 单策略预测失败不阻塞整体流程
+        except Exception as e:
+            logger.warning(f"预测写入失败: {e}")
 
         _progress("分析完成")
         return AnalysisResponse(
@@ -392,44 +501,8 @@ class AnalysisService:
 
     def _fetch_prices(self, code: str, period: str, market: str = "US") -> pd.DataFrame | None:
         start, end = get_backtest_dates(period)
-        prices = Database().get_prices(code, start, end)
-
-        if not prices:
-            # 缓存为空 → 全量拉取
-            logger.info(f"缓存为空，联网拉取 {start}~{end}")
-            fetcher = get_stock_fetcher(market)
-            new_prices = fetcher.fetch_price_history(code, start, end)
-            if new_prices:
-                Database().insert_prices(new_prices)
-            prices = Database().get_prices(code, start, end)
-        else:
-            last_date = prices[-1].date
-            logger.info(f"缓存: {len(prices)} 条 ({prices[0].date}~{last_date})")
-
-            # 增量拉取（按 count 返回最近 N 条，不会因周末/节假日返回空列表）
-            from datetime import date as dt_date, timedelta
-            next_day = (dt_date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
-            today_str = dt_date.today().isoformat()
-            logger.info(f"检查增量 {next_day}~{today_str}")
-            fetcher = get_stock_fetcher(market)
-            new_prices = fetcher.fetch_price_history(code, next_day, today_str)
-            # 不能仅靠 new_prices 是否空判断——数据源按 count 取最近 N 条，
-            # 不会因为区间内无交易日就返回空列表。必须比较最新一条的日期。
-            latest_new_date = max((p.date for p in new_prices), default="")
-            if latest_new_date > last_date:
-                Database().insert_prices(new_prices)
-                prices = Database().get_prices(code, start, end)
-                new_count = sum(1 for p in new_prices if p.date > last_date)
-                logger.info(f"增量获取 {new_count} 条新数据（最新 {latest_new_date}）")
-            else:
-                logger.info(f"无增量数据（缓存最新 {last_date}，数据源最新 {latest_new_date or '无'}）")
-
-        if not prices:
-            return None
-
-        df = pd.DataFrame([p.to_dict() for p in prices])
-        df["date"] = pd.to_datetime(df["date"])
-        return df.sort_values("date").reset_index(drop=True)
+        from data.stock_fetcher import fetch_cached_prices
+        return fetch_cached_prices(code, market, start, end, db=Database())
 
     def _fetch_news(self, code: str, market: str, progress,
                     name: str = "", include_macro: bool = False) -> dict:
@@ -525,6 +598,60 @@ class AnalysisService:
             prediction_data=prediction_data,
         )
         return Database().insert_report(report)
+
+    # ── 预测追踪 ──
+
+    @staticmethod
+    def _build_prediction_footer(code: str, prediction_stats,
+                                  validated_predictions: list,
+                                  unverified_count: int = 0) -> str:
+        from report.prompts import build_prediction_footer
+        return build_prediction_footer(code, prediction_stats, validated_predictions, unverified_count)
+
+    @staticmethod
+
+    @staticmethod
+    def _save_prediction(code: str, market: str, mode: str,
+                         direction: str, final_score: float,
+                         predicted_price: float,
+                         prediction_stats=None,
+                         report_id: int | None = None,
+                         report_content: str = "",
+                         strategy_name: str = "") -> int | None:
+        """写入一条新的预测记录到 prediction_log。"""
+        from data.models import PredictionLog
+        from datetime import datetime as _dt
+        import re
+
+        # 尝试从报告中提取建议入场价
+        entry = 0.0
+        for pat in [r'(?:入场|买入|回调至).*?\$?(\d+\.?\d*)',
+                     r'入场价[：:\s]*\$?(\d+\.?\d*)',
+                     r'等待.*?回调.*?\$?(\d+\.?\d*)']:
+            m = re.search(pat, report_content or "")
+            if m:
+                entry = float(m.group(1))
+                break
+
+        verify_days = {"pre": 1, "intraday": 1, "eod": 5, "portfolio": 7}
+        pred = PredictionLog(
+            code=code, market=market, mode=mode,
+            report_id=report_id,
+            predict_time=_dt.now().isoformat(),
+            direction=direction,
+            final_score=final_score,
+            predicted_price=predicted_price,
+            conservative_entry=entry,
+            verify_after_days=verify_days.get(mode, 5),
+            key_reason=f"Final_Score={final_score:+.3f}, status={prediction_stats.status if prediction_stats else 'N/A'}",
+            confidence="high" if abs(final_score) > 0.5 else ("medium" if abs(final_score) > 0.2 else "low"),
+            strategy_name=strategy_name,
+        )
+        try:
+            return Database().insert_prediction(pred)
+        except Exception as e:
+            logger.warning(f"预测写入失败 ({code}): {e}")
+            return None
 
     # ── SWOT 数据构建 ──
 
@@ -673,20 +800,11 @@ class AnalysisService:
 
             try:
                 start, end = get_backtest_dates(request.period)
-                prices = Database().get_prices(peer_code, start, end)
-                if not prices:
-                    fetcher = get_stock_fetcher(request.market)
-                    prices = fetcher.fetch_price_history(peer_code, start, end)
-                    if prices:
-                        Database().insert_prices(prices)
-                        prices = Database().get_prices(peer_code, start, end)
-                if not prices:
+                from data.stock_fetcher import fetch_cached_prices
+                df = fetch_cached_prices(peer_code, request.market, start, end, db=Database(), min_records=20)
+                if df is None:
                     logger.info(f"  跳过 {peer_code}：无 K 线数据")
                     return None
-
-                import pandas as pd
-                df = pd.DataFrame([p.to_dict() for p in prices])
-                df["date"] = pd.to_datetime(df["date"])
 
                 peer_result = run_pipeline(
                     df, news_df=None, market=request.market,
@@ -808,6 +926,15 @@ class AnalysisService:
             if should_stop and should_stop():
                 return True
             return False
+
+        # ---- 0. 预测追踪：补验证历史预测 ----
+        prediction_stats = None
+        validated_predictions = []
+        try:
+            db = Database()
+            db.batch_verify_expired()
+        except Exception as e:
+            logger.warning(f"预测追踪验证失败: {e}")
 
         # ---- 1. 搜索股票代码 ----
         code = self._resolve_code(request.raw_input, request.market, _progress)
@@ -942,9 +1069,72 @@ class AnalysisService:
             swot_data=swot_data,
             peer_data=peer_data,
             pre_report_content=pre_report_content,
+            operation_plan=getattr(t1_pipeline_result, "operation_plan", None) if t1_pipeline_result else None,
         )
         if not report_content:
             report_content = "盘中报告生成失败，请稍后重试。"
+
+        # ── 执行摘要 ──
+        t1_sc = getattr(t1_pipeline_result, "signal_check", None) if t1_pipeline_result else None
+        t1_sc_list = t1_sc or []
+        t1_fs = 0.0
+        if t1_pipeline_result and "Final_Score" in t1_pipeline_result.df.columns:
+            try:
+                t1_fs = float(t1_pipeline_result.df["Final_Score"].dropna().iloc[-1])
+            except Exception:
+                pass
+        t1_bias = "bullish" if t1_fs > 0.05 else ("bearish" if t1_fs < -0.05 else "neutral")
+        try:
+            from report.prompts import build_executive_summary
+            exec_sum = build_executive_summary(
+                audit_report=getattr(t1_pipeline_result, "strategy_audit", None) if t1_pipeline_result else None,
+                operation_plan_signal_count=(len(t1_sc_list), sum(1 for s in t1_sc_list if s.get("signal") == "buy")),
+                market_bias=t1_bias, final_score=t1_fs,
+            )
+            if exec_sum:
+                report_content = exec_sum + "\n" + report_content
+        except Exception:
+            pass
+
+        # ── 策略审计 + 系统操作方案（注入 LLM 第八章之前）──
+        code_sections = []
+        if t1_pipeline_result and t1_pipeline_result.strategy_audit:
+            try:
+                from report.prompts import build_strategy_audit_section
+                sec = build_strategy_audit_section(t1_pipeline_result.strategy_audit)
+                if sec:
+                    code_sections.append(sec)
+            except Exception:
+                pass
+        op = getattr(t1_pipeline_result, "operation_plan", None) if t1_pipeline_result else None
+        if op:
+            code_sections.append(op)
+        if code_sections:
+            import re
+            section_block = "\n".join(code_sections)
+            # 在 LLM 第八章（## 八、或 ## 8）之前插入
+            ch8_match = re.search(r"\n##\s*[八8][、.\s]", report_content)
+            if ch8_match:
+                idx = ch8_match.start()
+                report_content = report_content[:idx] + "\n" + section_block + "\n" + report_content[idx:]
+            else:
+                report_content += "\n" + section_block
+
+        # ── 预测追踪 + 健康度（报告末尾）──
+        unverified = db.get_latest_unverified_prediction(code)
+        report_content += self._build_prediction_footer(
+            code, prediction_stats, validated_predictions,
+            unverified_count=1 if unverified else 0)
+
+        try:
+            health = db.get_strategy_health_report(code)
+            if health:
+                from report.prompts import build_strategy_health_section
+                sec = build_strategy_health_section(health)
+                if sec:
+                    report_content += sec
+        except Exception:
+            pass
 
         report_id = self._persist_report(
             info, request.market, request.period,
@@ -952,6 +1142,22 @@ class AnalysisService:
         )
 
         _progress("盘中分析完成")
+
+        # 预测追踪：写入盘中预测
+        try:
+            fs = float(t1_pipeline_result.df["Final_Score"].dropna().iloc[-1]) if t1_pipeline_result and "Final_Score" in t1_pipeline_result.df.columns else 0.0
+            pp = float(t1_pipeline_result.df["close"].iloc[-1]) if t1_pipeline_result else 0.0
+            self._save_prediction(
+                code=code, market=request.market, mode="intraday",
+                direction=_extract_direction(report_content, fs),
+                final_score=fs,
+                predicted_price=pp,
+                prediction_stats=prediction_stats,
+                report_content=report_content,
+            )
+        except Exception as e:
+            logger.warning(f"盘中预测写入失败: {e}")
+
         return AnalysisResponse(
             stock_info=info,
             chart_path="",
@@ -1008,6 +1214,15 @@ class AnalysisService:
                 return True
             return False
 
+        # ---- 0. 预测追踪：补验证历史预测 ----
+        prediction_stats = None
+        validated_predictions = []
+        try:
+            db = Database()
+            db.batch_verify_expired()
+        except Exception as e:
+            logger.warning(f"预测追踪验证失败: {e}")
+
         # ---- 1. 搜索股票代码 ----
         code = self._resolve_code(request.raw_input, request.market, _progress)
         if _stop(): return self._empty_response(code)
@@ -1030,8 +1245,6 @@ class AnalysisService:
         stock_tick = None
         nq_quote = None
         es_quote = None
-        nq_kline = None
-        es_kline = None
         overnight_news_list = None
 
         # 股票 tick（盘前价格 + 交易时段）
@@ -1047,34 +1260,12 @@ class AnalysisService:
         except Exception as e:
             logger.warning(f"股票实时报价获取失败: {e}")
 
-        # 宏观情绪参考：美股 QQQ/SPY ETF，A 股暂无（后续可加 A50 ETF）
+        # 宏观情绪参考：美股 QQQ/SPY ETF，A 股用沪深300/上证50 ETF
         if request.market == "US":
-            # QQQ/SPY ETF 替代 NQ/ES 期货
-            try:
-                nq_quote = fetcher.fetch_future_quote("US", "NQ")
-            except Exception as e:
-                logger.warning(f"QQQ ETF 报价获取失败: {e}")
-
-            try:
-                es_quote = fetcher.fetch_future_quote("US", "ES")
-            except Exception as e:
-                logger.warning(f"SPY ETF 报价获取失败: {e}")
-
-            # 分钟 K 线不再获取，fetch_future_kline 返回空列表
-            try:
-                nq_kline = fetcher.fetch_future_kline("US", "NQ", kType=2, limit=12)
-            except Exception as e:
-                logger.warning(f"QQQ K 线获取失败: {e}")
-
-            try:
-                es_kline = fetcher.fetch_future_kline("US", "ES", kType=2, limit=12)
-            except Exception as e:
-                logger.warning(f"SPY K 线获取失败: {e}")
-
-            # ── 美股盘前价格：TickFlow 不支持盘前盘后，用 yfinance 补充 ──
+            # ── 美股盘前价格：TickFlow 不支持盘前盘后，直接走 Nasdaq.com → yfinance 降级 ──
             try:
                 _progress("正在获取盘前实时价格...")
-                pre_data = _fetch_premarket_from_yfinance(code)
+                pre_data = fetch_us_extended_quote(code)
                 if pre_data:
                     stock_tick = {
                         "latest": pre_data["price"],
@@ -1095,17 +1286,17 @@ class AnalysisService:
                         "timestamp": pre_data["timestamp"],
                         "status": 0,
                     }
-                    logger.info(f"yfinance 盘前价格: {code}={pre_data['price']:.2f}")
+                    logger.info(f"盘前价格: {code}={pre_data['price']:.2f}")
                 else:
-                    logger.warning(f"yfinance 盘前数据为空 ({code})")
-                    _progress("⚠️ yfinance 盘前数据不可用，成交量/价格可能不准确")
+                    logger.warning(f"盘前数据为空 ({code})")
+                    _progress("⚠️ 盘前数据不可用，成交量/价格可能不准确")
             except Exception as e:
-                logger.warning(f"yfinance 盘前价格获取失败 ({code}): {e}")
-                _progress("⚠️ yfinance 盘前数据获取失败，成交量/价格可能不准确")
+                logger.warning(f"盘前价格获取失败 ({code}): {e}")
+                _progress("⚠️ 盘前数据获取失败，成交量/价格可能不准确")
 
-            # ── QQQ/SPY 盘前价格同步用 yfinance ──
+            # ── QQQ/SPY 盘前价格同步获取 ──
             try:
-                qqq_pre = _fetch_premarket_from_yfinance("QQQ")
+                qqq_pre = fetch_us_extended_quote("QQQ")
                 if qqq_pre:
                     nq_quote = {
                         "latest": qqq_pre["price"],
@@ -1120,12 +1311,12 @@ class AnalysisService:
                         "timestamp": qqq_pre["timestamp"],
                         "status": 0,
                     }
-                    logger.info(f"yfinance QQQ 盘前: {qqq_pre['price']:.2f}")
+                    logger.info(f"QQQ 盘前: {qqq_pre['price']:.2f}")
             except Exception as e:
-                logger.warning(f"yfinance QQQ 盘前失败: {e}")
+                logger.warning(f"QQQ 盘前失败: {e}")
 
             try:
-                spy_pre = _fetch_premarket_from_yfinance("SPY")
+                spy_pre = fetch_us_extended_quote("SPY")
                 if spy_pre:
                     es_quote = {
                         "latest": spy_pre["price"],
@@ -1140,9 +1331,9 @@ class AnalysisService:
                         "timestamp": spy_pre["timestamp"],
                         "status": 0,
                     }
-                    logger.info(f"yfinance SPY 盘前: {spy_pre['price']:.2f}")
+                    logger.info(f"SPY 盘前: {spy_pre['price']:.2f}")
             except Exception as e:
-                logger.warning(f"yfinance SPY 盘前失败: {e}")
+                logger.warning(f"SPY 盘前失败: {e}")
 
         elif request.market == "A":
             # A 股盘前：集合竞价 9:15-9:25，宏观参考用沪深300 + 上证50 ETF
@@ -1195,11 +1386,7 @@ class AnalysisService:
 
         # 构建期货数据
         futures_data = {}
-        if nq_quote:
-            nq_quote["kline_5min"] = nq_kline or []
         futures_data["NQ"] = nq_quote or {}
-        if es_quote:
-            es_quote["kline_5min"] = es_kline or []
         futures_data["ES"] = es_quote or {}
 
         # ---- 5. 确保有 T-1 pipeline result ----
@@ -1259,9 +1446,71 @@ class AnalysisService:
             stock_info=info.to_dict(),
             swot_data=swot_data,
             peer_data=peer_data,
+            operation_plan=getattr(t1_pipeline_result, "operation_plan", None) if t1_pipeline_result else None,
         )
         if not report_content:
             report_content = "盘前报告生成失败，请稍后重试。"
+
+        # ── 执行摘要 ──
+        t1_sc = getattr(t1_pipeline_result, "signal_check", None) if t1_pipeline_result else None
+        t1_sc_list = t1_sc or []
+        t1_fs = 0.0
+        if t1_pipeline_result and "Final_Score" in t1_pipeline_result.df.columns:
+            try:
+                t1_fs = float(t1_pipeline_result.df["Final_Score"].dropna().iloc[-1])
+            except Exception:
+                pass
+        t1_bias = "bullish" if t1_fs > 0.05 else ("bearish" if t1_fs < -0.05 else "neutral")
+        try:
+            from report.prompts import build_executive_summary
+            exec_sum = build_executive_summary(
+                audit_report=getattr(t1_pipeline_result, "strategy_audit", None) if t1_pipeline_result else None,
+                operation_plan_signal_count=(len(t1_sc_list), sum(1 for s in t1_sc_list if s.get("signal") == "buy")),
+                market_bias=t1_bias, final_score=t1_fs,
+            )
+            if exec_sum:
+                report_content = exec_sum + "\n" + report_content
+        except Exception:
+            pass
+
+        # ── 策略审计 + 系统操作方案（注入 LLM 第八章之前）──
+        code_sections = []
+        if t1_pipeline_result and t1_pipeline_result.strategy_audit:
+            try:
+                from report.prompts import build_strategy_audit_section
+                sec = build_strategy_audit_section(t1_pipeline_result.strategy_audit)
+                if sec:
+                    code_sections.append(sec)
+            except Exception:
+                pass
+        op = getattr(t1_pipeline_result, "operation_plan", None) if t1_pipeline_result else None
+        if op:
+            code_sections.append(op)
+        if code_sections:
+            import re
+            section_block = "\n".join(code_sections)
+            ch8_match = re.search(r"\n##\s*[八8][、.\s]", report_content)
+            if ch8_match:
+                idx = ch8_match.start()
+                report_content = report_content[:idx] + "\n" + section_block + "\n" + report_content[idx:]
+            else:
+                report_content += "\n" + section_block
+
+        # ── 预测追踪 + 健康度（报告末尾）──
+        unverified = db.get_latest_unverified_prediction(code)
+        report_content += self._build_prediction_footer(
+            code, prediction_stats, validated_predictions,
+            unverified_count=1 if unverified else 0)
+
+        try:
+            health = db.get_strategy_health_report(code)
+            if health:
+                from report.prompts import build_strategy_health_section
+                sec = build_strategy_health_section(health)
+                if sec:
+                    report_content += sec
+        except Exception:
+            pass
 
         # 存储盘前预测数据（供盘中分析时做预测验证）
         import json
@@ -1278,6 +1527,21 @@ class AnalysisService:
         self._persist_report(info, request.market, request.period,
                             report_content, "", mode="pre",
                             prediction_data=prediction_data)
+
+        # 预测追踪：写入盘前预测
+        try:
+            fs = float(t1_pipeline_result.df["Final_Score"].dropna().iloc[-1]) if t1_pipeline_result and "Final_Score" in t1_pipeline_result.df.columns else 0.0
+            pp = float(t1_pipeline_result.df["close"].iloc[-1]) if t1_pipeline_result else 0.0
+            self._save_prediction(
+                code=code, market=request.market, mode="pre",
+                direction=_extract_direction(report_content, fs),
+                final_score=fs,
+                predicted_price=pp,
+                prediction_stats=prediction_stats,
+                report_content=report_content,
+            )
+        except Exception as e:
+            logger.warning(f"盘前预测写入失败: {e}")
 
         _progress("盘前分析完成")
         return AnalysisResponse(
@@ -1364,21 +1628,11 @@ class AnalysisService:
                 yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
                 end = yesterday
 
-            prices = Database().get_prices(code, start, end)
-            if not prices:
-                fetcher = get_stock_fetcher(request.market)
-                new_prices = fetcher.fetch_price_history(code, start, end)
-                if new_prices:
-                    Database().insert_prices(new_prices)
-                prices = Database().get_prices(code, start, end)
-
-            if not prices:
+            from data.stock_fetcher import fetch_cached_prices
+            df = fetch_cached_prices(code, request.market, start, end, db=Database())
+            if df is None:
                 logger.warning("T-1 日数据为空")
                 return None
-
-            df = pd.DataFrame([p.to_dict() for p in prices])
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.sort_values("date").reset_index(drop=True)
 
             news_df = self._build_news_df(code)
             if news_df is None or news_df.empty:
@@ -1389,17 +1643,9 @@ class AnalysisService:
             # 获取基本面数据
             fundamental_data = None
             try:
-                from config.settings import Settings
-                from alpha.fundamental import fetch_fundamental_factors
-                settings = Settings()
+                from alpha.fundamental import get_fundamental_data
                 info = self._fetch_stock_info(code, request.market)
-                fundamental_data = fetch_fundamental_factors(
-                    name=info.name if info else code, code=code, market=request.market,
-                    model=settings.get("llm_model", ""),
-                    base_url=settings.get("llm_base_url", ""),
-                    api_key=settings.get("llm_api_key", ""),
-                    finnhub_token=settings.get("news_token_us", ""),
-                )
+                fundamental_data = get_fundamental_data(info.name if info else code, code, request.market)
             except Exception as e:
                 logger.warning(f"基本面数据获取失败: {e}")
 

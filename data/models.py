@@ -221,3 +221,64 @@ class AccountBalance:
             value = d.get(name)
             result[name] = value if value is not None else field_def.default
         return cls(**result)
+
+
+@dataclass
+class PredictionLog:
+    """预测追踪记录 — 每次分析的核心判断结构化存储，用于后续验证。"""
+    id: Optional[int] = None
+    code: str = ""                     # 股票代码（组合用 "PORTFOLIO_US" / "PORTFOLIO_A"）
+    market: str = ""                   # US / A
+    mode: str = "eod"                  # eod / intraday / pre / portfolio
+    report_id: Optional[int] = None    # 关联 reports.id
+    predict_time: str = ""             # 预测生成时间 ISO 格式
+    direction: str = ""                # bullish / bearish / neutral
+    final_score: float = 0.0           # 当时的 Final_Score
+    predicted_price: float = 0.0       # 预测时的参考价格
+    key_reason: str = ""               # 核心判断依据（50 字中文摘要）
+    confidence: str = ""               # high / medium / low
+    conservative_entry: float = 0.0    # 保守方案入场价
+    aggressive_entry: float = 0.0      # 激进方案入场价
+    stop_loss: float = 0.0             # 止损价
+    verify_after_days: int = 5         # 几个交易日后验证
+    validated: int = 0                 # 是否已验证
+    actual_return: float = 0.0         # 实际收益%（验证后填入）
+    actual_direction: str = ""         # 实际方向（验证后填入）
+    entry_triggered: int = 0           # 入场价是否触发
+    verified_at: str = ""              # 验证时间
+    strategy_name: str = ""            # 策略标识（"A"/"B"/...），空字符串=整体预测
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PredictionLog":
+        result = {}
+        for name, field_def in cls.__dataclass_fields__.items():
+            value = d.get(name)
+            result[name] = value if value is not None else field_def.default
+        return cls(**result)
+
+
+@dataclass
+class PredictionStats:
+    """从 prediction_log 聚合的预测绩效统计。"""
+    code: str = ""                     # 股票代码或组合标识
+    total_predictions: int = 0         # 累计预测次数
+    direction_accuracy_10: float = 0.0 # 近 10 次方向正确率
+    direction_accuracy_all: float = 0.0# 全部历史方向正确率
+    avg_predicted_return: float = 0.0  # 平均预测收益
+    accuracy_trend: str = "stable"     # improving / stable / declining
+    status: str = "reliable"           # reliable / unstable / unreliable
+    updated_at: str = ""               # 计算时间
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PredictionStats":
+        result = {}
+        for name, field_def in cls.__dataclass_fields__.items():
+            value = d.get(name)
+            result[name] = value if value is not None else field_def.default
+        return cls(**result)

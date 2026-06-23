@@ -43,7 +43,10 @@ class ThresholdTrendStrategy(BaseExecutionStrategy):
     suitable_regimes = ["trending_volatile", "trending_steady"]
 
     def tunable_params(self) -> list[dict]:
-        return [{"name": "entry_pct", "default": self.entry_pct, "values": [0.6, 0.7, 0.75, 0.8, 0.85, 0.9]}]
+        return [
+            {"name": "entry_pct", "default": self.entry_pct, "values": [0.65, 0.75, 0.80, 0.85]},
+            {"name": "exit_pct", "default": self.exit_pct, "values": [0.40, 0.50, 0.60]},
+        ]
 
 
     def __init__(self, entry_pct: float = 0.80, exit_pct: float = 0.50,

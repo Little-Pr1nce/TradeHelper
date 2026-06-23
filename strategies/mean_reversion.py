@@ -45,7 +45,10 @@ class MeanReversionStrategy(BaseExecutionStrategy):
     suitable_regimes = ["ranging", "transitional"]
 
     def tunable_params(self) -> list[dict]:
-        return [{"name": "entry_pct", "default": self.entry_pct, "values": [0.1, 0.15, 0.2, 0.25, 0.3]}]
+        return [
+            {"name": "entry_pct", "default": self.entry_pct, "values": [0.10, 0.15, 0.20, 0.25]},
+            {"name": "vol_percentile", "default": self.vol_percentile, "values": [0.20, 0.30, 0.40]},
+        ]
 
 
     def __init__(self, entry_pct: float = 0.20, exit_pct: float = 0.50,

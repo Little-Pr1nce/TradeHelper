@@ -70,11 +70,10 @@ class MA60TrendStrategy(BaseExecutionStrategy):
         )
 
     def tunable_params(self) -> list[dict]:
-        return [{
-            "name": "atr_trail_mult",
-            "default": self.atr_trail_mult,
-            "values": [2.0, 2.5, 3.0, 3.5, 4.0],
-        }]
+        return [
+            {"name": "atr_trail_mult", "default": self.atr_trail_mult, "values": [2.0, 2.5, 3.0, 3.5]},
+            {"name": "risk_budget", "default": self.risk_budget, "values": [0.30, 0.45, 0.60]},
+        ]
 
     def generate_orders(
         self, df: pd.DataFrame, context: StrategyContext

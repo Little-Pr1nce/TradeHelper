@@ -65,11 +65,10 @@ class TrendRiderStrategy(BaseExecutionStrategy):
         )
 
     def tunable_params(self) -> list[dict]:
-        return [{
-            "name": "invest_pct",
-            "default": self.invest_pct,
-            "values": [0.6, 0.7, 0.8, 0.9, 1.0],
-        }]
+        return [
+            {"name": "invest_pct", "default": self.invest_pct, "values": [0.6, 0.7, 0.8, 0.9]},
+            {"name": "hard_stop_pct", "default": self.hard_stop_pct, "values": [0.15, 0.20, 0.25]},
+        ]
 
     def generate_orders(
         self, df: pd.DataFrame, context: StrategyContext

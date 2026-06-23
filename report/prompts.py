@@ -16,6 +16,37 @@
 
 SYSTEM_PROMPT = """你是一个专业的量化分析师。请基于下面提供的**真实数据**，生成一份客观、专业的中文股票分析报告。
 
+## 角色边界（重要）
+你的角色是**解读分析师**，负责解释策略信号和数据含义，而不是独立做决策的人：
+
+✅ 你可以做：
+- 解释为什么某些策略在当前行情下适用/不适用
+- 指出多策略之间的矛盾点（如策略 A 看多但策略 B 看空）
+- 风险提示和情景推演（如果 X 发生，则可能 Y）
+- 建议新策略框架思路（但需标注「建议回测验证后纳入」）
+
+❌ 你不能做：
+- 脱离回测数据自己编造价位（所有价位必须来自系统方案或技术指标数据）
+- 在没有策略信号支持的情况下自己决定买卖时机
+- 创造新的策略规则并在当前报告中使用
+
+## 如何写操作方案
+
+Prompt 中会包含「## 🎯 系统操作方案（代码生成）」章节，这是量化模型自动生成的原始判断（策略信号、触发条件、关键价位等）。你的任务是把这些量化语言翻译成交易员能执行的 K 线图语言：
+
+**必须覆盖保守和激进两套方案**（不管当前有无买入信号）：
+- 🛡️ **保守方案**：有信号时选最稳健策略，严格条件低仓位；无信号时告诉用户等什么具体条件、盯哪个价位、概率多大
+- 🚀 **激进方案**：有信号时选收益最高策略，可放宽条件；无信号时分析哪个策略最接近触发、能否轻仓试探、亏多少赚多少
+
+**每套方案必须包含**：
+- 看什么（图上要看到什么信号）
+- 什么价位（大概在什么价位附近行动）
+- 能不能做/等（概率判断，会不会等不到）
+- 错了怎么办（止损）
+- 为什么选这个（对比其他候选策略的取舍理由）
+
+**禁止编造价位**——所有数字必须来自系统方案或技术指标数据，不得自己编。
+
 ## 重要规则
 1. **全部使用中文输出** — 如果原始数据中有英文内容（如新闻标题、内容），请准确翻译为中文呈现，不得修改原意。
 2. **严禁编造数据** — 所有分析必须基于我提供的数据。不要编造你没有数据的日期的事件（如今天还没发生的走势、跳空缺口等）。检查策略入场条件时（如涨跌幅、成交量），必须从技术面分析数据中找实际数值，找不到就写「数据未提供，无法判断」，不准编假数字。
@@ -43,6 +74,7 @@ SYSTEM_PROMPT = """你是一个专业的量化分析师。请基于下面提供�
 8. **策略回测结果** — 三种交易策略的横向对比，包括各策略的收益率、夏普比率、最大回撤等核心指标
 9. **同板块关注** — 基于同板块标的的 Alpha 快速评分，给出横向对比排名和板块整体判断。如果提供了同板块数据，必须在报告中用 Markdown 表格逐条展示，不得省略任何标的。
 10. **综合建议与短期预测（AI分析）** — 这是报告中最重要的部分。你必须交叉印证上面所有数据（因子得分、IC/IR 检验、基本面估值、SWOT 分析、技术指标、新闻情绪、回测绩效、同板块对比、Rank IC、基准收益、**盘口买卖比**、**实时报价**等），给出：
+   8.1) **数据综合分析**：从多个维度交叉验证当前市场状态。你必须按以下格式输出：
    8.1) **数据综合分析**：从多个维度交叉验证当前市场状态。你必须按以下格式输出：
 
       **多维信号交叉表**（必须用 Markdown 表格呈现）：
@@ -80,7 +112,7 @@ SYSTEM_PROMPT = """你是一个专业的量化分析师。请基于下面提供�
 
       **🎯 策略操作转化**（必须输出）：从量化策略和人类策略中**各选**表现最好的，共输出 2-3 个操作方案。两类策略都要覆盖到。
 
-      **⚠️ 你的操作建议必须严格基于回测数据中提供的「实际交易记录」**：每条策略下面都有它在回测期内的真实买卖记录（入场日期/价格/理由、离场日期/价格/理由）。你要参照这些真实的入场时机和价位来写当前的操作建议，而不是自己编造一个操作方案。比如回测记录显示策略 L 在价格回踩 MA20 且放量企稳时入场、盈利 100%+ 时止盈——那你给用户的操作建议也必须围绕「等回踩 MA20」这个框架，给当前的 MA20 价格作为参考入场价。
+      **⚠️ 你的操作建议必须严格基于回测数据中提供的「实际交易记录」**：每条策略下面都有它在回测期内的真实买卖记录（入场日期/价格/理由、离场日期/价格/理由）。你要参照这些真实的入场时机和价位来写当前的操作建议，而不是自己编造一个操作方案。
 
       对**量化策略（A-H、O）**——把量化逻辑翻译成人能执行的条件：
       - **策略名称**（回测收益 +XX%，夏普 X.XX）
@@ -113,7 +145,7 @@ SYSTEM_PROMPT = """你是一个专业的量化分析师。请基于下面提供�
       - SWOT 竞争分析（如有）
       - 同板块对比（如有）
 
-      每一项都可能对操作计划产生影响。比如策略 L 推荐在 MA20 入场，但新闻面极度利多、盘口买盘压倒性，你可能建议把首仓价位适当上调以避免踏空——并**解释为什么做这个调整**。
+      每一项都可能对操作计划产生影响，你需要综合判断并解释为什么做某个调整。
 
       分批操作计划以「**综合操作方案**」为标题，先写一段 **「决策依据」**（3-5 句话），然后综合策略转化中表现最好的几个策略的优点，融汇成两套方案：
 
@@ -128,6 +160,234 @@ SYSTEM_PROMPT = """你是一个专业的量化分析师。请基于下面提供�
 
 6. **隐式分隔标记**：在第 7 章（策略回测结果）和第 8 章（综合建议与短期预测）之间，必须插入一行 `<!-- SECTION_8_BOUNDARY -->`（独占一行，前后不加其他内容）。这个标记不会在渲染时显示，但能帮助系统后续识别报告结构。
 """
+
+
+def build_executive_summary(
+    audit_report,
+    operation_plan_signal_count: tuple[int, int] | None = None,
+    market_bias: str = "neutral",
+    final_score: float = 0.0,
+    health_status: str = "",
+) -> str:
+    """构建报告顶部「一分钟速览」执行摘要。
+
+    Args:
+        audit_report: StrategyAuditReport 或 None
+        operation_plan_signal_count: (总策略数, 买入信号数)
+        market_bias: 市场方向
+        final_score: Alpha 得分
+        health_status: 健康度状态简述
+    """
+    lines = ["## 📊 一分钟速览\n"]
+    bias_emoji = {"bullish": "📈 偏多", "bearish": "📉 偏空", "neutral": "📊 中性"}
+    bias = bias_emoji.get(market_bias, market_bias)
+
+    total, buy = operation_plan_signal_count or (0, 0)
+
+    # 当前判断
+    score_desc = "偏多" if final_score > 0.05 else ("偏空" if final_score < -0.05 else "中性")
+    if buy > 0:
+        judgment = f"**当前判断**: {bias}（Final_Score={final_score:+.3f}，{score_desc}），{buy}/{total} 策略建议买入"
+    else:
+        judgment = f"**当前判断**: {bias}（Final_Score={final_score:+.3f}，{score_desc}），{total} 策略均未触发入场 → **观望**"
+
+    lines.append(judgment)
+
+    # 审计摘要
+    if audit_report:
+        s = audit_report.summary or {}
+        lines.append(f"**策略审计**: PASS={s.get('pass', 0)}, COND={s.get('conditional', 0)}, FAIL={s.get('fail', 0)}, OVERFIT={s.get('overfit', 0)}")
+
+    # 操作建议
+    if buy > 0:
+        lines.append("**操作建议**: 系统已生成保守+激进双方案（见文末），请关注入场条件和有效窗口。")
+    else:
+        lines.append("**操作建议**: 观望等待。关注策略入场条件何时满足，见文末「系统操作方案」章节。")
+
+    # 风险
+    risks = []
+    if final_score < -0.05:
+        risks.append("Alpha 偏空，回调风险较高")
+    if audit_report and audit_report.summary.get("overfit", 0) >= 2:
+        risks.append(f"{audit_report.summary['overfit']} 个策略疑似过拟合")
+    if health_status and "降级" in health_status:
+        risks.append(health_status)
+    if risks:
+        lines.append(f"**主要风险**: {'；'.join(risks)}")
+
+    lines.append(f"\n> ⏱ 操作方案有效窗口: **5 个交易日** | 以上为系统自动生成摘要\n")
+    return "\n".join(lines)
+
+
+def build_prediction_footer(code: str, prediction_stats,
+                            validated_predictions: list,
+                            unverified_count: int = 0) -> str:
+    """构建预测追踪报告尾部 Markdown，供 Tab1/Tab3 直接拼接到报告末尾。"""
+    lines = ["\n---\n", "## 📈 系统追踪\n"]
+
+    if prediction_stats:
+        ps = prediction_stats.to_dict() if hasattr(prediction_stats, 'to_dict') else (prediction_stats or {})
+        total = ps.get('total_predictions', 0)
+        if total > 0:
+            lines.append(f"- 累计已验证预测：{total} 次")
+            lines.append(f"- 近 10 次方向正确率：{ps.get('direction_accuracy_10', 0):.0%}")
+            lines.append(f"- 全部历史正确率：{ps.get('direction_accuracy_all', 0):.0%}")
+            lines.append(f"- 正确率趋势：{ps.get('accuracy_trend', 'stable')}")
+        elif unverified_count > 0:
+            lines.append(f"- 已有 {unverified_count} 条预测，验证窗口未到")
+        else:
+            lines.append("- 暂无历史预测记录（首次分析）")
+        lines.append("")
+
+    if validated_predictions:
+        lines.append("| 预测时间 | 方向 | 预测价 | 建议入场 | 入场触发 | 实际收益 | 正确 |")
+        lines.append("|---------|------|--------|---------|---------|---------|-----|")
+        for p in validated_predictions[:5]:
+            d = p.to_dict() if hasattr(p, 'to_dict') else p
+            direction_map = {"bullish": "偏多", "bearish": "偏空", "neutral": "中性"}
+            direction_str = direction_map.get(d.get("direction", ""), d.get("direction", ""))
+            if d.get("direction") == d.get("actual_direction") and d.get("actual_direction"):
+                correct = "✅"
+            elif d.get("actual_direction"):
+                correct = "❌"
+            else:
+                correct = "—"
+            entry = d.get('conservative_entry', 0) or d.get('aggressive_entry', 0)
+            entry_str = f"${entry:.2f}" if entry > 0 else "—"
+            triggered = "✅" if d.get('entry_triggered', 0) else ("—" if entry > 0 else "—")
+            time_str = d.get('predict_time', '')[:16] if d.get('predict_time', '') else ''
+            lines.append(
+                f"| {time_str} "
+                f"| {direction_str} "
+                f"| {d.get('predicted_price', 0):.2f} "
+                f"| {entry_str} "
+                f"| {triggered} "
+                f"| {d.get('actual_return', 0):+.2%} "
+                f"| {correct} |"
+            )
+        lines.append("")
+
+    lines.append("*以上为系统自动追踪数据，仅供参考。*\n")
+    return "\n".join(lines)
+
+
+def build_strategy_audit_section(audit_report) -> str:
+    """构建策略池审计 Markdown 章节（代码注入，非 LLM 生成）。
+
+    从 StrategyAuditReport 生成审计表格和推荐建议。
+    """
+    if audit_report is None:
+        return ""
+
+    entries = getattr(audit_report, "entries", []) or []
+    if not entries:
+        return ""
+
+    lines = ["\n---\n", "## 📋 策略池审计（时间切分验证）\n"]
+    lines.append(f"> ⏱ 分割日期：{audit_report.split_date}")
+    lines.append(f"> 训练期：{audit_report.train_period} | 验证期：{audit_report.test_period}")
+    lines.append("")
+
+    # ── 判定汇总 ──
+    s = audit_report.summary or {}
+    lines.append(f"**判定汇总**：✅ 通过 {s.get('pass', 0)} 个 "
+                 f"| ⚠️ 有条件 {s.get('conditional', 0)} 个 "
+                 f"| ❌ 淘汰 {s.get('fail', 0)} 个 "
+                 f"| 🔴 过拟合 {s.get('overfit', 0)} 个")
+    lines.append("")
+
+    # ── 审计表格 ──
+    lines.append("| 策略 | 判定 | 训练期 | | | | 验证期（样本外） | | | | 衰减 |")
+    lines.append("|------|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
+    lines.append("| | | 交易 | 夏普 | 回撤 | 胜率 | 交易 | 夏普 | 回撤 | 胜率 | 夏普 |")
+    lines.append("|------|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|")
+
+    for e in entries:
+        emoji = {"PASS": "✅", "CONDITIONAL": "⚠️", "FAIL": "❌"}.get(e.verdict, "❓")
+        overfit_mark = " 🔴" if getattr(e, "overfit", False) else ""
+        lines.append(
+            f"| {e.strategy_key} {e.strategy_name[:12]} "
+            f"| {emoji} {e.verdict}{overfit_mark} "
+            f"| {e.train_trades} "
+            f"| {e.train_sharpe:.2f} "
+            f"| {e.train_drawdown*100:.0f}% "
+            f"| {e.train_win_rate*100:.0f}% "
+            f"| {e.test_trades} "
+            f"| {e.test_sharpe:.2f} "
+            f"| {e.test_drawdown*100:.0f}% "
+            f"| {e.test_win_rate*100:.0f}% "
+            f"| {e.sharpe_degradation*100:.0f}% |"
+        )
+    lines.append("")
+
+    # ── 判定逻辑说明 ──
+    lines.append("**判定标准**：")
+    lines.append(f"- ✅ PASS：训练期 ≥5 笔 AND 验证期 ≥3 笔 AND 验证夏普 ≥1.0 AND 验证回撤 ≤30% AND 验证胜率 ≥45%")
+    lines.append(f"- ⚠️ CONDITIONAL：训练期 ≥3 笔 AND 验证期 ≥1 笔 AND 验证夏普 ≥0.5 AND 验证回撤 ≤40%")
+    lines.append(f"- ❌ FAIL：不满足以上条件")
+    lines.append(f"- 🔴 过拟合：验证夏普 < 训练夏普的 30%")
+    lines.append("")
+
+    # ── 推荐建议 ──
+    recs = getattr(audit_report, "recommendations", []) or []
+    if recs:
+        lines.append("**建议**：")
+        for r in recs:
+            lines.append(f"- {r}")
+        lines.append("")
+
+    lines.append("*策略审计基于回测数据的时间切分验证，用于评估策略在样本外数据的表现。*\n")
+    return "\n".join(lines)
+
+
+def build_strategy_health_section(health_report: list[dict]) -> str:
+    """构建策略健康度追踪章节（持续优化闭环）。
+
+    Args:
+        health_report: Database.get_strategy_health_report() 的返回值
+    """
+    if not health_report:
+        return ""
+
+    lines = ["\n---\n", "## 🩺 策略健康度追踪（持续优化闭环）\n"]
+    lines.append("> 基于历史预测验证数据，按策略统计方向正确率。\n")
+
+    lines.append("| 策略 | 预测次数 | 正确率 | 近期正确率 | 趋势 | 状态 | 建议 |")
+    lines.append("|------|:---:|:---:|:---:|:---:|------|------|")
+
+    action_labels = {"keep": "✅ 保留", "watch": "⚠️ 观察", "demote": "🔻 降级"}
+    status_labels = {"reliable": "可靠", "unstable": "不稳定", "unreliable": "不可靠"}
+
+    for h in health_report:
+        action = action_labels.get(h["action"], h["action"])
+        status = status_labels.get(h["status"], h["status"])
+        trend_emoji = {"improving": "📈", "stable": "➡️", "declining": "📉"}
+        trend = f"{trend_emoji.get(h['trend'], '')} {h['trend']}"
+
+        lines.append(
+            f"| {h['strategy_name'][:20]} "
+            f"| {h['total']} "
+            f"| {h['accuracy']:.0%} "
+            f"| {h['recent_accuracy']:.0%} "
+            f"| {trend} "
+            f"| {status} "
+            f"| {action} |"
+        )
+    lines.append("")
+
+    # 建议
+    demotes = [h for h in health_report if h["action"] == "demote"]
+    watches = [h for h in health_report if h["action"] == "watch"]
+    if demotes:
+        names = ", ".join(h["strategy_name"][:15] for h in demotes)
+        lines.append(f"⚠️ **建议降级**: {names} — 连续预测准确率低，建议从操作方案中排除，仅在回测表格中参考。")
+    if watches:
+        names = ", ".join(h["strategy_name"][:15] for h in watches)
+        lines.append(f"👀 **建议观察**: {names} — 近期准确率不稳定，降低其在操作方案中的权重。")
+
+    lines.append("")
+    lines.append("*策略健康度基于 prediction_log 实际预测验证数据，随数据积累持续更新。*\n")
+    return "\n".join(lines)
 
 
 def build_user_prompt(
@@ -162,10 +422,10 @@ def build_user_prompt(
             "",
             "【财务数据】",
             f"- ROE：{fin.get('roe', 0):.1%}",
-            f"- 毛利率：{fin.get('gross_margin', 0):.1%}",
+            f"- 毛利率（TTM/年报）：{fin.get('gross_margin', 0):.1%}（5年均值：{fin.get('gross_margin_5y', 0):.1%}）",
             f"- 资产负债率：{fin.get('debt_ratio', 0):.1%}",
-            f"- 净利润同比增速：{fin.get('net_profit_yoy', 0):+.1%}",
-            f"- 营收同比增速：{fin.get('revenue_yoy', 0):+.1%}",
+            f"- 净利润同比增速：{fin.get('net_profit_yoy', 0):+.1%}（5年均值：{fin.get('net_profit_yoy_5y', 0):+.1%}）",
+            f"- 营收同比增速：{fin.get('revenue_yoy', 0):+.1%}（5年均值：{fin.get('revenue_yoy_5y', 0):+.1%}）",
             "",
             "【估值数据】",
             f"- PE(TTM) 3年历史分位：{val.get('pe_percentile', 0.5):.1%}",
@@ -317,22 +577,7 @@ INTRADAY_SYSTEM_PROMPT = """你是一个专业的量化分析师，正在为一�
 
 7. **禁忌词必须替换为数值描述** — 以下词汇禁止单独出现（必须写出数值标准）：「企稳」「放量」「缩量」「阳线」「阴线」「强势」「弱势」「恐慌性抛售」「探底回升」「回调到位」「确认支撑」。
 8. **盘中数据时效声明** — 所有点位基于快照时刻的实时价格计算，会随行情变化。
-
-## 美股盘中数据的解读方法
-
-美股 24 小时交易，盘中实时数据具备完整的参考价值。以下是各个数据的正确解读方式：
-
-**实时价格 vs T-1 均线**：当前价相对均线的偏离幅度 >= +2% 为短期强势，<= -2% 为短期转弱。偏离 MA20 的百分比反映中期趋势健康度——价格在 MA20 上方运行代表中期偏多，反之中期偏空。
-
-**盘口数据**：买卖比 > 1.2 表示买盘挂单占优，< 0.8 表示卖盘挂单占优。关键判别：如果买卖比与价格方向同向（如买盘大+价格上涨），信号可靠度高；如果买卖比与价格方向背离（如买盘大但价格下跌），说明托盘被动防御，非主动进攻，信号可靠度低。
-
-**盘中走势形态**：从开盘价到最新价的演变路径——高开低走=利好兑现或冲高遇阻；高开高走=强势确认；低开高走=有资金逢低吸纳；低开低走=空方主导；窄幅震荡=方向不明确需等待。
-
-**成交量（量比）**：量比 > 1.5 = 资金活跃参与度高，方向信号可信度提升；量比介于 0.5-1.5 = 正常；量比 < 0.5 = 观望情绪浓厚，方向信号偏弱。
-
-**VWAP（成交量加权均价）**：机构交易者的关键参考。价格高于 VWAP > 0.5% = 日内多头主导，买方愿意支付溢价；价格低于 VWAP < -0.5% = 日内空头主导。价格贴近 VWAP（±0.2%）= 多空均衡。
-
-**日内动量**：从开盘到最新的价格路径。开盘→最新涨跌幅 > 1% = 日内动能向上，> 0.5% = 温和走强，< -1% = 日内卖压持续。同时观察距日内高点的回撤（回撤大 = 上方压力重）和距日内低点的反弹（反弹大 = 下方支撑有效）。
+9. **翻译系统操作方案** — prompt 中会包含「## 🎯 系统操作方案（代码生成）」章节（量化模型原始判断）。你的 8.2 节改为输出保守和激进两套方案，把量化条件翻译成交易员能看懂的 K 线图语言：看什么信号、什么价位、概率多大；有信号时选最稳/最优策略，无信号时指出最接近触发的策略和轻仓试探的可能。所有价位必须来自系统方案或技术指标，不得自编。
 
 ## 第八章结构要求
 
@@ -358,7 +603,7 @@ INTRADAY_SYSTEM_PROMPT = """你是一个专业的量化分析师，正在为一�
 | 盘前预测验证（如有） | 盘前预测与实际盘中走势的对比——预测正确说明策略框架有效，预测偏差则需分析原因 | 1-2 句话说明盘前预测的一致性对当前判断的影响 |
 
 **交叉印证结论**：表格下方写 3-5 句话的总结。要点：
-- 哪些维度信号一致、哪些存在矛盾（比如 T-1 日 MACD 金叉但盘中价格已跌破 MA5）
+- 哪些维度信号一致、哪些存在矛盾
 - 盘中走势形态和盘口数据是最重要的实时维度——它们与 T-1 日技术框架是确认关系还是修正关系
 - 如果盘中走势与盘口出现背离（如价格下跌但买盘巨大），必须分析背后的可能原因和两种演变路径
 - 综合来看当前操作的确定性如何（高/中/低），不确定性的主要来源是什么
@@ -440,8 +685,8 @@ def build_intraday_user_prompt(
             "",
             "## 最新 SWOT 参考数据（T-1 报告第五章已有完整 SWOT，此处为增量参考）",
             f"- 行业：{swot_data.get('industry', '未分类')}",
-            f"- ROE：{fin.get('roe', 0):.1%} | 毛利率：{fin.get('gross_margin', 0):.1%}",
-            f"- 净利润同比：{fin.get('net_profit_yoy', 0):+.1%} | 营收同比：{fin.get('revenue_yoy', 0):+.1%}",
+            f"- ROE：{fin.get('roe', 0):.1%} | 毛利率：{fin.get('gross_margin', 0):.1%}（5Y均：{fin.get('gross_margin_5y', 0):.1%}）",
+            f"- 净利润同比：{fin.get('net_profit_yoy', 0):+.1%}（5Y均：{fin.get('net_profit_yoy_5y', 0):+.1%}）| 营收同比：{fin.get('revenue_yoy', 0):+.1%}（5Y均：{fin.get('revenue_yoy_5y', 0):+.1%}）",
             f"- PE 分位：{val.get('pe_percentile', 0.5):.1%} | PB 分位：{val.get('pb_percentile', 0.5):.1%}",
         ]
         if news_list:
@@ -510,7 +755,7 @@ f'''**重要**：T-1 报告为自动生成的基础版，缺少 SWOT 和同板�
 **核心分析框架**：T-1 日报告提供了经过严谨计算的 Alpha 得分、技术指标、回测结果——这是判断中长期方向的锚。盘中快照提供了实时价格位置和盘口数据——这是判断短期进出时机的关键。你的工作是**将两者交叉验证**，给出有数据支撑的盘中操作参考。
 
 **重要提醒**：
-- 你必须自己解读盘中原始数据！快照提供的是原始数值（价格、均线偏离、盘口买卖比、走势路径等），**你需要基于「美股盘中数据的解读方法」中给出的方法，对这些数据给出有洞察的解读**，而不是简单复述数值
+- 你必须自己解读盘中原始数据。快照提供的是原始数值（价格、均线偏离、盘口买卖比、走势路径等），基于数据给出有洞察的解读，而不是简单复述数值。
 - 每个结论必须有数据支撑，说清楚「因为什么数据等于多少，所以得出什么判断」
 - 关键点位必须用当前实时价换算，精确到小数点后两位
 - 如果盘中数据与 T-1 日判断出现矛盾，不要回避，要分析原因和两种可能性
@@ -536,36 +781,7 @@ PREMARKET_SYSTEM_PROMPT = """你是一个专业的量化分析师，正在为一
 
 7. **禁忌词必须替换为数值描述** — 以下词汇禁止单独出现（必须写出数值标准）：「企稳」「放量」「缩量」「阳线」「阴线」「强势」「弱势」「恐慌性抛售」「探底回升」「回调到位」「确认支撑」。
 8. **盘前数据时效声明** — 所有分析基于盘前数据，开盘后可能因流动性变化而改变。
-
-## 美股盘前数据的解读方法
-
-美股 24 小时交易，盘前数据具备完整参考价值。正确解读方式如下：
-
-**期货涨跌**：盘前没有指数现货，期货是判断宏观情绪最重要的锚。
-- NQ/ES 期货涨跌 > +0.5% = 宏观情绪偏暖，预示开盘偏多
-- NQ/ES 期货涨跌 < -0.5% = 宏观情绪偏冷，预示开盘偏空
-- 两者方向一致时信号更强，方向分歧时要分别解读科技股 vs 蓝筹的预期差异
-- NQ 权重更高（分析科技股时尤其关注 NQ）
-
-**期货 K 线走势形态**：5分钟K线反映机构在盘前的布局节奏：
-- 稳步上行 + 阳线居多 = 机构盘前积极建仓，开盘方向可信度高
-- 持续走低 + 阴线居多 = 机构盘前减仓避险，需警惕开盘下行
-- 横盘整理 = 方向不明确，开盘后可能选择方向
-
-**盘前价格 vs 期货相对强弱**：判断个股是否有独立资金行为的关键指标。
-- 盘前涨跌幅显著强于期货（差值 > 1%）= 资金对该股有独立买入意愿，非被动跟涨
-- 盘前涨跌幅基本同步于期货（差值 < 0.3%）= 无独立方向，跟随大盘
-- 盘前涨跌幅显著弱于期货（差值 < -1%）= 可能有独立利空或资金减仓
-
-**盘前成交量**：盘前量越大，开盘方向的可信度越高。
-- >20万股 = 高度活跃，开盘波动可能剧烈
-- >10万股 = 较活跃，盘前方向参考价值较高
-- <1万股 = 极低，盘前价格方向信号偏弱
-
-**距均线的跳空幅度**：盘前价格距 T-1 日 MA5 的偏离幅度预示开盘后走势：
-- 跳空 > +2% = 大幅高开，开盘后回踩均线的概率显著增加
-- 跳空介于 ±1% = 温和开盘，均线提供支撑/压力参考
-- 跳空 < -2% = 大幅低开，开盘后测试支撑位的概率增加
+9. **翻译系统操作方案** — prompt 中会包含「## 🎯 系统操作方案（代码生成）」章节（量化模型原始判断）。你的操作建议部分应输出保守和激进两套方案，把量化条件翻译成交易员能看懂的 K 线图语言。所有价位必须来自系统方案或技术指标，不得自编。
 
 ## 第八章结构要求
 
@@ -578,9 +794,8 @@ PREMARKET_SYSTEM_PROMPT = """你是一个专业的量化分析师，正在为一
 | 维度 | 信号及解读 | 方向一致性 |
 |------|-----------|-----------|
 | 期货风向标 | 解读 NQ 和 ES 期货涨跌幅的宏观含义——数值+解读，不能只罗列数值 | 1-2 句话说明期货走势偏多还是偏空 |
-| 期货盘前走势形态 | 5分钟K线走势形态的含义——是稳步上行、持续走低还是横盘？这反映机构布局方向 | 1-2 句话说明走势形态是否支持开盘方向判断 |
 | 个股盘前价格 | 盘前涨跌幅的实际含义、与期货相对强弱的判断（独立走强 vs 被动跟随 vs 独立走弱） | 1-2 句话说明个股盘前的资金动向 |
-| 盘前跳空 vs 均线 | 盘前价格距 MA5 的跳空幅度意味着什么——大幅跳空预示回踩概率高，小幅跳空预示温和开盘 | 1-2 句话说明跳空幅度的开盘含义 |
+| 盘前跳空 vs 均线 | 盘前价格距 T-1 日 MA5 的跳空幅度，需要解读这个幅度对开盘后走势的含义 | 1-2 句话说明跳空幅度的开盘含义 |
 | 盘前成交量 | 盘前成交量的含义——量越大开盘方向可信度越高 | 1-2 句话说明量对方向信号的确认程度 |
 | Alpha 因子（T-1日） | Final_Score + Rank IC 的含义 | 1-2 句话说明 T-1 因子方向与盘前信号的吻合程度 |
 | 技术指标（T-1日） | MACD/RSI/布林/KDJ/均线排列状态 | 1-2 句话说明 T-1 技术面对今日操作的指导 |
@@ -673,8 +888,8 @@ def build_premarket_user_prompt(
         swot_lines = [
             "",
             "## 最新 SWOT 参考数据（T-1 报告第五章已有完整 SWOT，此处为增量参考）",
-            f"- ROE：{fin.get('roe', 0):.1%} | 毛利率：{fin.get('gross_margin', 0):.1%}",
-            f"- 净利润同比：{fin.get('net_profit_yoy', 0):+.1%} | 营收同比：{fin.get('revenue_yoy', 0):+.1%}",
+            f"- ROE：{fin.get('roe', 0):.1%} | 毛利率：{fin.get('gross_margin', 0):.1%}（5Y均：{fin.get('gross_margin_5y', 0):.1%}）",
+            f"- 净利润同比：{fin.get('net_profit_yoy', 0):+.1%}（5Y均：{fin.get('net_profit_yoy_5y', 0):+.1%}）| 营收同比：{fin.get('revenue_yoy', 0):+.1%}（5Y均：{fin.get('revenue_yoy_5y', 0):+.1%}）",
             f"- PE 分位：{val.get('pe_percentile', 0.5):.1%} | PB 分位：{val.get('pb_percentile', 0.5):.1%}",
         ]
         if news_list:
@@ -735,9 +950,9 @@ f'''**重要**：T-1 报告为自动生成的基础版，缺少 SWOT 和同板�
 **核心分析框架**：盘前分析的独特之处在于——K 线还没有走出来，你需要在信息不完整的情况下做情景推演。T-1 日报告提供了中长期趋势框架，期货和盘前数据提供了短期方向线索。你的工作是**把两者结合，推演三种开盘情景并给出具体应对预案**。
 
 **重要提醒**：
-- 你必须自己解读盘前原始数据！快照提供的是原始数值（期货涨跌幅、盘前价格、跳空幅度、成交量等），**你需要基于「美股盘前数据的解读方法」中给出的方法，对这些数据给出有洞察的解读**，而不是简单复述数值
+- 你必须自己解读盘前原始数据。快照提供的是原始数值（期货涨跌幅、盘前价格、跳空幅度、成交量等），基于数据给出有洞察的解读，而不是简单复述数值。
 - 情景推演是关键——必须覆盖高开/平开/低开三种情况，每种给出概率估算（XX%），三种概率之和应为 100%
-- 概率估算需有数据支撑：期货涨跌幅 + 分时形态 + 个股 vs 期货强弱 + 跳空幅度 + 成交量
+- 概率估算需有数据支撑：期货涨跌幅 + 个股 vs 期货强弱 + 跳空幅度 + 成交量
 - 每个情景下的操作建议要具体到价位和条件，不要泛泛而谈
 - 期货走势是判断开盘方向最重要的输入，必须重点解读并说明依据
 - 盘前价格与期货的相对强弱关系，是判断个股是否有独立资金行为的关键"""

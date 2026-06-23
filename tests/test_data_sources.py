@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from data.stock_fetcher import check_tickflow_available, check_yfinance_available
+from data.stock_fetcher import check_tickflow_available, check_extended_quote_available
 from data.models import StockInfo, PriceData
 
 
@@ -33,14 +33,14 @@ def test_tickflow_availability_ok():
     assert result["realtime_ok"] is True
 
 
-def test_yfinance_availability_ok():
+def test_extended_quote_availability_ok():
     with patch("data.stock_fetcher.fetch_us_extended_quote", return_value={"latest": 100.0}):
-        result = check_yfinance_available("AAPL")
+        result = check_extended_quote_available("AAPL")
     assert result["ok"] is True
     assert result["extended_quote_ok"] is True
 
 
 if __name__ == "__main__":
     test_tickflow_availability_ok()
-    test_yfinance_availability_ok()
+    test_extended_quote_availability_ok()
     print("2/2 passed")

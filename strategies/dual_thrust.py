@@ -40,7 +40,10 @@ class DualThrustStrategy(BaseExecutionStrategy):
     suitable_regimes = ["trending_volatile"]
 
     def tunable_params(self) -> list[dict]:
-        return [{"name": "entry_pct", "default": self.entry_pct, "values": [0.6, 0.65, 0.7, 0.75, 0.8]}]
+        return [
+            {"name": "entry_pct", "default": self.entry_pct, "values": [0.60, 0.65, 0.70, 0.75]},
+            {"name": "k1", "default": self.k1, "values": [0.15, 0.20, 0.25]},
+        ]
 
     def __init__(self, entry_pct: float = 0.70, exit_pct: float = 0.40,
                  lookback_n: int = 20, k1: float = 0.2, k2: float = 0.2,

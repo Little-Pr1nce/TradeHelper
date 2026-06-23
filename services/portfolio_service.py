@@ -18,12 +18,110 @@ from config.settings import Settings
 from core.pipeline import run_pipeline
 from data.database import Database
 from data.models import Holding, WatchItem, AccountBalance, AnalysisReport
-from data.stock_fetcher import get_stock_fetcher
+from data.stock_fetcher import get_stock_fetcher, fetch_cached_prices
 from indicators.technical import summarize as summarize_technical
 from utils.dates import get_backtest_dates
 from utils.market import detect_market, search_us_stock_online, search_a_stock
 
 logger = logging.getLogger(__name__)
+
+
+def _build_portfolio_operation_summary(
+    holdings_data: list[dict],
+    watchlist_data: list[dict],
+    market: str,
+    balance,
+) -> str:
+    """构建组合级操作方案 Markdown 汇总。
+
+    汇总所有持仓+关注股票的信号检查结果，生成组合级建议：
+      - 哪些股票该加仓（有买入信号 + 审计 PASS）
+      - 哪些该持有/观望（无信号）
+      - 仓位分配建议
+    """
+    lines = [
+        "\n---\n",
+        "## 🎯 组合操作方案（代码生成）\n",
+        f"> ⚠️ 以下方案由系统基于每只股票的策略审计和实时信号**自动生成**，非 LLM 建议。\n",
+    ]
+
+    all_data = holdings_data + watchlist_data
+    buy_signals = []
+    hold_signals = []
+
+    for d in all_data:
+        obj = d.get("holding") or d.get("watch_item")
+        code = obj.code if obj else "?"
+        name = obj.name if obj else code
+        sc = d.get("signal_check") or []
+        audit_summary = d.get("strategy_audit") or {}
+
+        buys = [s for s in sc if s.get("signal") == "buy"]
+        if buys:
+            buy_signals.append({
+                "code": code, "name": name,
+                "price": d.get("current_price", 0),
+                "buy_strategies": buys,
+                "audit": audit_summary,
+                "is_holding": d.get("holding") is not None,
+            })
+        else:
+            hold_signals.append({
+                "code": code, "name": name,
+                "price": d.get("current_price", 0),
+                "is_holding": d.get("holding") is not None,
+            })
+
+    # ── 有买入信号的股票 ──
+    if buy_signals:
+        lines.append("### 🟢 有买入信号的股票\n")
+        lines.append("| 股票 | 现价 | 推荐策略 | 审计 | 操作 |")
+        lines.append("|------|------|---------|------|------|")
+        for bs in buy_signals:
+            best = bs["buy_strategies"][0]
+            audit_label = (
+                f"PASS={bs['audit'].get('pass', 0)}, "
+                f"FAIL={bs['audit'].get('fail', 0)}"
+            )
+            action = "加仓/买入" if bs["is_holding"] else "关注买入"
+            lines.append(
+                f"| {bs['name']}({bs['code']}) "
+                f"| ${bs['price']:.2f} "
+                f"| {best.get('name', '?')[:20]} "
+                f"| {audit_label} "
+                f"| **{action}** |"
+            )
+        lines.append("")
+
+    # ── 无信号的股票 ──
+    if hold_signals:
+        lines.append("### ⚪ 观望中的股票\n")
+        lines.append("| 股票 | 现价 | 状态 |")
+        lines.append("|------|------|------|")
+        for hs in hold_signals[:10]:
+            action = "持有观望" if hs["is_holding"] else "等信号"
+            lines.append(f"| {hs['name']}({hs['code']}) | ${hs['price']:.2f} | {action} |")
+        lines.append("")
+
+    # ── 组合级统计 ──
+    total = len(all_data)
+    buy_count = len(buy_signals)
+    lines.append(f"**组合信号统计**: {buy_count}/{total} 只股票有买入信号\n")
+
+    # ── 仓位建议 ──
+    if buy_signals:
+        available = (
+            balance.us_balance if market == "US" else balance.a_balance
+        )
+        if available > 0:
+            per_stock_pct = min(0.30, 1.0 / len(buy_signals))
+            per_stock_cash = available * per_stock_pct
+            lines.append(f"**仓位分配建议**: 可用资金 ${available:,.0f}，分散到 {len(buy_signals)} 只信号股，")
+            lines.append(f"每只建议仓位约 {per_stock_pct*100:.0f}%（${per_stock_cash:,.0f}）。")
+        lines.append("")
+
+    lines.append("*以上方案由系统自动生成，具体执行请结合个人风险偏好。*\n")
+    return "\n".join(lines)
 
 
 class PortfolioService:
@@ -144,6 +242,12 @@ class PortfolioService:
         if not holdings and not watchlist:
             raise ValueError(f"当前没有{market}持仓或关注股票，请先添加。")
 
+        # ---- 0. 预测追踪：补验证历史预测 ----
+        try:
+            self.db.batch_verify_expired()
+        except Exception as e:
+            logger.warning(f"预测追踪验证失败: {e}")
+
         start, end = get_backtest_dates(period)
         fetcher = get_stock_fetcher(market)
         all_codes = [h.code for h in holdings] + [w.code for w in watchlist]
@@ -161,41 +265,12 @@ class PortfolioService:
                 on_progress(f"正在分析 {code}（{i+1}/{len(all_codes)}）...")
 
             try:
-                # 获取价格（与 tab1 _fetch_prices 逻辑一致：缓存 + 增量更新）
-                prices = self.db.get_prices(code, start, end)
-
-                if not prices:
-                    # 缓存为空 → 全量拉取
-                    logger.info(f"{code} 缓存为空，联网拉取 {start}~{end}")
-                    new_prices = fetcher.fetch_price_history(code, start, end)
-                    if new_prices:
-                        self.db.insert_prices(new_prices)
-                    prices = self.db.get_prices(code, start, end)
-                else:
-                    last_date = prices[-1].date
-                    logger.info(f"{code} 缓存: {len(prices)} 条 ({prices[0].date}~{last_date})")
-
-                    # 增量拉取
-                    from datetime import date as dt_date, timedelta
-                    next_day = (dt_date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
-                    today_str = dt_date.today().isoformat()
-                    logger.info(f"{code} 检查增量 {next_day}~{today_str}")
-                    new_prices = fetcher.fetch_price_history(code, next_day, today_str)
-                    latest_new_date = max((p.date for p in new_prices), default="")
-                    if latest_new_date > last_date:
-                        self.db.insert_prices(new_prices)
-                        prices = self.db.get_prices(code, start, end)
-                        new_count = sum(1 for p in new_prices if p.date > last_date)
-                        logger.info(f"{code} 增量获取 {new_count} 条新数据（最新 {latest_new_date}）")
-                    else:
-                        logger.info(f"{code} 无增量数据（缓存最新 {last_date}，数据源最新 {latest_new_date or '无'}）")
-
-                if not prices or len(prices) < 20:
+                # 获取价格（复用公共缓存+增量更新函数）
+                df = fetch_cached_prices(code, market, start, end,
+                                         db=self.db, min_records=20)
+                if df is None:
                     logger.warning(f"{code} 数据不足（<20条），跳过")
                     continue
-
-                df = pd.DataFrame([p.to_dict() for p in prices])
-                df["date"] = pd.to_datetime(df["date"])
 
                 # 获取新闻（尝试从缓存）
                 news_df = None
@@ -216,9 +291,7 @@ class PortfolioService:
                 # 获取基本面数据
                 fundamental_data = None
                 try:
-                    from alpha.fundamental import fetch_fundamental_factors
-                    settings = Settings()
-                    # 从 holding/watch_item 中取股票名称
+                    from alpha.fundamental import get_fundamental_data
                     stock_name = ""
                     if is_holding and i < len(holdings):
                         stock_name = holdings[i].name
@@ -226,13 +299,7 @@ class PortfolioService:
                         watch_idx = i - len(holdings)
                         if watch_idx < len(watchlist):
                             stock_name = watchlist[watch_idx].name
-                    fundamental_data = fetch_fundamental_factors(
-                        name=stock_name, code=code, market=market,
-                        model=settings.get("llm_model", ""),
-                        base_url=settings.get("llm_base_url", ""),
-                        api_key=settings.get("llm_api_key", ""),
-                        finnhub_token=settings.get("news_token_us", ""),
-                    )
+                    fundamental_data = get_fundamental_data(stock_name, code, market)
                 except Exception as e:
                     logger.warning(f"{code} 基本面数据获取失败: {e}")
 
@@ -241,10 +308,9 @@ class PortfolioService:
                     df, news_df=news_df, market=market,
                     fundamental_data=fundamental_data,
                     skip_param_tuning=True,
+                    stock_code=code,
                 )
 
-                # API 调用间短暂延迟，避免触发频率限制
-                time.sleep(0.5)
 
                 # 提取 K 线最新收盘价及日期
                 latest_date = str(df["date"].iloc[-1].strftime("%Y-%m-%d"))
@@ -330,6 +396,13 @@ class PortfolioService:
                     "fund_info": fund_info,
                     "benchmark_return": benchmark_return,
                     "regime_adapt_info": regime_adapt_info,
+                    # 新架构字段
+                    "operation_plan": getattr(result, "operation_plan", None),
+                    "signal_check": getattr(result, "signal_check", None),
+                    "strategy_audit": (
+                        result.strategy_audit.summary
+                        if getattr(result, "strategy_audit", None) else None
+                    ),
                 }
 
                 if is_holding:
@@ -350,9 +423,8 @@ class PortfolioService:
             raise RuntimeError("所有股票的数据获取均失败，无法生成报告。")
 
         # Step 1.5: 获取最新价格（覆盖 K 线收盘价）
-        # 美股盘前 → yfinance 延伸时段（盘前可获取）
+        # 美股盘前/盘后 → Nasdaq.com 延伸时段（yfinance 降级）
         # 美股盘中 → TickFlow 实时数据
-        # 美股盘后/EOD → 保持 K 线收盘价（yfinance 夜盘拿不到）
         # A 股 → TickFlow 实时行情（如有 token）
         should_fetch_quote = mode in ("intraday", "pre") and Settings().get(
             "stock_token_us" if market == "US" else "stock_token_a", ""
@@ -381,20 +453,20 @@ class PortfolioService:
                     if market == "US":
                         # 检测当前交易时段
                         session = detect_session("US", stock_tick=tick, stock_quote=quote)
-                        # 只有盘前用 yfinance（夜盘/盘后 yfinance 拿不到）
-                        use_yfinance = session == "pre"
+                        # 非盘中 → Nasdaq.com 延伸时段（自动降级 yfinance）
+                        use_extended = session != "intraday"
 
-                        if use_yfinance:
-                            yf_data = fetch_us_extended_quote(code)
-                            if yf_data and yf_data.get("price", 0) > 0:
-                                rt_price = yf_data["price"]
-                                rt_timestamp = yf_data.get("timestamp", 0)
-                                rt_source = f"yfinance盘前数据"
+                        if use_extended:
+                            ext_data = fetch_us_extended_quote(code)
+                            if ext_data and ext_data.get("price", 0) > 0:
+                                rt_price = ext_data["price"]
+                                rt_timestamp = ext_data.get("timestamp", 0)
+                                rt_source = "Nasdaq.com延伸时段"
                                 logger.info(
-                                    f"yfinance 盘前 ({code}): {rt_price:.2f}, session={session}"
+                                    f"延伸时段 ({code}): {rt_price:.2f}, session={session}"
                                 )
                             else:
-                                logger.warning(f"yfinance 盘前数据为空 ({code})，回退到K线收盘价")
+                                logger.warning(f"延伸时段数据为空 ({code})，回退到K线收盘价")
                         elif session == "intraday":
                             # 盘中 → TickFlow 实时数据
                             if tick and tick.get("latest", 0) > 0:
@@ -430,6 +502,11 @@ class PortfolioService:
                 except Exception as e:
                     logger.warning(f"获取 {code} 实时报价失败: {e}")
 
+        # Step 1.8: 构建组合级操作方案汇总
+        portfolio_plan = _build_portfolio_operation_summary(
+            holdings_data, watchlist_data, market, balance
+        )
+
         # Step 2: 生成报告
         if on_progress:
             on_progress("正在生成综合持仓报告...")
@@ -447,12 +524,43 @@ class PortfolioService:
             market=market,
             period=period,
             mode=mode,
+            portfolio_operation_plan=portfolio_plan,
         )
 
-        # Step 3: 存入 reports 表（以变现在历史报告中展示）
+        # Step 3: 拼接预测追踪尾部 + 存入 reports 表
+        portfolio_code = f"PORTFOLIO_{market}"
+        try:
+            from report.prompts import build_prediction_footer
+            port_stats = self.db.get_prediction_stats(portfolio_code)
+            port_validated = self.db.get_validated_predictions(portfolio_code, limit=5)
+            unverified = self.db.get_latest_unverified_prediction(portfolio_code)
+            report_content += build_prediction_footer(
+                portfolio_code, port_stats, port_validated,
+                unverified_count=1 if unverified else 0)
+        except Exception as e:
+            logger.warning(f"组合预测 footer 构建失败: {e}")
+
+        # 拼接策略健康度追踪（持续优化闭环 — 汇总所有持仓+关注）
+        try:
+            all_health = []
+            for obj in (holdings_data + watchlist_data):
+                item = obj.get("holding") or obj.get("watch_item")
+                if item:
+                    h = self.db.get_strategy_health_report(item.code)
+                    for entry in h:
+                        entry["stock_code"] = item.code
+                    all_health.extend(h)
+            if all_health:
+                from report.prompts import build_strategy_health_section
+                health_section = build_strategy_health_section(all_health[:20])
+                if health_section:
+                    report_content += health_section
+        except Exception as e:
+            logger.warning(f"组合策略健康度构建失败: {e}")
+
         market_label = "美股" if market == "US" else "A股"
         report = AnalysisReport(
-            code=f"PORTFOLIO_{market}",
+            code=portfolio_code,
             name=f"{market_label}持仓综合分析",
             market=market,
             backtest_period=period,
@@ -461,6 +569,24 @@ class PortfolioService:
             mode=mode,
         )
         report_id = self.db.insert_report(report)
+
+        # 预测追踪：写入组合预测
+        try:
+            from services.analysis_service import _extract_direction
+            direction = _extract_direction(report_content, 0.0)  # 组合无 Final_Score，默认 neutral
+            from data.models import PredictionLog
+            from datetime import datetime as _dt
+            pred = PredictionLog(
+                code=portfolio_code, market=market, mode=mode,
+                report_id=report_id,
+                predict_time=_dt.now().isoformat(),
+                direction=direction,
+                verify_after_days=7,
+                key_reason=f"组合分析：{len(holdings)}只持仓+{len(watchlist)}只关注",
+            )
+            self.db.insert_prediction(pred)
+        except Exception as e:
+            logger.warning(f"组合预测写入失败: {e}")
 
         return {
             "report_content": report_content,
