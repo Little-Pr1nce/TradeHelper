@@ -15,6 +15,7 @@ from datetime import datetime
 from indicators.technical import calc_all_indicators
 from alpha.scoring import calc_final_score
 from strategies import get_execution_strategy
+from strategies.base import Position
 from backtest.engine import BacktestEngine, BacktestConfig
 from backtest.analytics import compare_strategies, compute_rank_ic
 
@@ -47,6 +48,8 @@ def run_pipeline(
     df: pd.DataFrame,
     news_df: pd.DataFrame | None = None,
     initial_capital: float = 100000.0,
+    account_equity: float | None = None,
+    current_position: Position | None = None,
     market: str = "A",
     strategy_names: list[str] | None = None,
     w_tech: float = 0.6,
@@ -59,6 +62,7 @@ def run_pipeline(
     prediction_reliability: float = 1.0,
     expand_pool: bool = True,
     stock_code: str = "",
+    current_price: float | None = None,
 ):
     """
     执行完整的量化分析计算管道。
@@ -78,7 +82,10 @@ def run_pipeline(
     Args:
         df: 原始OHLCV DataFrame
         news_df: 新闻情感DataFrame, 可选
-        initial_capital: 初始资金, 默认10万
+        initial_capital: 回测初始资金, 默认10万
+        account_equity: 真实账户权益；传入时用于当前信号检查和操作方案仓位换算
+        current_position: 真实持仓；传入时当前信号检查会识别退出/减仓信号
+        current_price: 当前实时/延伸时段价格；仅用于当前操作方案，不写入历史回测序列
         market: A或US
         strategy_names: 策略列表
         w_tech: 技术面权重
@@ -110,6 +117,7 @@ def run_pipeline(
     logger.info(f"  [管道 2/4] Alpha 多因子打分 (w_tech={w_tech}, w_news={w_news}, regime={market_regime})...")
     df = calc_final_score(df, news_df, w_tech=w_tech, w_news=w_news,
                           fundamental_data=fundamental_data,
+                          validate=False,
                           validation_mode=validation_mode,
                           depth_score=depth_score,
                           depth_available=depth_available,
@@ -144,13 +152,13 @@ def run_pipeline(
             f"10日={rank_ic_10d['rank_ic_mean']:+.4f}"
         )
 
-        # IC 显著为负 → 因子预测方向反了 → 反转 Final_Score
+        # 只报告 IC，不在回测前改写 Final_Score。
+        # 用全周期未来收益反转历史信号会造成前视偏差；如需反向策略，应在
+        # walk-forward 训练窗口内决定，并只应用到后续验证窗口。
         ic_mean_1d = rank_ic.get("rank_ic_mean", 0) or 0
         if ic_mean_1d < -0.05:
-            df["Final_Score"] = -df["Final_Score"]
-            df["_ic_inverted"] = True
             logger.warning(
-                f"  [管道 3/4] ⚠️ Rank IC 1日={ic_mean_1d:+.4f} 显著为负 → Final_Score 方向已反转"
+                f"  [管道 3/4] Rank IC 1日={ic_mean_1d:+.4f} 为负，仅作为诊断提示，不反转历史信号"
             )
     else:
         logger.warning("  [管道 3/4] 缺少 close 列，跳过 Rank IC 计算")
@@ -309,6 +317,9 @@ def run_pipeline(
                     results
                 ),
                 final_score=current_fs,
+                current_price=current_price,
+                account_equity=account_equity,
+                current_position=current_position,
             )
             signal_check_results = [r.to_dict() for r in ranked]
             if plan:

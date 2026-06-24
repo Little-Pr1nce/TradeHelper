@@ -36,7 +36,7 @@ class SignalResult:
     variant_label: str             # "A_v1", "B", ...
     strategy_name: str             # 策略可读名
     base_key: str                  # "A", "B", ...
-    signal: str                    # "buy" | "no_signal"
+    signal: str                    # "buy" | "sell" | "no_signal"
     entry_price: float = 0.0       # 建议入场价
     stop_loss: float = 0.0         # 止损价
     take_profit: float = 0.0       # 止盈价（如有）
@@ -71,6 +71,8 @@ class OperationPlan:
     conservative: dict | None = None   # {entry, stop_loss, position_pct, reason, source}
     aggressive: dict | None = None
     market_bias: str = "neutral"       # "bullish" | "bearish" | "neutral"
+    account_equity: float = 100000.0
+    equity_is_reference: bool = True
     markdown: str = ""
 
 
@@ -83,6 +85,9 @@ def check_signals(
     variants: list,          # list[StrategyVariant]
     market: str,
     initial_capital: float = 100000.0,
+    account_equity: float | None = None,
+    current_position: Position | None = None,
+    current_price: float | None = None,
 ) -> list[SignalResult]:
     """
     对每个策略变体检查当前是否满足入场条件。
@@ -90,6 +95,9 @@ def check_signals(
     调用 generate_orders(df, context) 模拟当前状态：
       - 如果返回 buy Order → 策略正在发信号
       - 如果返回空列表 → 当前不满足入场条件
+
+    account_equity 为用户真实账户权益；未传入时使用 initial_capital 作为模型参考账户。
+    current_position 为用户当前持仓；未传入时按空仓检查入场信号。
     """
     if df.empty or len(df) < 20:
         return []
@@ -97,40 +105,49 @@ def check_signals(
     last = df.iloc[-1]
     date_str = str(last.get("date", ""))[:10]
     last_close = float(last.get("close", 0))
+    signal_price = current_price if current_price and current_price > 0 else last_close
 
     # 计算市场波动率中位数
     med_vol = _compute_market_volatility(df)
+    sizing_equity = account_equity if account_equity and account_equity > 0 else initial_capital
 
     results: list[SignalResult] = []
     for v in variants:
         try:
             context = StrategyContext(
                 date=date_str,
-                equity=initial_capital,
-                cash=initial_capital,
-                position=Position(),   # 空持仓（shares=0），不是 None
+                equity=sizing_equity,
+                cash=sizing_equity,
+                position=current_position or Position(),
                 market=market,
                 cooldown_until=-1,     # 无冷却
                 holding_days=0,
                 market_median_volatility=med_vol,
             )
             orders = v.strategy.generate_orders(df, context)
-            buy_orders = [o for o in orders if o.action == "buy"]
+            buy_orders = [o for o in orders if o.action == "buy" and o.shares > 0]
+            sell_orders = [o for o in orders if o.action == "sell" and o.shares > 0]
+            signal = "buy" if buy_orders else ("sell" if sell_orders else "no_signal")
 
             sr = SignalResult(
                 variant_label=v.variant_label,
                 strategy_name=v.strategy.name,
                 base_key=v.base_key,
-                signal="buy" if buy_orders else "no_signal",
+                signal=signal,
             )
 
             if buy_orders:
                 o = buy_orders[0]
-                sr.entry_price = last_close
-                sr.stop_loss = o.stop_loss if o.stop_loss > 0 else last_close * 0.92
+                sr.entry_price = signal_price
+                sr.stop_loss = o.stop_loss if o.stop_loss > 0 else signal_price * 0.92
                 sr.take_profit = o.take_profit
-                sr.position_pct = _derive_position_pct(o.reason, v.strategy)
+                sr.position_pct = _derive_order_position_pct(o, signal_price, sizing_equity)
                 sr.reason = o.reason or "策略入场条件满足"
+            elif sell_orders:
+                o = sell_orders[0]
+                sr.entry_price = signal_price
+                sr.position_pct = _derive_order_position_pct(o, signal_price, sizing_equity)
+                sr.reason = o.reason or "策略退出条件满足"
             else:
                 # 诊断为什么不满足
                 sr.no_signal_reason = _diagnose_no_signal(df, v)
@@ -172,6 +189,13 @@ def _derive_position_pct(reason: str, strategy) -> float:
     if "momentum" in name or "动量" in name:
         return 0.50
     return 0.40
+
+
+def _derive_order_position_pct(order: Order, reference_price: float, equity: float) -> float:
+    """Derive position sizing from the actual strategy order."""
+    if reference_price <= 0 or equity <= 0 or order.shares <= 0:
+        return 0.0
+    return float(np.clip(order.shares * reference_price / equity, 0.0, 1.0))
 
 
 def _diagnose_no_signal(df: pd.DataFrame, variant) -> str:
@@ -276,6 +300,7 @@ def rank_signals(
     audit_map: dict[str, any] = {}
     if audit_entries:
         for e in audit_entries:
+            audit_map[getattr(e, "strategy_key", "")] = e
             audit_map[e.strategy_name] = e
 
     bt_map: dict[str, BacktestResult] = backtest_results or {}
@@ -284,7 +309,7 @@ def rank_signals(
         score = 0.0
 
         # 1. 审计判定 (40%)
-        e = audit_map.get(s.strategy_name)
+        e = audit_map.get(s.variant_label) or audit_map.get(s.strategy_name)
         if e:
             s.audit_verdict = getattr(e, "verdict", "")
             s.test_sharpe = getattr(e, "test_sharpe", 0.0)
@@ -307,8 +332,8 @@ def rank_signals(
             score += 5.0
         # 负夏普不加分
 
-        # 3. 买入信号 (20%)
-        if s.signal == "buy":
+        # 3. 当前信号 (20%)
+        if s.signal in ("buy", "sell"):
             score += 20.0
 
         # 4. 信号置信度 (10%) — 根据入场理由中的信息量
@@ -343,6 +368,7 @@ def generate_operation_plan(
     current_price: float,
     market_bias: str = "neutral",
     df: pd.DataFrame | None = None,
+    account_equity: float | None = None,
 ) -> OperationPlan:
     """
     从排序后的信号中选 Top 2-3 策略，生成保守 + 激进双方案。
@@ -365,12 +391,25 @@ def generate_operation_plan(
     Returns:
         OperationPlan 含两套方案
     """
+    sizing_equity = account_equity if account_equity and account_equity > 0 else 100000.0
+    equity_is_reference = not (account_equity and account_equity > 0)
+
     if not ranked_signals:
-        return OperationPlan(market_bias=market_bias)
+        return OperationPlan(market_bias=market_bias, account_equity=sizing_equity,
+                             equity_is_reference=equity_is_reference)
+
+    sell_signals = [s for s in ranked_signals if s.signal == "sell"]
+    if sell_signals:
+        plan = OperationPlan(market_bias=market_bias, account_equity=sizing_equity,
+                             equity_is_reference=equity_is_reference)
+        plan.markdown = _build_sell_signal_markdown(sell_signals, current_price, sizing_equity,
+                                                    equity_is_reference)
+        return plan
 
     buy_signals = [s for s in ranked_signals if s.signal == "buy"]
     if not buy_signals:
-        plan = OperationPlan(market_bias=market_bias)
+        plan = OperationPlan(market_bias=market_bias, account_equity=sizing_equity,
+                             equity_is_reference=equity_is_reference)
         plan.markdown = _build_no_signal_markdown(ranked_signals, market_bias, df)
         return plan
 
@@ -383,10 +422,14 @@ def generate_operation_plan(
     if cons_signal:
         entry = cons_signal.entry_price or current_price
         stop = cons_signal.stop_loss or entry * 0.92
+        position_cap = 0.25 if market_bias == "bearish" else 0.40
         conservative = {
             "entry": entry,
             "stop_loss": stop,
-            "position_pct": min(cons_signal.position_pct, 0.40),
+            "position_pct": min(cons_signal.position_pct, position_cap),
+            "signal_strength": _signal_strength(cons_signal),
+            "max_loss_amount": _max_loss_amount(sizing_equity, min(cons_signal.position_pct, position_cap), entry, stop),
+            "invalidation": _invalidation_conditions(entry, stop, market_bias),
             "reason": cons_signal.reason or "策略入场条件满足",
             "source_strategies": [cons_signal.strategy_name],
         }
@@ -399,21 +442,30 @@ def generate_operation_plan(
     if agg_signal and agg_signal != cons_signal:
         entry = agg_signal.entry_price or current_price
         stop = agg_signal.stop_loss or entry * 0.90
+        position_cap = 0.35 if market_bias == "bearish" else 0.70
         aggressive = {
             "entry": entry,
             "stop_loss": stop,
-            "position_pct": min(agg_signal.position_pct * 1.5, 0.70),
+            "position_pct": min(agg_signal.position_pct * 1.25, position_cap),
+            "signal_strength": _signal_strength(agg_signal),
+            "max_loss_amount": _max_loss_amount(sizing_equity, min(agg_signal.position_pct * 1.25, position_cap), entry, stop),
+            "invalidation": _invalidation_conditions(entry, stop, market_bias),
             "reason": agg_signal.reason or "策略入场条件满足",
             "source_strategies": [agg_signal.strategy_name],
         }
     elif agg_signal and not aggressive:
-        # 只有一个信号 → 激进方案 = 同一策略但放大仓位/放宽止损
+        # 只有一个信号 → 激进方案 = 同一策略但适度放大仓位，不改写策略止损
         entry = agg_signal.entry_price or current_price
+        stop = agg_signal.stop_loss or entry * 0.92
+        position_cap = 0.30 if market_bias == "bearish" else 0.60
         aggressive = {
             "entry": entry,
-            "stop_loss": entry * 0.90,
-            "position_pct": min(agg_signal.position_pct * 1.5, 0.60),
-            "reason": (agg_signal.reason or "策略入场条件满足") + "（放宽条件）",
+            "stop_loss": stop,
+            "position_pct": min(agg_signal.position_pct * 1.25, position_cap),
+            "signal_strength": _signal_strength(agg_signal),
+            "max_loss_amount": _max_loss_amount(sizing_equity, min(agg_signal.position_pct * 1.25, position_cap), entry, stop),
+            "invalidation": _invalidation_conditions(entry, stop, market_bias),
+            "reason": (agg_signal.reason or "策略入场条件满足") + "（同一信号，仓位略高）",
             "source_strategies": [agg_signal.strategy_name],
         }
 
@@ -421,6 +473,8 @@ def generate_operation_plan(
         conservative=conservative,
         aggressive=aggressive,
         market_bias=market_bias,
+        account_equity=sizing_equity,
+        equity_is_reference=equity_is_reference,
     )
     plan.markdown = _build_plan_markdown(plan, ranked_signals, current_price)
     return plan
@@ -505,6 +559,40 @@ def _build_no_signal_markdown(ranked_signals, market_bias, df=None) -> str:
     return "\n".join(lines)
 
 
+def _build_sell_signal_markdown(
+    sell_signals: list[SignalResult],
+    current_price: float,
+    account_equity: float,
+    equity_is_reference: bool,
+) -> str:
+    """生成持仓退出/减仓信号 Markdown。"""
+    equity_label = "参考账户权益" if equity_is_reference else "账户权益"
+    lines = [
+        "\n---\n",
+        "## 🎯 系统操作方案（代码生成）\n",
+        "> ⚠️ 以下方案由系统基于策略审计和实时信号**自动生成**，非 LLM 建议。\n",
+        "### 🔴 持仓退出/减仓信号\n",
+        f"> 仓位金额按 {equity_label} ${account_equity:,.2f} 估算。\n",
+        "| 策略 | 当前价 | 持仓占权益 | 估算持仓金额 | 触发原因 |",
+        "|------|------:|------:|------:|------|",
+    ]
+
+    for s in sell_signals[:5]:
+        reason = s.reason or "策略退出条件满足"
+        position_value = account_equity * s.position_pct
+        lines.append(
+            f"| {s.strategy_name[:24]} | ${current_price:.2f} | "
+            f"{s.position_pct*100:.1f}% | ${position_value:,.0f} | {reason[:100]} |"
+        )
+
+    lines.extend([
+        "",
+        "> 执行含义：这些是已持仓场景下的退出信号；如用户没有实际持仓，应忽略卖出指令。",
+        "",
+    ])
+    return "\n".join(lines)
+
+
 def _build_plan_markdown(
     plan: OperationPlan,
     ranked_signals: list[SignalResult],
@@ -521,6 +609,8 @@ def _build_plan_markdown(
     # ── 市场偏向 ──
     bias_emoji = {"bullish": "📈 偏多", "bearish": "📉 偏空", "neutral": "📊 中性"}
     lines.append(f"**当前市场方向判断**: {bias_emoji.get(plan.market_bias, plan.market_bias)}\n")
+    equity_label = "参考账户权益" if plan.equity_is_reference else "账户权益"
+    lines.append(f"**风控口径**: {equity_label} ${plan.account_equity:,.2f}\n")
 
     # ── 保守方案 ──
     if plan.conservative:
@@ -529,8 +619,14 @@ def _build_plan_markdown(
         lines.append("| 项目 | 数值 | 理由 |")
         lines.append("|------|------|------|")
         lines.append(f"| 入场价 | **${c['entry']:.2f}** | 当前收盘价附近，等回调/确认后入场 |")
-        lines.append(f"| 止损价 | **${c['stop_loss']:.2f}** | 策略默认止损（{c['stop_loss']/c['entry']*100:.1f}% 风控） |")
-        lines.append(f"| 仓位 | **{c['position_pct']*100:.0f}%** 可用资金 | 保守仓位，降低单笔风险 |")
+        c_loss = _loss_pct(c["entry"], c["stop_loss"])
+        c_account_risk = _account_risk_pct(c["position_pct"], c_loss)
+        lines.append(f"| 止损价 | **${c['stop_loss']:.2f}** | 策略止损，单价风险 {c_loss:.1f}% |")
+        lines.append(f"| 信号强度 | **{c['signal_strength']}** | 基于审计结论、验证夏普和综合排名 |")
+        lines.append(f"| 仓位 | **{c['position_pct']*100:.0f}%** 账户权益 | 来自策略订单股数，按保守上限裁剪 |")
+        lines.append(f"| 账户风险 | **{c_account_risk:.2f}%** 净值 | 若触发止损，按仓位估算的组合层面亏损 |")
+        lines.append(f"| 最大亏损 | **${c['max_loss_amount']:,.0f}** | 仓位金额 × 单价风险，未计跳空和滑点 |")
+        lines.append(f"| 失效条件 | {c['invalidation']} | 任一条件触发即放弃/重算方案 |")
         lines.append(f"| 来源策略 | {', '.join(c['source_strategies'])} | 审计 PASS，验证夏普稳定 |")
         lines.append(f"| 入场逻辑 | {c['reason'][:100]} | — |")
         lines.append("")
@@ -542,8 +638,14 @@ def _build_plan_markdown(
         lines.append("| 项目 | 数值 | 理由 |")
         lines.append("|------|------|------|")
         lines.append(f"| 入场价 | **${a['entry']:.2f}** | 当前收盘价，不等回调直接入场 |")
-        lines.append(f"| 止损价 | **${a['stop_loss']:.2f}** | 适度放宽（{a['stop_loss']/a['entry']*100:.1f}% 风控） |")
-        lines.append(f"| 仓位 | **{a['position_pct']*100:.0f}%** 可用资金 | 较高仓位，追求更高收益 |")
+        a_loss = _loss_pct(a["entry"], a["stop_loss"])
+        a_account_risk = _account_risk_pct(a["position_pct"], a_loss)
+        lines.append(f"| 止损价 | **${a['stop_loss']:.2f}** | 策略止损，单价风险 {a_loss:.1f}% |")
+        lines.append(f"| 信号强度 | **{a['signal_strength']}** | 基于审计结论、验证夏普和综合排名 |")
+        lines.append(f"| 仓位 | **{a['position_pct']*100:.0f}%** 账户权益 | 来自策略订单股数，激进上限裁剪 |")
+        lines.append(f"| 账户风险 | **{a_account_risk:.2f}%** 净值 | 若触发止损，按仓位估算的组合层面亏损 |")
+        lines.append(f"| 最大亏损 | **${a['max_loss_amount']:,.0f}** | 仓位金额 × 单价风险，未计跳空和滑点 |")
+        lines.append(f"| 失效条件 | {a['invalidation']} | 任一条件触发即放弃/重算方案 |")
         lines.append(f"| 来源策略 | {', '.join(a['source_strategies'])} | 当前排名最高信号 |")
         lines.append(f"| 入场逻辑 | {a['reason'][:100]} | — |")
         lines.append("")
@@ -555,8 +657,10 @@ def _build_plan_markdown(
         lines.append("| 维度 | 🛡️ 保守 | 🚀 激进 |")
         lines.append("|------|:------:|:------:|")
         lines.append(f"| 入场价 | ${c['entry']:.2f} | ${a['entry']:.2f} |")
-        lines.append(f"| 止损 | ${c['stop_loss']:.2f} ({c['stop_loss']/c['entry']*100:.1f}%) | ${a['stop_loss']:.2f} ({a['stop_loss']/a['entry']*100:.1f}%) |")
+        lines.append(f"| 止损 | ${c['stop_loss']:.2f} (风险{_loss_pct(c['entry'], c['stop_loss']):.1f}%) | ${a['stop_loss']:.2f} (风险{_loss_pct(a['entry'], a['stop_loss']):.1f}%) |")
         lines.append(f"| 仓位 | {c['position_pct']*100:.0f}% | {a['position_pct']*100:.0f}% |")
+        lines.append(f"| 账户风险 | {_account_risk_pct(c['position_pct'], _loss_pct(c['entry'], c['stop_loss'])):.2f}% | {_account_risk_pct(a['position_pct'], _loss_pct(a['entry'], a['stop_loss'])):.2f}% |")
+        lines.append(f"| 最大亏损 | ${c['max_loss_amount']:,.0f} | ${a['max_loss_amount']:,.0f} |")
         lines.append(f"| 风险收益比 | 保守 | 激进 |")
         lines.append("")
 
@@ -567,9 +671,13 @@ def _build_plan_markdown(
         lines.append("|:---:|------|:---:|:---:|:---:|:---:|------|")
         for i, s in enumerate(ranked_signals[:10]):
             rank = i + 1
-            sig_emoji = "🟢" if s.signal == "buy" else "⚪"
+            sig_emoji = "🟢" if s.signal == "buy" else ("🔴" if s.signal == "sell" else "⚪")
             audit_emoji = {"PASS": "✅", "CONDITIONAL": "⚠️", "": "—"}.get(s.audit_verdict, "—")
-            reason = s.no_signal_reason[:50] if s.no_signal_reason else ("—" if s.signal == "buy" else "")
+            reason = (
+                s.reason[:50] if s.signal == "sell" and s.reason else
+                s.no_signal_reason[:50] if s.no_signal_reason else
+                ("—" if s.signal == "buy" else "")
+            )
             lines.append(
                 f"| {rank} | {s.strategy_name[:20]} "
                 f"| {sig_emoji} "
@@ -584,6 +692,48 @@ def _build_plan_markdown(
     return "\n".join(lines)
 
 
+def _loss_pct(entry: float, stop_loss: float) -> float:
+    """Return downside from entry to stop as a positive percent."""
+    if entry <= 0 or stop_loss <= 0:
+        return 0.0
+    return max((entry - stop_loss) / entry * 100, 0.0)
+
+
+def _signal_strength(signal: SignalResult) -> str:
+    """Human-readable signal strength."""
+    if signal.audit_verdict == "PASS" and signal.test_sharpe >= 1.0 and signal.rank_score >= 70:
+        return "强"
+    if signal.audit_verdict in ("PASS", "CONDITIONAL") and signal.rank_score >= 45:
+        return "中"
+    return "弱"
+
+
+def _max_loss_amount(account_equity: float, position_pct: float, entry: float, stop_loss: float) -> float:
+    """Max planned loss before gap/slippage."""
+    return account_equity * max(position_pct, 0.0) * _loss_pct(entry, stop_loss) / 100
+
+
+def _invalidation_conditions(entry: float, stop_loss: float, market_bias: str) -> str:
+    """Return concise invalidation rules for a generated trade plan."""
+    parts = [
+        "5个交易日未触发/未成交",
+        f"收盘价跌破止损 ${stop_loss:.2f}",
+        "策略信号消失或降级为 FAIL",
+    ]
+    if market_bias == "bearish":
+        parts.append("大盘偏空继续恶化")
+    elif market_bias == "bullish":
+        parts.append("价格冲高超过计划入场价 3% 仍未成交")
+    return "；".join(parts)
+
+
+def _account_risk_pct(position_pct: float, loss_pct: float) -> float:
+    """Return portfolio-level risk percent for a position and stop distance."""
+    if position_pct <= 0 or loss_pct <= 0:
+        return 0.0
+    return position_pct * loss_pct
+
+
 # ══════════════════════════════════════════════════════════════════
 # 主入口函数（供 pipeline 调用）
 # ══════════════════════════════════════════════════════════════════
@@ -596,6 +746,8 @@ def run_signal_check(
     backtest_results: dict | None = None,
     current_price: float | None = None,
     final_score: float = 0.0,
+    account_equity: float | None = None,
+    current_position: Position | None = None,
     health_data: list[dict] | None = None,  # 策略健康度数据
 ) -> tuple[list[SignalResult], OperationPlan | None]:
     """
@@ -608,7 +760,12 @@ def run_signal_check(
         return [], None
 
     # ④ 信号检查
-    signals = check_signals(df, variants, market)
+    signals = check_signals(
+        df, variants, market,
+        account_equity=account_equity,
+        current_position=current_position,
+        current_price=current_price,
+    )
 
     # ⑤ 策略排序（含健康度数据）
     ranked = rank_signals(signals, audit_entries, backtest_results, health_data)
@@ -618,6 +775,6 @@ def run_signal_check(
         float(df["close"].iloc[-1]) if "close" in df.columns and len(df) > 0 else 0.0
     )
     bias = "bullish" if final_score > 0.05 else ("bearish" if final_score < -0.05 else "neutral")
-    plan = generate_operation_plan(ranked, price, bias, df)
+    plan = generate_operation_plan(ranked, price, bias, df, account_equity=account_equity)
 
     return ranked, plan

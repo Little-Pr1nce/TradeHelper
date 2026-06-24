@@ -20,10 +20,88 @@ from data.database import Database
 from data.models import Holding, WatchItem, AccountBalance, AnalysisReport
 from data.stock_fetcher import get_stock_fetcher, fetch_cached_prices
 from indicators.technical import summarize as summarize_technical
+from strategies.base import Position
 from utils.dates import get_backtest_dates
 from utils.market import detect_market, search_us_stock_online, search_a_stock
 
 logger = logging.getLogger(__name__)
+
+
+def _should_fetch_realtime_quote(market: str, mode: str) -> bool:
+    """组合页是否需要拉取当前价。美股延伸时段不依赖 TickFlow token。"""
+    if mode not in ("intraday", "pre"):
+        return False
+    if market == "US":
+        return True
+    return bool(Settings().get("stock_token_a", ""))
+
+
+def _format_quote_time(timestamp: int | float) -> str:
+    if timestamp and timestamp > 0:
+        try:
+            from datetime import datetime as dt
+            return dt.fromtimestamp(float(timestamp) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+    return "实时"
+
+
+def _fetch_portfolio_realtime_quote(code: str, market: str, fetcher) -> dict | None:
+    """获取组合页使用的当前价，返回 {price, source, timestamp, session}。"""
+    try:
+        from utils.session import detect_session
+        from data.stock_fetcher import fetch_us_extended_quote
+
+        tick = None
+        quote = None
+        try:
+            tick = fetcher.fetch_stock_tick(code) if hasattr(fetcher, "fetch_stock_tick") else None
+        except Exception as e:
+            logger.debug(f"{code} tick 获取失败: {e}")
+        try:
+            quote = fetcher.fetch_quote(code) if hasattr(fetcher, "fetch_quote") else None
+        except Exception as e:
+            logger.debug(f"{code} quote 获取失败: {e}")
+
+        session = detect_session(market, stock_tick=tick, stock_quote=quote)
+
+        if market == "US" and session != "intraday":
+            ext_data = fetch_us_extended_quote(code)
+            if ext_data and ext_data.get("price", 0) > 0:
+                return {
+                    "price": float(ext_data["price"]),
+                    "timestamp": ext_data.get("timestamp", 0),
+                    "source": "Nasdaq.com延伸时段",
+                    "session": session,
+                }
+
+        if tick and tick.get("latest", 0) > 0:
+            return {
+                "price": float(tick["latest"]),
+                "timestamp": tick.get("timestamp", 0),
+                "source": "TickFlow实时报价",
+                "session": session,
+            }
+        if quote and quote.get("latest", 0) > 0:
+            return {
+                "price": float(quote["latest"]),
+                "timestamp": quote.get("timestamp", 0),
+                "source": "实时报价",
+                "session": session,
+            }
+
+        if market == "US":
+            ext_data = fetch_us_extended_quote(code)
+            if ext_data and ext_data.get("price", 0) > 0:
+                return {
+                    "price": float(ext_data["price"]),
+                    "timestamp": ext_data.get("timestamp", 0),
+                    "source": "Nasdaq.com报价",
+                    "session": session,
+                }
+    except Exception as e:
+        logger.warning(f"获取 {code} 当前价失败: {e}")
+    return None
 
 
 def _build_portfolio_operation_summary(
@@ -31,6 +109,7 @@ def _build_portfolio_operation_summary(
     watchlist_data: list[dict],
     market: str,
     balance,
+    account_equity: float,
 ) -> str:
     """构建组合级操作方案 Markdown 汇总。
 
@@ -48,6 +127,7 @@ def _build_portfolio_operation_summary(
     all_data = holdings_data + watchlist_data
 
     # ── 分类：有信号 vs 无信号 ──
+    sell_stocks = []  # 持仓退出/减仓信号
     buy_stocks = []   # 有买入信号的股票
     hold_stocks = []  # 无信号的股票
 
@@ -59,10 +139,22 @@ def _build_portfolio_operation_summary(
         op_plan = d.get("operation_plan")  # str（plan.markdown）或 None
 
         buys = [s for s in sc_list if s.get("signal") == "buy"]
-        if buys:
+        sells = [s for s in sc_list if s.get("signal") == "sell"]
+        if sells:
+            sell_stocks.append({
+                "code": code, "name": name,
+                "price": d.get("current_price", 0),
+                "position_value": d.get("position_value", 0.0),
+                "sell_count": len(sells),
+                "op_plan": op_plan,
+            })
+        elif buys:
+            top_buy = buys[0]
             buy_stocks.append({
                 "code": code, "name": name,
                 "price": d.get("current_price", 0),
+                "position_value": d.get("position_value", 0.0),
+                "target_pct": max(float(top_buy.get("position_pct", 0) or 0), 0.0),
                 "buy_count": len(buys),
                 "op_plan": op_plan,
             })
@@ -94,6 +186,18 @@ def _build_portfolio_operation_summary(
                     md = md[nl+1:].strip()
         return md
 
+    # ── 已持仓且有卖出信号的股票：优先展示 ──
+    if sell_stocks:
+        lines.append(f"### 🔴 持仓退出/减仓信号（{len(sell_stocks)} 只）\n")
+        for ss in sell_stocks:
+            lines.append(f"#### {ss['name']}（{ss['code']}）— 现价 {currency}{ss['price']:.2f}\n")
+            plan_md = ss["op_plan"]
+            if isinstance(plan_md, str) and plan_md.strip():
+                lines.append(_clean_plan_md(plan_md))
+            else:
+                lines.append(f"> {ss['sell_count']} 个策略发出卖出信号，请检查持仓风险。\n")
+            lines.append("")
+
     # ── 有买入信号的股票：直接嵌入各自的保守/激进方案 ──
     if buy_stocks:
         lines.append(f"### 🟢 有买入信号的股票（{len(buy_stocks)} 只）\n")
@@ -121,17 +225,43 @@ def _build_portfolio_operation_summary(
     # ── 组合级仓位分配建议 ──
     total = len(all_data)
     buy_count = len(buy_stocks)
-    lines.append(f"**组合信号统计**: {buy_count}/{total} 只股票有买入信号\n")
+    sell_count = len(sell_stocks)
+    lines.append(f"**组合信号统计**: {sell_count} 只持仓有退出/减仓信号，{buy_count}/{total} 只股票有买入信号\n")
+    lines.append(f"**估算账户权益**: {currency}{account_equity:,.2f}\n")
 
     if buy_stocks:
         available = (
             balance.us_balance if market == "US" else balance.a_balance
         )
         lines.append(f"**可用资金**: {currency}{available:,.2f}\n")
-        if available > 0:
-            per_stock_pct = min(0.30, 1.0 / len(buy_stocks))
-            per_stock_cash = available * per_stock_pct
-            lines.append(f"**仓位分配建议**: 分散到 {len(buy_stocks)} 只信号股，每只建议仓位约 {per_stock_pct*100:.0f}%（约 {currency}{per_stock_cash:,.0f}）。\n")
+
+        sizing_rows = []
+        for bs in buy_stocks:
+            target_pct = min(bs.get("target_pct", 0.0), 0.40)
+            target_value = account_equity * target_pct
+            current_value = float(bs.get("position_value", 0.0) or 0.0)
+            need_cash = max(target_value - current_value, 0.0)
+            sizing_rows.append((bs, target_pct, current_value, need_cash))
+
+        total_need = sum(row[3] for row in sizing_rows)
+        scale = min(1.0, available / total_need) if total_need > 0 and available > 0 else 0.0
+
+        if total_need <= 0:
+            lines.append("> 当前有买入信号的股票已达到或超过策略目标仓位，不建议继续加仓。\n")
+        elif available > 0:
+            lines.append("**资金分配建议**（按策略目标仓位，已扣除现有持仓市值）：\n")
+            lines.append("| 股票 | 目标仓位 | 当前市值 | 建议新增金额 | 说明 |")
+            lines.append("|------|------:|------:|------:|------|")
+            for bs, target_pct, current_value, need_cash in sizing_rows:
+                actual_cash = need_cash * scale
+                note = "资金充足" if scale >= 0.999 else f"可用资金不足，按 {scale:.0%} 缩放"
+                if need_cash <= 0:
+                    note = "当前持仓已达到或超过目标仓位"
+                lines.append(
+                    f"| {bs['name']}（{bs['code']}） | {target_pct*100:.0f}% | "
+                    f"{currency}{current_value:,.0f} | {currency}{actual_cash:,.0f} | {note} |"
+                )
+            lines.append("")
         else:
             lines.append("> ⚠️ 可用资金不足，如需买入请先卖出部分持仓。\n")
         lines.append("")
@@ -274,6 +404,58 @@ class PortfolioService:
 
         holdings_data = []
         watchlist_data = []
+        price_frames: dict[str, pd.DataFrame] = {}
+        quote_map: dict[str, dict] = {}
+
+        should_fetch_quote = _should_fetch_realtime_quote(market, mode)
+        if should_fetch_quote:
+            if on_progress:
+                on_progress("正在获取当前报价...")
+            for code in all_codes:
+                quote_data = _fetch_portfolio_realtime_quote(code, market, fetcher)
+                if quote_data and quote_data.get("price", 0) > 0:
+                    quote_map[code] = quote_data
+            sessions = {str(q.get("session", "")) for q in quote_map.values() if q.get("session")}
+            if mode == "intraday" and "intraday" not in sessions:
+                raise RuntimeError(
+                    f"当前不是常规盘中交易时段（检测到 {', '.join(sorted(sessions)) or '未知'}）。"
+                    "请改用「盘后分析」或在盘前时段使用「盘前分析」。"
+                )
+            if mode == "pre" and "pre" not in sessions:
+                raise RuntimeError(
+                    f"当前不是盘前时段（检测到 {', '.join(sorted(sessions)) or '未知'}）。"
+                    "请在常规交易时段使用「盘中分析」，收盘后使用「盘后分析」。"
+                )
+
+        # 先获取所有价格并估算市场当前账户权益。组合页有真实余额和持仓，
+        # 信号仓位应按这个权益换算，而不是 Tab1 的 10 万参考账户。
+        account_equity = float(balance.us_balance if market == "US" else balance.a_balance)
+        for h in holdings:
+            try:
+                df_h = fetch_cached_prices(h.code, market, start, end,
+                                           db=self.db, min_records=20)
+                if df_h is not None:
+                    price_frames[h.code] = df_h
+                    latest_close = float(df_h["close"].iloc[-1])
+                    mark_price = (
+                        float(quote_map[h.code]["price"])
+                        if h.code in quote_map and quote_map[h.code].get("price", 0) > 0
+                        else latest_close if latest_close > 0
+                        else float(h.cost_price or 0)
+                    )
+                else:
+                    mark_price = (
+                        float(quote_map[h.code]["price"])
+                        if h.code in quote_map and quote_map[h.code].get("price", 0) > 0
+                        else float(h.cost_price or 0)
+                    )
+                account_equity += float(h.shares or 0) * mark_price
+            except Exception as e:
+                logger.warning(f"{h.code} 组合权益估算失败，使用成本价: {e}")
+                account_equity += float(h.shares or 0) * float(h.cost_price or 0)
+
+        if account_equity <= 0:
+            account_equity = 100000.0
 
         for i, code in enumerate(all_codes):
             is_holding = i < len(holdings)
@@ -282,11 +464,31 @@ class PortfolioService:
 
             try:
                 # 获取价格（复用公共缓存+增量更新函数）
-                df = fetch_cached_prices(code, market, start, end,
-                                         db=self.db, min_records=20)
+                df = price_frames.get(code)
+                if df is None:
+                    df = fetch_cached_prices(code, market, start, end,
+                                             db=self.db, min_records=20)
+                    if df is not None:
+                        price_frames[code] = df
                 if df is None:
                     logger.warning(f"{code} 数据不足（<20条），跳过")
                     continue
+
+                # 当前操作价：盘中/盘前优先用实时报价；否则用 K 线最后收盘价。
+                latest_date = str(df["date"].iloc[-1].strftime("%Y-%m-%d"))
+                latest_close = float(df["close"].iloc[-1])
+                quote_data = quote_map.get(code)
+                if quote_data and quote_data.get("price", 0) > 0:
+                    current_price = float(quote_data["price"])
+                    price_date = _format_quote_time(quote_data.get("timestamp", 0))
+                    price_source = f"{quote_data.get('source', '实时报价')}（{price_date}）"
+                else:
+                    current_price = latest_close if latest_close > 0 else None
+                    price_date = latest_date
+                    price_source = f"K线收盘价（{latest_date}）"
+                position_value = 0.0
+                if is_holding and i < len(holdings) and current_price:
+                    position_value = float(holdings[i].shares or 0) * float(current_price)
 
                 # 获取新闻（尝试从缓存）
                 news_df = None
@@ -326,22 +528,34 @@ class PortfolioService:
                 else:
                     w_tech, w_news = 0.6, 0.4
 
+                current_position = None
+                if is_holding and i < len(holdings):
+                    holding = holdings[i]
+                    shares = int(holding.shares or 0)
+                    cost_price = float(holding.cost_price or 0)
+                    if shares > 0:
+                        highest_close = float(df["close"].max()) if "close" in df.columns else cost_price
+                        current_position = Position(
+                            shares=shares,
+                            avg_cost=cost_price,
+                            entry_date="",
+                            entry_price=cost_price,
+                            highest_close=max(highest_close, cost_price),
+                            stop_loss=cost_price * 0.92 if cost_price > 0 else 0.0,
+                        )
+
                 # 跑量化管道（跳过度参数，加速）
                 result = run_pipeline(
                     df, news_df=news_df, market=market,
+                    initial_capital=account_equity,
+                    account_equity=account_equity,
+                    current_position=current_position,
+                    current_price=current_price,
                     w_tech=w_tech, w_news=w_news,
                     fundamental_data=fundamental_data,
                     skip_param_tuning=True,
                     stock_code=code,
                 )
-
-
-                # 提取 K 线最新收盘价及日期
-                latest_date = str(df["date"].iloc[-1].strftime("%Y-%m-%d"))
-                latest_close = float(df["close"].iloc[-1])
-                current_price = latest_close if latest_close > 0 else None
-                price_date = latest_date
-                price_source = f"K线收盘价（{latest_date}）"
 
                 # 提取 Alpha 最新得分
                 latest_score = None
@@ -409,6 +623,7 @@ class PortfolioService:
 
                 item_data = {
                     "current_price": current_price,
+                    "position_value": position_value,
                     "price_date": price_date,
                     "price_source": price_source,
                     "technical": tech_summary,
@@ -446,89 +661,9 @@ class PortfolioService:
         if not holdings_data and not watchlist_data:
             raise RuntimeError("所有股票的数据获取均失败，无法生成报告。")
 
-        # Step 1.5: 获取最新价格（覆盖 K 线收盘价）
-        # 美股盘前/盘后 → Nasdaq.com 延伸时段（yfinance 降级）
-        # 美股盘中 → TickFlow 实时数据
-        # A 股 → TickFlow 实时行情（如有 token）
-        should_fetch_quote = mode in ("intraday", "pre") and Settings().get(
-            "stock_token_us" if market == "US" else "stock_token_a", ""
-        )
-        if should_fetch_quote:
-            if on_progress:
-                on_progress("正在获取实时报价...")
-            from utils.session import detect_session
-            from data.stock_fetcher import fetch_us_extended_quote
-
-            all_item_data = holdings_data + watchlist_data
-            for item_data in all_item_data:
-                obj = item_data.get("holding") or item_data.get("watch_item")
-                if not obj:
-                    continue
-                code = obj.code
-                try:
-                    rt_price = None
-                    rt_timestamp = 0
-                    rt_source = ""
-
-                    # 先尝试 TickFlow 获取 tick/quote（用于检测交易时段）
-                    tick = fetcher.fetch_stock_tick(code) if hasattr(fetcher, 'fetch_stock_tick') else None
-                    quote = fetcher.fetch_quote(code) if hasattr(fetcher, 'fetch_quote') else None
-
-                    if market == "US":
-                        # 检测当前交易时段
-                        session = detect_session("US", stock_tick=tick, stock_quote=quote)
-                        # 非盘中 → Nasdaq.com 延伸时段（自动降级 yfinance）
-                        use_extended = session != "intraday"
-
-                        if use_extended:
-                            ext_data = fetch_us_extended_quote(code)
-                            if ext_data and ext_data.get("price", 0) > 0:
-                                rt_price = ext_data["price"]
-                                rt_timestamp = ext_data.get("timestamp", 0)
-                                rt_source = "Nasdaq.com延伸时段"
-                                logger.info(
-                                    f"延伸时段 ({code}): {rt_price:.2f}, session={session}"
-                                )
-                            else:
-                                logger.warning(f"延伸时段数据为空 ({code})，回退到K线收盘价")
-                        elif session == "intraday":
-                            # 盘中 → TickFlow 实时数据
-                            if tick and tick.get("latest", 0) > 0:
-                                rt_price = tick["latest"]
-                                rt_timestamp = tick.get("timestamp", 0)
-                                rt_source = "TickFlow实时报价"
-                                logger.info(f"TickFlow 实时报价 ({code}): {rt_price:.2f}")
-                        else:
-                            # 盘后/休市 → 保持 K 线收盘价
-                            pass
-                    else:
-                        # A 股：TickFlow 实时行情
-                        if tick and tick.get("latest", 0) > 0:
-                            rt_price = tick["latest"]
-                            rt_timestamp = tick.get("timestamp", 0)
-                            rt_source = "TickFlow实时报价"
-                        elif quote and quote.get("latest", 0) > 0:
-                            rt_price = quote["latest"]
-                            rt_timestamp = quote.get("timestamp", 0)
-                            rt_source = "实时行情"
-
-                    if rt_price and rt_price > 0:
-                        from datetime import datetime as dt
-                        if rt_timestamp > 0:
-                            ts_str = dt.fromtimestamp(rt_timestamp / 1000).strftime(
-                                "%Y-%m-%d %H:%M:%S"
-                            )
-                        else:
-                            ts_str = "实时"
-                        item_data["current_price"] = rt_price
-                        item_data["price_date"] = ts_str
-                        item_data["price_source"] = f"{rt_source}（{ts_str}）"
-                except Exception as e:
-                    logger.warning(f"获取 {code} 实时报价失败: {e}")
-
         # Step 1.8: 构建组合级操作方案汇总
         portfolio_plan = _build_portfolio_operation_summary(
-            holdings_data, watchlist_data, market, balance
+            holdings_data, watchlist_data, market, balance, account_equity
         )
 
         # Step 2: 生成报告（代码方案在前，LLM 翻译在后）
@@ -568,9 +703,11 @@ class PortfolioService:
             port_stats = self.db.get_prediction_stats(portfolio_code)
             port_validated = self.db.get_validated_predictions(portfolio_code, limit=5)
             unverified = self.db.get_latest_unverified_prediction(portfolio_code)
+            evaluation_panel = self.db.get_prediction_evaluation_panel(portfolio_code)
             report_content += build_prediction_footer(
                 portfolio_code, port_stats, port_validated,
-                unverified_count=1 if unverified else 0)
+                unverified_count=1 if unverified else 0,
+                evaluation_panel=evaluation_panel)
         except Exception as e:
             logger.warning(f"组合预测 footer 构建失败: {e}")
 
@@ -617,6 +754,7 @@ class PortfolioService:
                 direction=direction,
                 verify_after_days=7,
                 key_reason=f"组合分析：{len(holdings)}只持仓+{len(watchlist)}只关注",
+                market_regime="portfolio",
             )
             self.db.insert_prediction(pred)
         except Exception as e:

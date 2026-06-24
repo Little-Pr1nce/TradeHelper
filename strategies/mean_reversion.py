@@ -18,7 +18,7 @@ import pandas as pd
 
 from strategies.base import (
     BaseExecutionStrategy, Order, Position, StrategyContext,
-    compute_atr, compute_percentile_score,
+    compute_atr, compute_percentile_score, round_lot_shares,
 )
 
 logger = logging.getLogger(__name__)
@@ -167,7 +167,7 @@ class MeanReversionStrategy(BaseExecutionStrategy):
 
         risk_amount = context.equity * effective_risk
         stop_distance = 2 * atr
-        shares = max(int(risk_amount / stop_distance / 100) * 100, 100)
+        shares = round_lot_shares(risk_amount / stop_distance, context.market)
         stop_loss = close - stop_distance
 
         logger.info(

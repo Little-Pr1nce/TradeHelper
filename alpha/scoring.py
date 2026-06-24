@@ -365,21 +365,29 @@ def calc_final_score(
         logger.info(f"  [Alpha] style={style_score:.3f} fund={fund_score:.3f}")
         result["Style_Score"] = style_score
         result["Fundamental_Score"] = fund_score
-        base = (
-            (1.0 - W_DEPTH if depth_available else 1.0) * (
-                w_tech_ext * tech_score + w_style * style_score
-                + w_fund * fund_score + w_news_ext * finbert_score
+        # 基本面/估值和盘口都是“当前可得”的单点信息，不能写进整段历史
+        # 回测分数，否则会把今天的财务状态和盘口用于过去交易。
+        historical_base = w_tech * tech_score + w_news * finbert_score
+        result["Final_Score"] = historical_base.clip(-1.0, 1.0)
+        if len(result) > 0:
+            latest_base = (
+                w_tech_ext * float(tech_score.iloc[-1])
+                + w_style * style_score
+                + w_fund * fund_score
+                + w_news_ext * float(finbert_score.iloc[-1])
             )
-        )
-        result["Final_Score"] = (base + depth_adj).clip(-1.0, 1.0)
+            if depth_available:
+                latest_base = (1.0 - W_DEPTH) * latest_base + depth_adj
+            result.loc[result.index[-1], "Final_Score"] = float(np.clip(latest_base, -1.0, 1.0))
     else:
         if abs(w_tech + w_news - 1.0) > 1e-10:
             raise ValueError(f"权重约束不满足: {w_tech}+{w_news}≠1.0")
         logger.info(f"  [Alpha] 合成 Final_Score (w_tech={w_tech}, w_news={w_news}, depth={W_DEPTH if depth_available else 0})")
-        base = (1.0 - W_DEPTH if depth_available else 1.0) * (
-            w_tech * tech_score + w_news * finbert_score
-        )
-        result["Final_Score"] = (base + depth_adj).clip(-1.0, 1.0)
+        base = w_tech * tech_score + w_news * finbert_score
+        result["Final_Score"] = base.clip(-1.0, 1.0)
+        if depth_available and len(result) > 0:
+            latest_base = (1.0 - W_DEPTH) * float(base.iloc[-1]) + depth_adj
+            result.loc[result.index[-1], "Final_Score"] = float(np.clip(latest_base, -1.0, 1.0))
 
     result["FinBERT_Score"] = finbert_score.values
     final_valid = result["Final_Score"].dropna()

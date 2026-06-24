@@ -10,10 +10,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import math
+import inspect
 import pandas as pd
 import numpy as np
 
-from strategies.base import Order, Position, StrategyContext
+from strategies.base import (
+    Order,
+    Position,
+    StrategyContext,
+    round_lot_shares,
+    shares_from_cash,
+)
 from strategies import get_execution_strategy
 from backtest.broker import Broker, BrokerConfig, Account
 from backtest.engine import BacktestEngine, BacktestConfig
@@ -146,17 +153,110 @@ class TestBroker:
             "date": "2024-01-02", "open": 100.0, "high": 102.0,
             "low": 99.0, "close": 101.0, "volume": 10000000,
         })
-        order = Order(date="2024-01-01", action="buy", shares=1000, stop_loss=95.0)
+        order = Order(date="2024-01-01", action="buy", shares=500, stop_loss=95.0)
         fill = self.broker.execute_buy(order, bar, self.account, prev_close=99.0)
 
         # fill_price = 100 * 1.003 = 100.3
-        # slippage_cost = 100.3 * 1000 - 100 * 1000 = 300
-        expected_slippage = 100.0 * 0.003 * 1000
+        # slippage_cost = 100.3 * 500 - 100 * 500 = 150
+        expected_slippage = 100.0 * 0.003 * 500
         assert is_close(fill.slippage_cost, expected_slippage, rel=0.01)
+
+    def test_zero_share_buy_rejected(self):
+        """0 股买单不应被撮合成持仓。"""
+        bar = pd.Series({
+            "date": "2024-01-02", "open": 100.0, "high": 102.0,
+            "low": 99.0, "close": 101.0, "volume": 10000000,
+        })
+        order = Order(date="2024-01-01", action="buy", shares=0,
+                      stop_loss=95.0, reason="test")
+        fill = self.broker.execute_buy(order, bar, self.account, prev_close=99.0)
+
+        assert fill is None
+        assert self.account.position is None
+
+    def test_account_equity_uses_mark_to_market_value(self):
+        """策略上下文使用的 equity 应是现金+持仓市值，不是剩余现金。"""
+        self.account.cash = 50000.0
+        self.account.position = Position(
+            shares=500,
+            avg_cost=100.0,
+            entry_date="2024-01-02",
+            entry_price=100.0,
+            highest_close=100.0,
+            stop_loss=92.0,
+        )
+        bar = pd.Series({
+            "date": "2024-01-03", "open": 100.0, "high": 104.0,
+            "low": 99.0, "close": 102.0, "volume": 10000000,
+        })
+
+        self.broker.update_daily(bar, self.account)
+
+        assert self.account.equity == 101000.0
+        assert self.account.equity_curve[-1]["position_value"] == 51000.0
+
+
+def test_share_helpers_do_not_create_orders_from_zero_inputs():
+    assert round_lot_shares(0, "A") == 0
+    assert round_lot_shares(-10, "US") == 0
+    assert shares_from_cash(100000, 0, "A", 0.5) == 0
+    assert shares_from_cash(0, 100, "US", 0.5) == 0
+    assert shares_from_cash(100000, 100, "US", 0) == 0
 
 
 class TestBacktestEngine:
     """回测引擎端到端测试。"""
+
+    def test_initial_capital_controls_account_cash(self):
+        """不同初始资金应产生不同仓位和最终权益。"""
+        n = 120
+        dates = pd.date_range("2025-01-01", periods=n, freq="B")
+        close = np.linspace(100, 140, n)
+        df = pd.DataFrame({
+            "date": dates,
+            "open": close,
+            "high": close + 1,
+            "low": close - 1,
+            "close": close,
+            "volume": [10000000] * n,
+            "code": ["AAPL"] * n,
+            "Final_Score": [0.0] * n,
+        })
+        df.loc[70:, "Final_Score"] = 1.0
+
+        small = BacktestEngine(BacktestConfig(initial_capital=10000.0)).run(
+            df, get_execution_strategy("O")
+        )
+        large = BacktestEngine(BacktestConfig(initial_capital=100000.0)).run(
+            df, get_execution_strategy("O")
+        )
+
+        assert small.final_equity < large.final_equity
+        assert small.trades[0]["shares"] < large.trades[0]["shares"]
+
+    def test_us_market_uses_one_share_lot(self):
+        """美股回测应允许 1 股粒度，而不是按 A 股 100 股一手。"""
+        n = 120
+        dates = pd.date_range("2025-01-01", periods=n, freq="B")
+        close = np.linspace(100, 140, n)
+        df = pd.DataFrame({
+            "date": dates,
+            "open": close,
+            "high": close + 1,
+            "low": close - 1,
+            "close": close,
+            "volume": [10000000] * n,
+            "code": ["AAPL"] * n,
+            "Final_Score": [0.0] * n,
+        })
+        df.loc[70:, "Final_Score"] = 1.0
+
+        result = BacktestEngine(BacktestConfig(initial_capital=10000.0)).run(
+            df, get_execution_strategy("O")
+        )
+
+        assert result.total_trades >= 1
+        assert result.trades[0]["shares"] % 100 != 0
 
     def test_t_plus_one_execution(self):
         """验证 T 日信号 → T+1 日成交的时序。"""
@@ -170,8 +270,7 @@ class TestBacktestEngine:
         df["Final_Score"] = scores
 
         engine = BacktestEngine(BacktestConfig(initial_capital=100000.0))
-        strategy = get_execution_strategy("A",
-                                          entry_threshold=0.6, exit_threshold=0.3)
+        strategy = get_execution_strategy("A", entry_pct=0.80, exit_pct=0.50)
 
         result = engine.run(df, strategy)
 
@@ -195,8 +294,7 @@ class TestBacktestEngine:
 
         engine = BacktestEngine(BacktestConfig(initial_capital=100000.0))
         # 使用高阈值确保不触发
-        strategy = get_execution_strategy("A",
-                                          entry_threshold=0.6, exit_threshold=0.3)
+        strategy = get_execution_strategy("A", entry_pct=0.80, exit_pct=0.50)
         result = engine.run(df, strategy)
 
         assert result.total_trades == 0, \
@@ -226,8 +324,7 @@ class TestBacktestEngine:
         df["Final_Score"] = scores
 
         engine = BacktestEngine(BacktestConfig(initial_capital=100000.0))
-        strategy = get_execution_strategy("A",
-                                          entry_threshold=0.6, exit_threshold=0.3,
+        strategy = get_execution_strategy("A", entry_pct=0.80, exit_pct=0.50,
                                           cooldown_bars=0)  # 无冷却期便于测试
         result = engine.run(df, strategy)
 
@@ -279,3 +376,42 @@ class TestMultiStrategyRun:
         result = engine.run(pd.DataFrame(), strategy)
         assert result.total_trades == 0
         assert result.total_return == 0.0
+
+
+def _run_script_tests():
+    """Tiny runner for environments without pytest."""
+    current_module = sys.modules[__name__]
+    total = 0
+    failures = []
+
+    for name, obj in vars(current_module).items():
+        if callable(obj) and name.startswith("test_"):
+            total += 1
+            try:
+                obj()
+            except Exception as exc:
+                failures.append((name, exc))
+
+        if inspect.isclass(obj) and name.startswith("Test"):
+            for method_name, _ in inspect.getmembers(obj, inspect.isfunction):
+                if not method_name.startswith("test_"):
+                    continue
+                total += 1
+                inst = obj()
+                if hasattr(inst, "setup_method"):
+                    inst.setup_method()
+                try:
+                    getattr(inst, method_name)()
+                except Exception as exc:
+                    failures.append((f"{name}.{method_name}", exc))
+
+    if failures:
+        print(f"{len(failures)}/{total} failed")
+        for test_name, exc in failures:
+            print(f"{test_name}: {type(exc).__name__}: {exc}")
+        raise SystemExit(1)
+    print(f"{total}/{total} passed")
+
+
+if __name__ == "__main__":
+    _run_script_tests()

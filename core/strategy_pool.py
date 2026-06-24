@@ -32,19 +32,19 @@ logger = logging.getLogger(__name__)
 # 每个策略最大变体数（防止组合爆炸）
 MAX_VARIANTS_PER_STRATEGY = 7
 
-# 模块级回测结果缓存：key = (base_key, params_hash, first_date, last_date, length)
+# 模块级回测结果缓存：key = (stock_code, base_key, params_hash, first_date, last_date, length)
 # 同一 session 内重复跑相同 stock+params 直接命中
 _variant_bt_cache: dict[str, "BacktestResult"] = {}
 
 
 def _make_cache_key(
-    base_key: str, params: dict, df: "pd.DataFrame"
+    stock_code: str, base_key: str, params: dict, df: "pd.DataFrame"
 ) -> str:
     """生成缓存键。"""
     first = str(df["date"].iloc[0])[:10] if "date" in df.columns else ""
     last = str(df["date"].iloc[-1])[:10] if "date" in df.columns else ""
     param_str = ",".join(f"{k}={v}" for k, v in sorted(params.items())) if params else "default"
-    return f"{base_key}|{param_str}|{first}|{last}|{len(df)}"
+    return f"{stock_code}|{base_key}|{param_str}|{first}|{last}|{len(df)}"
 
 
 @dataclass
@@ -78,6 +78,7 @@ class StrategyPoolResult:
     pass_variants: list[StrategyVariant]       # 通过审计的变体
     conditional_variants: list[StrategyVariant]  # 有条件通过的变体
     total_backtests: int = 0                   # 总共跑的回测数
+    walk_forward: dict = field(default_factory=dict)  # variant_label -> OOS 统计
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -233,19 +234,25 @@ def expand_and_audit(
         if db and stock_code:
             best = db.get_best_params(stock_code, key)
 
+        vt_list = generate_variants([key], max_per_strategy=max_variants_per)
+
         if best and best["source"] != "demoted":
-            # per_stock_params 有最佳参数 → 只用它，不展开
+            # per_stock_params 只作为额外候选，不能替代完整策略池；
+            # 否则会把过去全样本优化结果变成唯一方案，放大过拟合风险。
             kwargs = best["params"]
-            strategy = get_execution_strategy(key, **kwargs)
-            variants.append(StrategyVariant(
-                base_key=key, variant_label=key,
-                strategy=strategy, params=kwargs, is_default=True,
-            ))
+            existing = {tuple(sorted(v.params.items())) for v in vt_list}
+            if tuple(sorted(kwargs.items())) not in existing:
+                strategy = get_execution_strategy(key, **kwargs)
+                vt_list.append(StrategyVariant(
+                    base_key=key,
+                    variant_label=f"{key}_saved",
+                    strategy=strategy,
+                    params=kwargs,
+                    is_default=False,
+                ))
             params_hit_count += 1
-        else:
-            # 没有最佳参数，或已 demoted → 展开完整变体池
-            vt_list = generate_variants([key], max_per_strategy=max_variants_per)
-            variants.extend(vt_list)
+
+        variants.extend(vt_list)
 
     if params_hit_count:
         logger.info(f"策略池: per_stock_params 命中 {params_hit_count} 个策略，"
@@ -271,14 +278,15 @@ def expand_and_audit(
             cached = None
             if db and stock_code:
                 cached = db.get_cached_backtest(
-                    stock_code, v.base_key, params_json, data_start, data_end)
+                    stock_code, v.base_key, params_json, data_start, data_end,
+                    data_length=data_len)
                 if cached:
                     bt_results[v.variant_label] = _reconstruct_result(cached)
                     cache_hits += 1
                     continue
 
             # 2b. 查内存缓存
-            ck = _make_cache_key(v.base_key, v.params, df)
+            ck = _make_cache_key(stock_code, v.base_key, v.params, df)
             if ck in _variant_bt_cache:
                 bt_results[v.variant_label] = _variant_bt_cache[ck]
                 cache_hits += 1
@@ -316,50 +324,72 @@ def expand_and_audit(
 
     # ── 3. 审计所有变体 ──
     audit_results: dict[str, BacktestResult] = {}
-    key_to_variant_label: dict[str, str] = {}
+    audit_meta: dict[str, dict] = {}
     for v in variants:
         if v.variant_label in bt_results:
             bt = bt_results[v.variant_label]
-            audit_results[bt.strategy_name] = bt
-            key_to_variant_label[bt.strategy_name] = v.variant_label
+            audit_results[v.variant_label] = bt
+            audit_meta[v.variant_label] = {
+                "name": v.strategy.name,
+                "suitable_regimes": list(v.strategy.suitable_regimes),
+            }
 
     audit = None
     pass_variants: list[StrategyVariant] = []
     cond_variants: list[StrategyVariant] = []
+    walk_forward: dict = {}
 
     if audit_results:
+        walk_forward = _run_walk_forward_selection(
+            df=df,
+            variants=[v for v in variants if v.variant_label in bt_results],
+            market=market,
+            initial_capital=initial_capital,
+            news_df=news_df,
+        )
+
         audit = run_strategy_audit(
             df=df,
-            strategy_keys=list(key_to_variant_label.keys()),
+            strategy_keys=list(audit_results.keys()),
             backtest_results=audit_results,
             initial_capital=initial_capital,
             split_ratio=split_ratio,
+            strategy_meta=audit_meta,
         )
 
         # ── 4. 筛选 + 更新 per_stock_params ──
         if audit and audit.entries:
             verdict_map: dict[str, str] = {}
             for e in audit.entries:
-                vl = key_to_variant_label.get(e.strategy_name, e.strategy_key)
-                verdict_map[vl] = e.verdict
+                verdict_map[e.strategy_key] = e.verdict
 
             for v in variants:
                 verdict = verdict_map.get(v.variant_label, "FAIL")
+                if walk_forward:
+                    wf = walk_forward.get(v.variant_label)
+                    if not wf or not wf.get("pass_oos", False):
+                        continue
                 if verdict == "PASS":
                     pass_variants.append(v)
                 elif verdict == "CONDITIONAL":
                     cond_variants.append(v)
 
+            pass_variants, cond_variants = _select_representative_variants(
+                pass_variants, cond_variants, audit.entries
+            )
+
             # 写 per_stock_params：对每个 PASS 策略存最佳参数
             if db and stock_code:
+                allowed_labels = {v.variant_label for v in (pass_variants + cond_variants)}
                 _update_per_stock_params(
                     db, stock_code, variants, bt_results,
-                    audit.entries, key_to_variant_label)
+                    audit.entries, allowed_labels=allowed_labels)
 
             logger.info(
                 f"审计筛选: PASS={len(pass_variants)}, "
                 f"CONDITIONAL={len(cond_variants)}, "
-                f"FAIL={len(variants) - len(pass_variants) - len(cond_variants)}"
+                f"FAIL={len(variants) - len(pass_variants) - len(cond_variants)}, "
+                f"WF={'启用' if walk_forward else '跳过'}"
             )
 
     return StrategyPoolResult(
@@ -369,12 +399,135 @@ def expand_and_audit(
         pass_variants=pass_variants,
         conditional_variants=cond_variants,
         total_backtests=len(bt_results),
+        walk_forward=walk_forward,
     )
 
 
 # ══════════════════════════════════════════════════════════════════
 # 辅助函数：序列化 / 反序列化 / per_stock_params 更新
 # ══════════════════════════════════════════════════════════════════
+
+def _run_walk_forward_selection(
+    df: pd.DataFrame,
+    variants: list[StrategyVariant],
+    market: str,
+    initial_capital: float,
+    news_df: pd.DataFrame | None = None,
+    train_len: int | None = None,
+    test_len: int | None = None,
+) -> dict[str, dict]:
+    """
+    滚动 walk-forward 参数选择。
+
+    每个窗口只在训练段选择同一 base_key 下表现最好的参数，再把该参数拿到
+    后续测试段验证。只有被训练段选中、且样本外平均收益为正的变体才能通过。
+    """
+    n = len(df)
+    if n < 160 or not variants:
+        return {}
+
+    train_len = train_len or max(80, int(n * 0.45))
+    test_len = test_len or max(30, int(n * 0.15))
+    if train_len + test_len > n:
+        return {}
+
+    config = BacktestConfig(initial_capital=initial_capital)
+    if market == "US":
+        config.broker.limit_up_pct = 999.0
+        config.broker.limit_down_pct = 999.0
+    engine = BacktestEngine(config)
+
+    by_base: dict[str, list[StrategyVariant]] = {}
+    for v in variants:
+        by_base.setdefault(v.base_key, []).append(v)
+
+    stats: dict[str, dict] = {
+        v.variant_label: {
+            "base_key": v.base_key,
+            "selected_windows": 0,
+            "oos_returns": [],
+            "oos_sharpes": [],
+            "oos_trades": 0,
+            "pass_oos": False,
+        }
+        for v in variants
+    }
+
+    window_count = 0
+    start = 0
+    while start + train_len + test_len <= n:
+        train_df = df.iloc[start:start + train_len].copy()
+        test_df = df.iloc[start + train_len:start + train_len + test_len].copy()
+        train_news = _slice_news(news_df, train_df)
+        test_news = _slice_news(news_df, test_df)
+        window_count += 1
+
+        for base_key, candidates in by_base.items():
+            scored: list[tuple[float, float, StrategyVariant]] = []
+            for v in candidates:
+                try:
+                    r = engine.run(train_df.copy(), v.strategy, train_news)
+                    if r.total_trades <= 0:
+                        score = -999.0
+                    else:
+                        score = r.sharpe_ratio + max(r.total_return, -1.0)
+                    scored.append((score, r.total_return, v))
+                except Exception as e:
+                    logger.debug(f"WF 训练失败 {v.variant_label}: {e}")
+
+            if not scored:
+                continue
+            scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            selected = scored[0][2]
+
+            try:
+                oos = engine.run(test_df.copy(), selected.strategy, test_news)
+                st = stats[selected.variant_label]
+                st["selected_windows"] += 1
+                st["oos_returns"].append(float(oos.total_return))
+                st["oos_sharpes"].append(float(oos.sharpe_ratio))
+                st["oos_trades"] += int(oos.total_trades)
+            except Exception as e:
+                logger.debug(f"WF 验证失败 {selected.variant_label}: {e}")
+
+        start += test_len
+
+    if window_count == 0:
+        return {}
+
+    result: dict[str, dict] = {}
+    for label, st in stats.items():
+        selected = int(st["selected_windows"])
+        returns = st["oos_returns"]
+        sharpes = st["oos_sharpes"]
+        avg_return = float(np.mean(returns)) if returns else 0.0
+        avg_sharpe = float(np.mean(sharpes)) if sharpes else 0.0
+        pass_oos = selected > 0 and st["oos_trades"] > 0 and avg_return > 0 and avg_sharpe >= 0
+        result[label] = {
+            "base_key": st["base_key"],
+            "selected_windows": selected,
+            "avg_oos_return": avg_return,
+            "avg_oos_sharpe": avg_sharpe,
+            "oos_trades": st["oos_trades"],
+            "pass_oos": pass_oos,
+        }
+
+    passed = sum(1 for v in result.values() if v["pass_oos"])
+    logger.info(f"Walk-forward 参数验证: {passed}/{len(result)} 变体样本外通过")
+    return result
+
+
+def _slice_news(news_df: pd.DataFrame | None, price_df: pd.DataFrame) -> pd.DataFrame | None:
+    """按价格窗口裁剪新闻数据；没有 date 列时原样返回。"""
+    if news_df is None or news_df.empty or "date" not in news_df.columns or "date" not in price_df.columns:
+        return news_df
+    try:
+        start = pd.to_datetime(price_df["date"].iloc[0])
+        end = pd.to_datetime(price_df["date"].iloc[-1])
+        dates = pd.to_datetime(news_df["date"], errors="coerce")
+        return news_df.loc[(dates >= start) & (dates <= end)].copy()
+    except Exception:
+        return news_df
 
 def _serialize_result(result: BacktestResult) -> dict:
     """BacktestResult → JSON-safe dict。"""
@@ -425,7 +578,7 @@ def _update_per_stock_params(
     variants: list[StrategyVariant],
     bt_results: dict[str, BacktestResult],
     audit_entries: list,
-    key_to_variant_label: dict[str, str],
+    allowed_labels: set[str] | None = None,
 ):
     """审计完成后，把 PASS 策略的最佳参数写入 per_stock_params。"""
     import json
@@ -434,7 +587,9 @@ def _update_per_stock_params(
     for e in audit_entries:
         if e.verdict != "PASS":
             continue
-        vl = key_to_variant_label.get(e.strategy_name, e.strategy_key)
+        vl = e.strategy_key
+        if allowed_labels is not None and vl not in allowed_labels:
+            continue
         # 找到对应的 variant
         v = next((v for v in variants if v.variant_label == vl), None)
         if not v or not v.params:
@@ -450,6 +605,43 @@ def _update_per_stock_params(
             )
         except Exception:
             pass
+
+
+def _select_representative_variants(
+    pass_variants: list[StrategyVariant],
+    cond_variants: list[StrategyVariant],
+    audit_entries: list,
+) -> tuple[list[StrategyVariant], list[StrategyVariant]]:
+    """
+    每个基础策略只保留一个代表变体进入信号检查。
+
+    多参数扫描会天然制造多重检验问题：同一策略的多个参数版本如果同时
+    进入操作层，会让报告看起来像“很多策略同意”，实际只是同一逻辑的
+    多个近邻参数。这里按验证期夏普选每个 base_key 的最佳代表。
+    """
+    entry_map = {getattr(e, "strategy_key", ""): e for e in audit_entries}
+
+    def _score(v: StrategyVariant) -> tuple[float, float]:
+        e = entry_map.get(v.variant_label)
+        if not e:
+            return (0.0, 0.0)
+        return (float(getattr(e, "test_sharpe", 0.0)), float(getattr(e, "test_return", 0.0)))
+
+    selected_pass: dict[str, StrategyVariant] = {}
+    for v in pass_variants:
+        cur = selected_pass.get(v.base_key)
+        if cur is None or _score(v) > _score(cur):
+            selected_pass[v.base_key] = v
+
+    selected_cond: dict[str, StrategyVariant] = {}
+    for v in cond_variants:
+        if v.base_key in selected_pass:
+            continue
+        cur = selected_cond.get(v.base_key)
+        if cur is None or _score(v) > _score(cur):
+            selected_cond[v.base_key] = v
+
+    return list(selected_pass.values()), list(selected_cond.values())
 
 
 # ══════════════════════════════════════════════════════════════════

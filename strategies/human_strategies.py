@@ -14,7 +14,7 @@ import pandas as pd
 
 from strategies.base import (
     BaseExecutionStrategy, Order, Position, StrategyContext,
-    compute_atr, compute_percentile_score,
+    compute_atr, compute_percentile_score, round_lot_shares, shares_from_cash,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,8 +59,7 @@ class ChaseMomentumStrategy(BaseExecutionStrategy):
             )
             if gold_cross:
                 # 用 80% 可用资金买入
-                invest_amount = context.cash * 0.80
-                shares = max(100, int(invest_amount / latest_close / 100) * 100)
+                shares = shares_from_cash(context.cash, latest_close, context.market, 0.80)
                 orders.append(Order(
                     date=str(df["date"].iloc[-1])[:10],
                     action="buy",
@@ -141,8 +140,7 @@ class PickBottomStrategy(BaseExecutionStrategy):
 
         # —— 开仓 ——
         if context.position.shares == 0 and latest_rsi < self.rsi_oversold:
-            invest_amount = context.cash * 0.60
-            shares = max(100, int(invest_amount / latest_close / 100) * 100)
+            shares = shares_from_cash(context.cash, latest_close, context.market, 0.60)
             orders.append(Order(
                 date=str(df["date"].iloc[-1])[:10],
                 action="buy",
@@ -223,8 +221,7 @@ class HoldUntilBreakevenStrategy(BaseExecutionStrategy):
             prev_day_dip = (float(close.iloc[-2]) - float(close.iloc[-3])) / float(close.iloc[-3]) if len(close) >= 3 and float(close.iloc[-3]) > 0 else 0
             today_up = latest_close > prev_close
             if prev_day_dip < -self.dip_pct and today_up:
-                invest_amount = context.cash * 0.70
-                shares = max(100, int(invest_amount / latest_close / 100) * 100)
+                shares = shares_from_cash(context.cash, latest_close, context.market, 0.70)
                 cut_price = round(latest_close * (1 - self.cut_loss_pct), 2)
                 orders.append(Order(
                     date=str(df["date"].iloc[-1])[:10],
@@ -325,7 +322,7 @@ class TrendPullbackStrategy(BaseExecutionStrategy):
                 latest_atr = float(atr.iloc[-1]) if not atr.empty and pd.notna(atr.iloc[-1]) else latest_close * 0.02
                 stop_distance = 2.0 * latest_atr
                 risk_amount = self.risk_budget * context.equity
-                shares = max(100, int(risk_amount / stop_distance / 100) * 100)
+                shares = round_lot_shares(risk_amount / stop_distance, context.market)
 
                 orders.append(Order(
                     date=str(df["date"].iloc[-1])[:10],
@@ -443,7 +440,7 @@ class KeyReversalStrategy(BaseExecutionStrategy):
                 latest_atr = float(atr.iloc[-1]) if not atr.empty and pd.notna(atr.iloc[-1]) else latest_close * 0.02
                 stop_distance = self.atr_stop_mult * latest_atr
                 risk_amount = self.risk_budget * context.equity
-                shares = max(100, int(risk_amount / stop_distance / 100) * 100)
+                shares = round_lot_shares(risk_amount / stop_distance, context.market)
 
                 orders.append(Order(
                     date=str(df["date"].iloc[-1])[:10],
@@ -549,7 +546,7 @@ class MACompressionBreakoutStrategy(BaseExecutionStrategy):
                 latest_atr = float(atr.iloc[-1]) if not atr.empty and pd.notna(atr.iloc[-1]) else latest_close * 0.02
                 stop_distance = 1.5 * latest_atr
                 risk_amount = self.risk_budget * context.equity
-                shares = max(100, int(risk_amount / stop_distance / 100) * 100)
+                shares = round_lot_shares(risk_amount / stop_distance, context.market)
 
                 orders.append(Order(
                     date=str(df["date"].iloc[-1])[:10],

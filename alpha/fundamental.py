@@ -20,7 +20,7 @@ def fetch_fundamental_factors(
     finnhub_token: str = "",
 ) -> dict:
     """
-    获取估值和基本面因子。美股优先 Finnhub，A 股 akshare，LLM 兜底。
+    获取估值和基本面因子。美股优先 Finnhub，A 股优先 baostock，LLM 兜底。
 
     Returns:
         {style_factors, fundamental_factors, source}
@@ -73,13 +73,26 @@ def fetch_fundamental_factors(
 
     # ── A 股：baostock 优先，akshare 兜底 ──
     if market == "A":
+        financials_source = ""
+        pe_pb_source = ""
+
         financials = _fetch_financials_baostock(code)
+        if financials is not None:
+            financials_source = "baostock"
         if financials is None:
+            logger.info(f"baostock 财务不可用，降级到 akshare ({code})")
             financials = _fetch_financials_akshare(code, market)
+            if financials is not None:
+                financials_source = "akshare"
 
         pe_pb = _fetch_pe_pb_baostock(code)
+        if pe_pb is not None:
+            pe_pb_source = "baostock"
         if pe_pb is None:
+            logger.info(f"baostock PE/PB 不可用，降级到 akshare ({code})")
             pe_pb = _fetch_pe_pb_akshare(code, market)
+            if pe_pb is not None:
+                pe_pb_source = "akshare"
 
         style = _calc_style_factors(pe_pb) if pe_pb else {"pe_percentile": 0.5, "pb_percentile": 0.5}
         fin = financials or {"roe": 0, "gross_margin": 0, "debt_ratio": 0,
@@ -87,16 +100,17 @@ def fetch_fundamental_factors(
                              "gross_margin_5y": 0, "net_profit_yoy_5y": 0, "revenue_yoy_5y": 0}
 
         if financials and pe_pb:
-            source = "baostock"
+            source = financials_source if financials_source == pe_pb_source else f"{pe_pb_source}(估值)+{financials_source}(财务)"
         elif pe_pb:
-            source = "baostock(估值)" if _fetch_pe_pb_baostock.__name__ else "akshare(估值)"
+            source = f"{pe_pb_source}(估值)"
         elif financials:
-            source = "baostock(财务)" if _fetch_financials_baostock.__name__ else "akshare(财务)"
+            source = f"{financials_source}(财务)"
         else:
             if api_key:
                 logger.info("基本面全部缺失，LLM 兜底")
                 try:
                     from alpha.fundamental_llm import fetch_fundamental_factors_llm
+                    _baostock_logout()
                     return fetch_fundamental_factors_llm(name, code, market, model, base_url, api_key)
                 except Exception as e:
                     logger.warning(f"LLM 基本面兜底失败: {e}")
@@ -106,6 +120,7 @@ def fetch_fundamental_factors(
             f"基本面({source}): PE分位={style['pe_percentile']:.1%}, "
             f"PB分位={style['pb_percentile']:.1%}, ROE={fin['roe']:.1%}"
         )
+        _baostock_logout()
         return {"style_factors": style, "fundamental_factors": fin, "source": source}
 
     # ── 美股：Finnhub → yfinance → akshare → LLM ──
@@ -188,10 +203,14 @@ def _extract_financials_from_finnhub(metrics: dict) -> dict | None:
     if gross_margin > 1:
         gross_margin = gross_margin / 100
 
-    # 资产负债比率：totalDebt / totalEquity
-    debt = _safe_float(m.get("totalDebt"))
-    equity = _safe_float(m.get("totalEquity"))
-    debt_ratio = debt / equity if equity and equity > 0 else 0.0
+    # Finnhub 的 metric 中 debt/equity 已经是归一化比率。直接使用该字段，
+    # 避免把不存在或单位不一致的 totalDebt/totalEquity 误算成极端值。
+    debt_ratio = (
+        _safe_float(m.get("totalDebt/totalEquityAnnual"))
+        or _safe_float(m.get("totalDebt/totalEquityQuarterly"))
+        or _safe_float(m.get("longTermDebt/equityAnnual"))
+        or _safe_float(m.get("longTermDebt/equityQuarterly"))
+    )
 
     # 增速 — Finnhub 不直接提供 YoY，尝试从 series 推算或用 eps 增长
     net_profit_yoy = _safe_float(m.get("epsGrowthTTMYoy"))
@@ -293,6 +312,25 @@ def _safe_float(val) -> float:
         return 0.0
 
 
+def _empty_result(source: str = "default") -> dict:
+    """统一的基本面缺省返回，供真实源和 LLM 兜底共用。"""
+    return {
+        "style_factors": {"pe_percentile": 0.5, "pb_percentile": 0.5},
+        "fundamental_factors": {
+            "roe": 0,
+            "gross_margin": 0,
+            "debt_ratio": 0,
+            "net_profit_yoy": 0,
+            "revenue_yoy": 0,
+            "ev_ebitda": 0,
+            "gross_margin_5y": 0,
+            "net_profit_yoy_5y": 0,
+            "revenue_yoy_5y": 0,
+        },
+        "source": source,
+    }
+
+
 # ── baostock 数据获取（A 股基本面，优先） ──
 
 
@@ -333,29 +371,33 @@ def _fetch_financials_baostock(code: str) -> dict | None:
             return None
 
         symbol = f"sh.{code}" if code.startswith(("6", "5", "9")) else f"sz.{code}"
+        latest_year = _latest_baostock_report_year(bs, symbol, "profit")
+        if latest_year is None:
+            return None
+        prev_year = _latest_baostock_report_year(bs, symbol, "profit", before_year=latest_year)
 
         # 盈利能力
-        profit = bs.query_profit_data(code=symbol, year=2025, quarter=4)
+        profit = bs.query_profit_data(code=symbol, year=latest_year, quarter=4)
         roe = gross_margin = 0.0
-        revenue_2025 = revenue_2024 = 0.0
+        revenue_latest = revenue_prev = 0.0
         if profit.error_code == '0':
             while profit.next():
                 row = profit.get_row_data()
                 d = dict(zip(profit.fields, row))
                 roe = _safe_float(d.get("roeAvg"))
                 gross_margin = _safe_float(d.get("gpMargin"))
-                revenue_2025 = _safe_float(d.get("MBRevenue"))
+                revenue_latest = _safe_float(d.get("MBRevenue"))
 
         # 去年营收（算同比）
-        profit_prev = bs.query_profit_data(code=symbol, year=2024, quarter=4)
-        if profit_prev.error_code == '0':
+        profit_prev = bs.query_profit_data(code=symbol, year=prev_year, quarter=4) if prev_year else None
+        if profit_prev and profit_prev.error_code == '0':
             while profit_prev.next():
                 row = profit_prev.get_row_data()
                 d = dict(zip(profit_prev.fields, row))
-                revenue_2024 = _safe_float(d.get("MBRevenue"))
+                revenue_prev = _safe_float(d.get("MBRevenue"))
 
         # 偿债能力
-        balance = bs.query_balance_data(code=symbol, year=2025, quarter=4)
+        balance = bs.query_balance_data(code=symbol, year=latest_year, quarter=4)
         debt_ratio = 0.0
         if balance.error_code == '0':
             while balance.next():
@@ -364,7 +406,7 @@ def _fetch_financials_baostock(code: str) -> dict | None:
                 debt_ratio = _safe_float(d.get("liabilityToAsset"))
 
         # 成长能力
-        growth = bs.query_growth_data(code=symbol, year=2025, quarter=4)
+        growth = bs.query_growth_data(code=symbol, year=latest_year, quarter=4)
         net_profit_yoy = 0.0
         if growth.error_code == '0':
             while growth.next():
@@ -372,14 +414,14 @@ def _fetch_financials_baostock(code: str) -> dict | None:
                 d = dict(zip(growth.fields, row))
                 net_profit_yoy = _safe_float(d.get("YOYNI"))
 
-        revenue_yoy = ((revenue_2025 - revenue_2024) / revenue_2024
-                       if revenue_2024 > 0 else 0.0)
+        revenue_yoy = ((revenue_latest - revenue_prev) / revenue_prev
+                       if revenue_prev > 0 else 0.0)
 
         if roe == 0 and gross_margin == 0 and debt_ratio == 0:
             return None
 
         logger.info(
-            f"baostock 财务: ROE={roe:.1%}, margin={gross_margin:.1%}, "
+            f"baostock 财务({latest_year}Q4): ROE={roe:.1%}, margin={gross_margin:.1%}, "
             f"debt={debt_ratio:.1%}, np_yoy={net_profit_yoy:.1%}, rev_yoy={revenue_yoy:.1%}"
         )
         return {
@@ -390,6 +432,25 @@ def _fetch_financials_baostock(code: str) -> dict | None:
     except Exception as e:
         logger.warning(f"baostock 财务获取失败 ({code}): {e}")
         return None
+
+
+def _latest_baostock_report_year(bs, symbol: str, kind: str, before_year: int | None = None) -> int | None:
+    """Find the latest year with a non-empty baostock annual report."""
+    current_year = date.today().year
+    start_year = min(before_year - 1, current_year) if before_year else current_year
+    query_map = {
+        "profit": bs.query_profit_data,
+        "balance": bs.query_balance_data,
+        "growth": bs.query_growth_data,
+    }
+    query = query_map[kind]
+    for year in range(start_year, current_year - 8, -1):
+        rs = query(code=symbol, year=year, quarter=4)
+        if rs.error_code != '0':
+            continue
+        if rs.next():
+            return year
+    return None
 
 
 def _fetch_pe_pb_baostock(code: str) -> list[dict] | None:

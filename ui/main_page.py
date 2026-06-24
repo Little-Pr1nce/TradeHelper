@@ -96,7 +96,7 @@ class MainPage(ft.Container):
             options=[
                 ft.dropdown.Option("eod", "📊 盘后分析"),
                 ft.dropdown.Option("intraday", "⏱ 盘中分析", disabled=not has_realtime),
-                ft.dropdown.Option("pre", "🌅 盘前分析", disabled=not has_realtime),
+                ft.dropdown.Option("pre", "🌅 盘前分析"),
             ],
             border_radius=8,
         )
@@ -295,7 +295,7 @@ class MainPage(ft.Container):
         self._mode_dd.options = [
             ft.dropdown.Option("eod", "📊 盘后分析"),
             ft.dropdown.Option("intraday", "⏱ 盘中分析", disabled=not has_realtime),
-            ft.dropdown.Option("pre", "🌅 盘前分析", disabled=not has_realtime),
+            ft.dropdown.Option("pre", "🌅 盘前分析"),
         ]
         self._mode_dd.update()
 
@@ -349,13 +349,15 @@ class MainPage(ft.Container):
             return
 
         # EOD 盘后分析：TickFlow 免费日K线即可，无需 token
-        # 盘中/盘前分析：需要 TickFlow API Key（免费注册即可获取）
+        # 盘中分析：需要 TickFlow 实时行情 token
+        # 美股盘前：延伸时段价格走 Nasdaq.com，不强制 TickFlow token
+        # A 股盘前：集合竞价/实时行情仍需 A 股 token
         market = self._market_dd.value
         mode = self._mode_dd.value
         token_key = "stock_token_us" if market == "US" else "stock_token_a"
         market_label = "美股" if market == "US" else "A股"
 
-        if mode in ("intraday", "pre"):
+        if mode == "intraday" or (mode == "pre" and market == "A"):
             if not settings.get(token_key):
                 self._show_error(
                     f"{market_label}盘中/盘前分析需要配置"

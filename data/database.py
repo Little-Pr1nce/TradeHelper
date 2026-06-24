@@ -160,7 +160,8 @@ CREATE TABLE IF NOT EXISTS prediction_log (
     actual_direction TEXT DEFAULT '',
     entry_triggered INTEGER DEFAULT 0,
     verified_at TEXT DEFAULT '',
-    strategy_name TEXT DEFAULT ''
+    strategy_name TEXT DEFAULT '',
+    market_regime TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_prediction_code ON prediction_log(code);
 CREATE INDEX IF NOT EXISTS idx_prediction_validated ON prediction_log(validated, predict_time);
@@ -290,10 +291,15 @@ class Database:
         _ensure_column(conn, "news_sentiment", "content", "TEXT", "''")
         _ensure_column(conn, "news_sentiment", "is_macro", "INTEGER", "0")
         _ensure_column(conn, "prediction_log", "strategy_name", "TEXT", "''")
+        _ensure_column(conn, "prediction_log", "market_regime", "TEXT", "''")
         # 索引必须在列迁移完成后创建（旧库没有 strategy_name 列，不能放在 DDL 里）
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_prediction_strategy "
             "ON prediction_log(code, strategy_name)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_prediction_regime "
+            "ON prediction_log(code, market_regime)"
         )
         _ensure_unique_news_index(conn)
         conn.commit()
@@ -891,6 +897,55 @@ class Database:
         stats.updated_at = _dt.now().isoformat()
         return stats
 
+    def get_prediction_evaluation_panel(self, code: str) -> dict:
+        """真实历史预测评估面板：整体、按策略、按行情状态聚合。"""
+        cols = {r[1] for r in self.execute("PRAGMA table_info(prediction_log)").fetchall()}
+        has_regime = "market_regime" in cols
+        has_strategy = "strategy_name" in cols
+
+        rows = self.execute(
+            """SELECT * FROM prediction_log
+               WHERE code = ? AND validated = 1
+               ORDER BY predict_time DESC""",
+            (code,),
+        ).fetchall()
+        dict_rows = [dict(r) for r in rows]
+
+        def _summarize(items: list[dict], label: str) -> dict:
+            total = len(items)
+            correct = sum(
+                1 for r in items
+                if r.get("direction") and r.get("actual_direction")
+                and r.get("direction") == r.get("actual_direction")
+            )
+            returns = [float(r.get("actual_return") or 0.0) for r in items]
+            avg_return = sum(returns) / len(returns) if returns else 0.0
+            accuracy = correct / total if total else 0.0
+            expectancy = "positive" if total >= 3 and accuracy >= 0.5 and avg_return > 0 else (
+                "negative" if total >= 3 and (accuracy < 0.45 or avg_return < 0) else "insufficient"
+            )
+            return {
+                "label": label,
+                "count": total,
+                "accuracy": accuracy,
+                "avg_return": avg_return,
+                "expectancy": expectancy,
+            }
+
+        def _group(field: str, fallback: str) -> list[dict]:
+            groups: dict[str, list[dict]] = {}
+            for r in dict_rows:
+                key = (r.get(field) or fallback) if field in r else fallback
+                groups.setdefault(key, []).append(r)
+            summaries = [_summarize(items, key) for key, items in groups.items()]
+            return sorted(summaries, key=lambda x: (x["count"], x["accuracy"], x["avg_return"]), reverse=True)
+
+        return {
+            "overall": _summarize(dict_rows, code),
+            "by_strategy": _group("strategy_name", "整体预测") if has_strategy else [],
+            "by_regime": _group("market_regime", "unknown") if has_regime else [],
+        }
+
     def get_strategy_health_report(self, code: str) -> list[dict]:
         """持续优化：按策略统计预测准确率，返回健康报告。"""
         # 防护：旧数据库可能还没有 strategy_name 列
@@ -964,13 +1019,18 @@ class Database:
     def get_cached_backtest(
         self, stock_code: str, strategy_key: str,
         params_json: str, data_start: str, data_end: str,
+        data_length: int | None = None,
     ) -> dict | None:
         """查询缓存的回测结果。返回 result_json 字典或 None。"""
+        length_clause = " AND data_length=?" if data_length is not None else ""
+        params = [stock_code, strategy_key, params_json, data_start, data_end]
+        if data_length is not None:
+            params.append(data_length)
         row = self.execute(
             """SELECT result_json FROM bt_variant_cache
                WHERE stock_code=? AND strategy_key=? AND params_json=?
-                 AND data_start=? AND data_end=?""",
-            (stock_code, strategy_key, params_json, data_start, data_end),
+                 AND data_start=? AND data_end=?""" + length_clause,
+            tuple(params),
         ).fetchone()
         if row:
             import json
@@ -987,7 +1047,7 @@ class Database:
         """写入回测缓存。"""
         from datetime import datetime as _dt
         self._execute_write(
-            """INSERT OR IGNORE INTO bt_variant_cache
+            """INSERT OR REPLACE INTO bt_variant_cache
                (stock_code, strategy_key, params_json, data_start, data_end,
                 data_length, sharpe_ratio, total_return, max_drawdown,
                 win_rate, total_trades, result_json, created_at)

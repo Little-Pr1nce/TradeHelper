@@ -121,6 +121,48 @@ def test_dedupe_before_unique_index():
     assert len(indexes) == 1
 
 
+def test_sentiment_aggregate_confidence_and_macro_weighting():
+    from indicators.sentiment import aggregate
+
+    result = aggregate([
+        NewsItem(
+            code="AAPL", date="2026-06-24", title="Company beat",
+            sentiment="positive", confidence=0.9,
+        ),
+        NewsItem(
+            code="AAPL", date="2026-06-24", title="Macro risk",
+            sentiment="negative", confidence=0.9, is_macro=True,
+        ),
+    ])
+
+    # 个股正面 0.9 权重，宏观负面 0.9*0.5 权重 → (0.9-0.45)/(1.35)=0.3333
+    assert abs(result["sentiment_score"] - 0.3333) < 0.0001
+
+
+def test_news_df_uses_confidence_weighted_daily_score():
+    from services.analysis_service import AnalysisService
+
+    tmpdir = tempfile.mkdtemp()
+    Database._instance = None
+    db = Database.init(os.path.join(tmpdir, "weighted.db"))
+    db.insert_news([
+        NewsItem(
+            code="AAPL", date="2026-06-24", title="Company beat",
+            sentiment="positive", confidence=0.9,
+        ),
+        NewsItem(
+            code="AAPL", date="2026-06-24", title="Company miss",
+            sentiment="negative", confidence=0.3,
+        ),
+    ])
+
+    df = AnalysisService()._build_news_df("AAPL")
+
+    assert df is not None
+    score = float(df.loc[df["date"] == "2026-06-24", "finbert_score"].iloc[0])
+    assert abs(score - 0.5) < 0.0001
+
+
 if __name__ == "__main__":
     tests = [
         test_insert_news_upsert,
@@ -128,6 +170,8 @@ if __name__ == "__main__":
         test_fallback_cache,
         test_parse_finnhub_entry,
         test_dedupe_before_unique_index,
+        test_sentiment_aggregate_confidence_and_macro_weighting,
+        test_news_df_uses_confidence_weighted_daily_score,
     ]
     passed = 0
     for t in tests:

@@ -247,6 +247,7 @@ class PredictionLog:
     entry_triggered: int = 0           # 入场价是否触发
     verified_at: str = ""              # 验证时间
     strategy_name: str = ""            # 策略标识（"A"/"B"/...），空字符串=整体预测
+    market_regime: str = ""            # 预测时的行情状态（trending/ranging/...）
 
     def to_dict(self) -> dict:
         return asdict(self)

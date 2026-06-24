@@ -14,8 +14,9 @@
 """
 
 import logging
-from datetime import datetime, time
+from datetime import datetime, time, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -61,37 +62,31 @@ def detect_session(
     if stock_quote and stock_quote.get("timestamp"):
         ts = stock_quote["timestamp"]
         try:
-            tick_time = datetime.fromtimestamp(ts / 1000)
+            tz = ZoneInfo("America/New_York") if market == "US" else ZoneInfo("Asia/Shanghai")
+            tick_time = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).astimezone(tz)
             return _infer_by_time(tick_time, market)
         except (OSError, ValueError, OverflowError):
             pass
 
-    # —— 优先级 3：当前本地时间 + 市场作息推断（不准确，仅兜底） ——
-    now = datetime.now()
-    logger.debug(f"使用本地时间推断交易时段: {now}")
+    # —— 优先级 3：交易所本地时间 + 市场作息推断（兜底） ——
+    tz = ZoneInfo("America/New_York") if market == "US" else ZoneInfo("Asia/Shanghai")
+    now = datetime.now(tz)
+    logger.debug(f"使用交易所本地时间推断交易时段: {now}")
     return _infer_by_time(now, market)
 
 
 def _infer_by_time(dt: datetime, market: str) -> str:
     """根据时间和市场作息推断交易时段。"""
-    if market == "US":
-        # 美东时间转北京时间：美东 +12h（夏令时）/ +13h（冬令时）
-        # 简化处理：直接按 UTC 时间判断
-        t = dt.time()
-        # 美股盘前：美东 4:00-9:30 = 北京时间 16:00-21:30（夏令时）或 17:00-22:30（冬令时）
-        # 美股盘中：美东 9:30-16:00 = 北京时间 21:30-4:00 次日
-        # 美股盘后：美东 16:00-20:00 = 北京时间 4:00-8:00 次日
-        # 简单判断：通过本地时间区间（假设北京时间）
-        pre_start = time(16, 0)
-        pre_end = time(21, 30)
-        regular_end = time(4, 0)   # 次日凌晨 4:00
-        post_end = time(8, 0)
+    if dt.weekday() >= 5:
+        return "closed"
 
-        if pre_start <= t < pre_end:
+    if market == "US":
+        t = dt.time()
+        if _US_PRE_OPEN <= t < _US_REGULAR_OPEN:
             return "pre"
-        elif t >= pre_end or t < regular_end:
+        elif _US_REGULAR_OPEN <= t < _US_REGULAR_CLOSE:
             return "intraday"
-        elif regular_end <= t < post_end:
+        elif _US_REGULAR_CLOSE <= t < _US_POST_CLOSE:
             return "post"
         else:
             return "closed"

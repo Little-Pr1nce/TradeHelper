@@ -25,7 +25,7 @@ import pandas as pd
 
 from strategies.base import (
     BaseExecutionStrategy, Order, Position, StrategyContext,
-    compute_atr,
+    compute_atr, shares_from_cash,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,8 +99,7 @@ class TrendRiderStrategy(BaseExecutionStrategy):
 
             if trend_up and above_ma60 and score_ok:
                 # 用 invest_pct 比例资金买入
-                invest_amount = context.cash * self.invest_pct
-                shares = max(100, int(invest_amount / latest_close / 100) * 100)
+                shares = shares_from_cash(context.cash, latest_close, context.market, self.invest_pct)
                 stop_loss = round(latest_close * (1 - self.hard_stop_pct), 2)
 
                 orders.append(Order(

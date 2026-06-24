@@ -205,7 +205,7 @@ class PortfolioPage(ft.Container):
             options=[
                 ft.dropdown.Option("eod", "📊 盘后分析"),
                 ft.dropdown.Option("intraday", "⏱ 盘中分析", disabled=not has_realtime),
-                ft.dropdown.Option("pre", "🌅 盘前分析", disabled=not has_realtime),
+                ft.dropdown.Option("pre", "🌅 盘前分析"),
             ],
             border_radius=8,
         )
@@ -516,7 +516,7 @@ class PortfolioPage(ft.Container):
         market_label = "美股" if market == "US" else "A股"
         mode = self._mode_dd.value
         token_key = "stock_token_us" if market == "US" else "stock_token_a"
-        if mode in ("intraday", "pre") and not settings.get(token_key):
+        if (mode == "intraday" or (mode == "pre" and market == "A")) and not settings.get(token_key):
             self._show_snack(
                 f"{market_label}盘中/盘前分析需要配置「{market_label}数据源 Token」",
                 "orange",

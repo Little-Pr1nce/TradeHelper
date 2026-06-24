@@ -33,11 +33,13 @@ PASS_MIN_TEST_TRADES = 3          # 验证期最少交易次数
 PASS_MIN_SHARPE = 1.0             # 验证期最低夏普
 PASS_MAX_DRAWDOWN = 0.30          # 验证期最大回撤
 PASS_MIN_WIN_RATE = 0.45          # 验证期最低胜率
+PASS_MIN_TEST_RETURN = 0.02       # 验证期最低绝对收益
 
 CONDITIONAL_MIN_TRAIN_TRADES = 3
 CONDITIONAL_MIN_TEST_TRADES = 1
 CONDITIONAL_MIN_SHARPE = 0.5
 CONDITIONAL_MAX_DRAWDOWN = 0.40
+CONDITIONAL_MIN_TEST_RETURN = 0.0
 
 OVERFIT_SHARPE_DEGRADATION = 0.30  # 验证期夏普 < 训练期的 30% → 过拟合
 
@@ -124,6 +126,7 @@ def run_strategy_audit(
     backtest_results: dict[str, BacktestResult],
     initial_capital: float = 100000.0,
     split_ratio: float = 0.70,
+    strategy_meta: dict[str, dict] | None = None,
 ) -> StrategyAuditReport:
     """
     对多策略回测结果做时间切分审计。
@@ -155,20 +158,25 @@ def run_strategy_audit(
     key_to_name: dict[str, str] = {}
     key_to_regimes: dict[str, list[str]] = {}
     for key in strategy_keys:
-        try:
-            s = get_execution_strategy(key)
-            key_to_name[key] = s.name
-            key_to_regimes[key] = list(s.suitable_regimes)
-        except Exception:
-            key_to_name[key] = key
-            key_to_regimes[key] = []
+        if strategy_meta and key in strategy_meta:
+            meta = strategy_meta[key]
+            key_to_name[key] = meta.get("name", key)
+            key_to_regimes[key] = list(meta.get("suitable_regimes", []))
+        else:
+            try:
+                s = get_execution_strategy(key)
+                key_to_name[key] = s.name
+                key_to_regimes[key] = list(s.suitable_regimes)
+            except Exception:
+                key_to_name[key] = key
+                key_to_regimes[key] = []
 
     # ── 3. 逐策略审计 ──
     entries: list[StrategyAuditEntry] = []
 
     for key in strategy_keys:
         display_name = key_to_name.get(key, key)
-        bt_result = backtest_results.get(display_name)
+        bt_result = backtest_results.get(key) or backtest_results.get(display_name)
         if bt_result is None:
             logger.warning(f"策略 {key} ({display_name}) 无回测结果，跳过审计")
             continue
@@ -280,6 +288,7 @@ def _audit_one_strategy(
         test_trades=test_metrics["trades"],
         train_sharpe=train_metrics["sharpe"],
         test_sharpe=test_metrics["sharpe"],
+        test_return=test_metrics["return"],
         test_drawdown=test_metrics["drawdown"],
         test_win_rate=test_metrics["win_rate"],
         sharpe_degradation=sharpe_degradation,
@@ -349,6 +358,7 @@ def _apply_verdict(
     test_trades: int,
     train_sharpe: float,
     test_sharpe: float,
+    test_return: float,
     test_drawdown: float,
     test_win_rate: float,
     sharpe_degradation: float,
@@ -371,6 +381,7 @@ def _apply_verdict(
     if (train_trades >= PASS_MIN_TRAIN_TRADES
             and test_trades >= PASS_MIN_TEST_TRADES
             and test_sharpe >= PASS_MIN_SHARPE
+            and test_return >= PASS_MIN_TEST_RETURN
             and test_drawdown <= PASS_MAX_DRAWDOWN
             and test_win_rate >= PASS_MIN_WIN_RATE):
         verdict = "PASS"
@@ -380,9 +391,12 @@ def _apply_verdict(
     elif (train_trades >= CONDITIONAL_MIN_TRAIN_TRADES
             and test_trades >= CONDITIONAL_MIN_TEST_TRADES
             and test_sharpe >= CONDITIONAL_MIN_SHARPE
+            and test_return >= CONDITIONAL_MIN_TEST_RETURN
             and test_drawdown <= CONDITIONAL_MAX_DRAWDOWN):
         verdict = "CONDITIONAL"
         reasons.append("部分指标未达 PASS 标准，当前行情下需谨慎参考")
+        if test_return < PASS_MIN_TEST_RETURN:
+            reasons.append(f"验证收益偏薄（{test_return*100:.1f}% < {PASS_MIN_TEST_RETURN*100:.0f}%）")
 
     else:
         verdict = "FAIL"
@@ -392,6 +406,10 @@ def _apply_verdict(
             reasons.append(f"验证期无交易机会（{test_trades}次），当前行情不适用")
         if test_sharpe < CONDITIONAL_MIN_SHARPE:
             reasons.append(f"验证夏普偏低（{test_sharpe:.2f} < {CONDITIONAL_MIN_SHARPE}），风险调整后收益不足")
+        if test_return < CONDITIONAL_MIN_TEST_RETURN:
+            reasons.append(f"验证期未赚钱（{test_return*100:.1f}% < {CONDITIONAL_MIN_TEST_RETURN*100:.0f}%），不进入操作方案")
+        elif test_return < PASS_MIN_TEST_RETURN:
+            reasons.append(f"验证收益偏薄（{test_return*100:.1f}% < {PASS_MIN_TEST_RETURN*100:.0f}%），最多作为观察策略")
         if test_drawdown > CONDITIONAL_MAX_DRAWDOWN:
             reasons.append(f"验证回撤过大（{test_drawdown*100:.1f}% > {CONDITIONAL_MAX_DRAWDOWN*100:.0f}%）")
         if test_trades >= 3 and test_win_rate < PASS_MIN_WIN_RATE:

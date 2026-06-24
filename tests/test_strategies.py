@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import inspect
 import pandas as pd
 import numpy as np
 
@@ -67,8 +68,8 @@ class TestThresholdTrendStrategy:
         self.strategy = get_execution_strategy("A")
 
     def test_entry_signal(self):
-        """Final_Score > 0.6 应产生买入信号。"""
-        scores = [0.0] * 99 + [0.65]
+        """Final_Score 处于滚动高分位应产生买入信号。"""
+        scores = list(np.linspace(-0.5, 0.5, 100))
         df = make_test_df(100, final_scores=scores)
         ctx = make_context()
         orders = self.strategy.generate_orders(df, ctx)
@@ -77,33 +78,33 @@ class TestThresholdTrendStrategy:
         assert orders[0].shares >= 100
 
     def test_no_entry_below_threshold(self):
-        """Final_Score <= 0.6 不应产生买入信号。"""
-        scores = [0.3] * 50 + [0.55] + [0.4] * 49
+        """Final_Score 低于入场分位不应产生买入信号。"""
+        scores = list(np.linspace(-0.5, 0.5, 99)) + [-0.4]
         df = make_test_df(100, final_scores=scores)
         ctx = make_context()
         orders = self.strategy.generate_orders(df, ctx)
         assert len(orders) == 0
 
     def test_exit_signal(self):
-        """持仓中 Final_Score < 0.3 应产生卖出信号。"""
-        scores = [0.7] + [0.4] * 48 + [0.25]
-        df = make_test_df(50, final_scores=scores)
+        """持仓中 Final_Score 跌破退出分位应产生卖出信号。"""
+        scores = list(np.linspace(-0.5, 0.5, 99)) + [-0.5]
+        df = make_test_df(100, final_scores=scores)
         ctx = make_context(shares=500, entry_price=100.0, highest_close=105.0)
         orders = self.strategy.generate_orders(df, ctx)
         assert len(orders) == 1
         assert orders[0].action == "sell"
 
     def test_no_exit_above_threshold(self):
-        """Final_Score >= 0.3 持仓中不应平仓。"""
-        scores = [0.7] + [0.5] * 48 + [0.35]
-        df = make_test_df(50, final_scores=scores)
+        """Final_Score 未跌破退出分位时持仓中不应平仓。"""
+        scores = list(np.linspace(-0.5, 0.5, 100))
+        df = make_test_df(100, final_scores=scores)
         ctx = make_context(shares=500, entry_price=100.0)
         orders = self.strategy.generate_orders(df, ctx)
         assert len(orders) == 0
 
     def test_cooldown(self):
         """冷却期内不产生买入信号。"""
-        scores = [0.0] * 99 + [0.65]
+        scores = list(np.linspace(-0.5, 0.5, 100))
         df = make_test_df(100, final_scores=scores)
         # cooldown_until=200，当前 idx=99，冷却期中
         ctx = make_context(cooldown=200)
@@ -144,16 +145,16 @@ class TestMeanReversionStrategy:
         assert len(orders) >= 1, "低波环境应触发买入"
 
     def test_no_entry_when_score_high(self):
-        """Final_Score >= -0.5 不开仓。"""
-        df = make_test_df(100, final_scores=[-0.3] * 100)
+        """Final_Score 未处于低分位不开仓。"""
+        df = make_test_df(100, final_scores=list(np.linspace(-0.5, 0.5, 100)))
         ctx = make_context()
         orders = self.strategy.generate_orders(df, ctx)
         assert len(orders) == 0
 
     def test_exit_on_score_reversal(self):
-        """Final_Score > 0.2 平仓。"""
-        scores = [-0.6] + [-0.4] * 48 + [0.3]
-        df = make_test_df(50, final_scores=scores)
+        """Final_Score 回升至高分位平仓。"""
+        scores = list(np.linspace(-0.5, 0.5, 100))
+        df = make_test_df(100, final_scores=scores)
         ctx = make_context(shares=500, entry_price=95.0, highest_close=100.0)
         orders = self.strategy.generate_orders(df, ctx)
         assert len(orders) == 1
@@ -212,7 +213,7 @@ class TestMomentumNewsStrategy:
             "close": close,
             "volume": [10000000] * n,
             "Final_Score": [0.5] * (n - 1) + [0.75],
-            "FinBERT_Score": [0.3] * (n - 1) + [0.5],  # 不足 0.8
+            "FinBERT_Score": [0.3] * (n - 1) + [0.1],
         })
 
         ctx = make_context()
@@ -229,10 +230,10 @@ class TestMomentumNewsStrategy:
 
     def test_exit_on_trailing_stop(self):
         """移动止盈触发平仓。"""
-        n = 50
+        n = 80
         dates = pd.date_range("2024-01-01", periods=n, freq="B")
         # 先涨后大跌触发移动止盈
-        close = [100 + i for i in range(30)] + [130 - i * 3 for i in range(20)]
+        close = [100 + i for i in range(50)] + [150 - i * 3 for i in range(30)]
         df = pd.DataFrame({
             "date": dates,
             "open": close,
@@ -240,7 +241,7 @@ class TestMomentumNewsStrategy:
             "low": [c - 5 for c in close],
             "close": close,
             "volume": [10000000] * n,
-            "Final_Score": [0.5] * n,
+            "Final_Score": list(np.linspace(-0.2, 0.2, n)),
         })
 
         # 持仓 entry_price=101, highest_close=129
@@ -270,3 +271,42 @@ class TestHardRiskControls:
     def test_time_stop_in_broker(self):
         """时间止损由 Broker 层执行。"""
         pass
+
+
+def _run_script_tests():
+    """Tiny runner for environments without pytest."""
+    current_module = sys.modules[__name__]
+    total = 0
+    failures = []
+
+    for name, obj in vars(current_module).items():
+        if callable(obj) and name.startswith("test_"):
+            total += 1
+            try:
+                obj()
+            except Exception as exc:
+                failures.append((name, exc))
+
+        if inspect.isclass(obj) and name.startswith("Test"):
+            for method_name, _ in inspect.getmembers(obj, inspect.isfunction):
+                if not method_name.startswith("test_"):
+                    continue
+                total += 1
+                inst = obj()
+                if hasattr(inst, "setup_method"):
+                    inst.setup_method()
+                try:
+                    getattr(inst, method_name)()
+                except Exception as exc:
+                    failures.append((f"{name}.{method_name}", exc))
+
+    if failures:
+        print(f"{len(failures)}/{total} failed")
+        for test_name, exc in failures:
+            print(f"{test_name}: {type(exc).__name__}: {exc}")
+        raise SystemExit(1)
+    print(f"{total}/{total} passed")
+
+
+if __name__ == "__main__":
+    _run_script_tests()

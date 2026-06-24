@@ -163,9 +163,27 @@ def compute_percentile_score(
     return result
 
 
+def market_lot_size(market: str) -> int:
+    """Return the minimum lot size for a market."""
+    return 100 if market == "A" else 1
+
+
+def round_lot_shares(raw_shares: float, market: str) -> int:
+    """Round a raw share count down to the market lot."""
+    lot = market_lot_size(market)
+    if raw_shares <= 0:
+        return 0
+    return max(int(raw_shares / lot) * lot, lot)
+
+
+def shares_from_cash(cash: float, price: float, market: str, pct: float = 1.0) -> int:
+    """Convert a cash budget to a market-valid share count."""
+    if cash <= 0 or price <= 0 or pct <= 0:
+        return 0
+    return round_lot_shares((cash * pct) / price, market)
+
+
 def _empty_result_dict() -> dict:
     """helper for strategies returning empty signal."""
     return {"score": 0.0, "percentile": np.nan, "signal": ""}
-
-
 

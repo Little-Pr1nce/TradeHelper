@@ -100,10 +100,17 @@ class BacktestEngine:
         cooldown_until = -1          # 冷却期结束的 K 线索引（-1 表示无冷却）
         market = self._detect_market(df)
 
-        # 美股不设涨跌停
+        original_limit_up = self.broker.config.limit_up_pct
+        original_limit_down = self.broker.config.limit_down_pct
+        original_min_shares = self.broker.config.min_shares
+
+        # 市场交易规则
         if market == "US":
             self.broker.config.limit_up_pct = 999.0
             self.broker.config.limit_down_pct = 999.0
+            self.broker.config.min_shares = 1
+        else:
+            self.broker.config.min_shares = 100
 
         logger.info(f"回测开始: {strategy.name}, {len(df)} 条K线, "
                      f"初始资金={self.config.initial_capital:,.0f}")
@@ -222,10 +229,10 @@ class BacktestEngine:
             account.position = None
             logger.info(f"  [{last_date}] 回测结束，强制平仓 @ {last_close:.2f}")
 
-        # 恢复默认涨跌停配置
-        if market == "US":
-            self.broker.config.limit_up_pct = 0.099
-            self.broker.config.limit_down_pct = 0.099
+        # 恢复配置，避免多策略串跑时市场规则互相污染
+        self.broker.config.limit_up_pct = original_limit_up
+        self.broker.config.limit_down_pct = original_limit_down
+        self.broker.config.min_shares = original_min_shares
 
         final_equity = account.cash
 

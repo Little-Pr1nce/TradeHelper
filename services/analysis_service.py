@@ -46,6 +46,15 @@ def _extract_direction(report_content: str, final_score: float = 0.0) -> str:
     return "neutral"
 
 
+def _requires_realtime_token(market: str, mode: str) -> bool:
+    """盘中必须 TickFlow；A 股盘前也需要实时行情；美股盘前价格走 Nasdaq.com。"""
+    if mode == "intraday":
+        return True
+    if mode == "pre" and market == "A":
+        return True
+    return False
+
+
 @dataclass
 class AnalysisRequest:
     """分析请求参数。"""
@@ -380,6 +389,7 @@ class AnalysisService:
             fs = float(pipeline_result.df["Final_Score"].dropna().iloc[-1])
             pp = float(pipeline_result.df["close"].iloc[-1])
             last_date = str(pipeline_result.df["date"].iloc[-1])[:10]
+            plan_entry, plan_stop, plan_strategy = self._prediction_trade_levels(pipeline_result)
 
             # 整体预测（兼容旧逻辑）
             self._save_prediction(
@@ -390,6 +400,10 @@ class AnalysisService:
                 predicted_price=pp,
                 prediction_stats=prediction_stats,
                 report_content=report_content,
+                conservative_entry=plan_entry,
+                stop_loss=plan_stop,
+                strategy_name=plan_strategy,
+                market_regime=getattr(pipeline_result, "market_regime", ""),
             )
             # 按策略写入预测（统计各策略信号准确率的基础）
             for strat_key in pipeline_result.active_strategies:
@@ -408,7 +422,10 @@ class AnalysisService:
                                 predicted_price=pp,
                                 prediction_stats=prediction_stats,
                                 report_content=report_content,
+                                conservative_entry=plan_entry,
+                                stop_loss=plan_stop,
                                 strategy_name=strat_key,
+                                market_regime=getattr(pipeline_result, "market_regime", ""),
                             )
                 except Exception:
                     pass  # 单策略预测失败不阻塞整体流程
@@ -539,6 +556,7 @@ class AnalysisService:
             if not news_items:
                 return None
             daily_scores: dict[str, list[float]] = {}
+            daily_weights: dict[str, list[float]] = {}
             for n in news_items:
                 if not n.sentiment:
                     continue
@@ -546,9 +564,20 @@ class AnalysisService:
                 score_map = {"positive": 1.0, "negative": -1.0, "neutral": 0.0}
                 if date_key not in daily_scores:
                     daily_scores[date_key] = []
-                daily_scores[date_key].append(score_map.get(n.sentiment, 0.0))
-            rows = [{"date": k, "finbert_score": sum(v) / len(v)}
-                    for k, v in daily_scores.items()]
+                    daily_weights[date_key] = []
+                confidence = n.confidence if n.confidence and n.confidence > 0 else 0.5
+                source_weight = 0.5 if getattr(n, "is_macro", False) else 1.0
+                weight = max(min(confidence, 1.0), 0.1) * source_weight
+                daily_scores[date_key].append(score_map.get(n.sentiment, 0.0) * weight)
+                daily_weights[date_key].append(weight)
+            rows = [
+                {
+                    "date": k,
+                    "finbert_score": sum(v) / sum(daily_weights[k]),
+                }
+                for k, v in daily_scores.items()
+                if sum(daily_weights[k]) > 0
+            ]
             if rows:
                 return pd.DataFrame(rows)
         except Exception as e:
@@ -606,7 +635,14 @@ class AnalysisService:
                                   validated_predictions: list,
                                   unverified_count: int = 0) -> str:
         from report.prompts import build_prediction_footer
-        return build_prediction_footer(code, prediction_stats, validated_predictions, unverified_count)
+        evaluation_panel = None
+        try:
+            evaluation_panel = Database().get_prediction_evaluation_panel(code)
+        except Exception:
+            pass
+        return build_prediction_footer(
+            code, prediction_stats, validated_predictions,
+            unverified_count, evaluation_panel=evaluation_panel)
 
     @staticmethod
 
@@ -617,21 +653,25 @@ class AnalysisService:
                          prediction_stats=None,
                          report_id: int | None = None,
                          report_content: str = "",
-                         strategy_name: str = "") -> int | None:
+                         conservative_entry: float = 0.0,
+                         stop_loss: float = 0.0,
+                         strategy_name: str = "",
+                         market_regime: str = "") -> int | None:
         """写入一条新的预测记录到 prediction_log。"""
         from data.models import PredictionLog
         from datetime import datetime as _dt
         import re
 
         # 尝试从报告中提取建议入场价
-        entry = 0.0
-        for pat in [r'(?:入场|买入|回调至).*?\$?(\d+\.?\d*)',
-                     r'入场价[：:\s]*\$?(\d+\.?\d*)',
-                     r'等待.*?回调.*?\$?(\d+\.?\d*)']:
-            m = re.search(pat, report_content or "")
-            if m:
-                entry = float(m.group(1))
-                break
+        entry = conservative_entry or 0.0
+        if entry <= 0:
+            for pat in [r'(?:入场|买入|回调至).*?\$?(\d+\.?\d*)',
+                         r'入场价[：:\s]*\$?(\d+\.?\d*)',
+                         r'等待.*?回调.*?\$?(\d+\.?\d*)']:
+                m = re.search(pat, report_content or "")
+                if m:
+                    entry = float(m.group(1))
+                    break
 
         verify_days = {"pre": 1, "intraday": 1, "eod": 5, "portfolio": 7}
         pred = PredictionLog(
@@ -642,16 +682,32 @@ class AnalysisService:
             final_score=final_score,
             predicted_price=predicted_price,
             conservative_entry=entry,
+            stop_loss=stop_loss,
             verify_after_days=verify_days.get(mode, 5),
             key_reason=f"Final_Score={final_score:+.3f}, status={prediction_stats.status if prediction_stats else 'N/A'}",
             confidence="high" if abs(final_score) > 0.5 else ("medium" if abs(final_score) > 0.2 else "low"),
             strategy_name=strategy_name,
+            market_regime=market_regime,
         )
         try:
             return Database().insert_prediction(pred)
         except Exception as e:
             logger.warning(f"预测写入失败 ({code}): {e}")
             return None
+
+    @staticmethod
+    def _prediction_trade_levels(pipeline_result: PipelineResult | None) -> tuple[float, float, str]:
+        """从结构化信号检查结果中提取预测跟踪用入场/止损。"""
+        if not pipeline_result or not pipeline_result.signal_check:
+            return 0.0, 0.0, ""
+        for item in pipeline_result.signal_check:
+            if item.get("signal") == "buy":
+                return (
+                    float(item.get("entry_price") or 0.0),
+                    float(item.get("stop_loss") or 0.0),
+                    str(item.get("key") or item.get("variant") or ""),
+                )
+        return 0.0, 0.0, ""
 
     # ── SWOT 数据构建 ──
 
@@ -907,7 +963,7 @@ class AnalysisService:
         settings = Settings()
         token_key = "stock_token_us" if request.market == "US" else "stock_token_a"
         token = settings.get(token_key, "")
-        if not token:
+        if _requires_realtime_token(request.market, "intraday") and not token:
             market_label = "美股" if request.market == "US" else "A股"
             raise RuntimeError(
                 f"盘中分析需要配置「{market_label}数据源 Token」（TickFlow API Key），"
@@ -999,6 +1055,11 @@ class AnalysisService:
         # 校验交易时段
         session = detect_session(request.market, stock_tick=stock_tick, stock_quote=realtime_quote)
         logger.info(f"当前交易时段: {session}")
+        if session != "intraday":
+            raise RuntimeError(
+                f"当前不是常规盘中交易时段（检测到 {session}）。"
+                "请改用「盘后分析」或在盘前时段使用「盘前分析」。"
+            )
 
         # ---- 5. 计算盘中快照 ----
         _progress("正在计算盘中快照...")
@@ -1154,6 +1215,7 @@ class AnalysisService:
                 predicted_price=pp,
                 prediction_stats=prediction_stats,
                 report_content=report_content,
+                market_regime=getattr(t1_pipeline_result, "market_regime", "") if t1_pipeline_result else "",
             )
         except Exception as e:
             logger.warning(f"盘中预测写入失败: {e}")
@@ -1188,13 +1250,13 @@ class AnalysisService:
         美股：QQQ/SPY ETF 替代 NQ/ES 期货（对预测准确度影响 ≈0）
         A 股：基于 T-1 数据 + 隔夜新闻 + 集合竞价价格
 
-        要求：配置对应市场的数据源 Token（TickFlow API Key）。
+        要求：A 股盘前需配置实时行情 Token；美股盘前延伸时段价格使用 Nasdaq.com。
         """
         from config.settings import Settings
         settings = Settings()
         token_key = "stock_token_us" if request.market == "US" else "stock_token_a"
         token = settings.get(token_key, "")
-        if not token:
+        if _requires_realtime_token(request.market, "pre") and not token:
             market_label = "美股" if request.market == "US" else "A股"
             raise RuntimeError(
                 f"盘前分析需要配置「{market_label}数据源 Token」（TickFlow API Key），"
@@ -1259,6 +1321,9 @@ class AnalysisService:
             stock_quote = fetcher.fetch_quote(code)
         except Exception as e:
             logger.warning(f"股票实时报价获取失败: {e}")
+
+        raw_session_for_pre = detect_session(
+            request.market, stock_tick=stock_tick, stock_quote=stock_quote)
 
         # 宏观情绪参考：美股 QQQ/SPY ETF，A 股用沪深300/上证50 ETF
         if request.market == "US":
@@ -1353,13 +1418,13 @@ class AnalysisService:
             except Exception as e:
                 logger.warning(f"上证50 ETF 获取失败: {e}")
 
-        # 验证盘前时段
-        if request.market == "US":
-            if stock_tick and stock_tick.get("trading_phase") != 1:
-                logger.warning(
-                    f"当前不在盘前交易时段（te={stock_tick.get('trading_phase')}），"
-                    f"盘前分析可能不准确"
-                )
+        # 验证盘前时段。盘前报告只应在开盘前使用；盘中/盘后应切换模式。
+        session_for_pre = raw_session_for_pre
+        if session_for_pre != "pre":
+            raise RuntimeError(
+                f"当前不是盘前时段（检测到 {session_for_pre}）。"
+                "请在常规交易时段使用「盘中分析」，收盘后使用「盘后分析」。"
+            )
 
         # 隔夜新闻（含情感分析）
         try:
@@ -1539,6 +1604,7 @@ class AnalysisService:
                 predicted_price=pp,
                 prediction_stats=prediction_stats,
                 report_content=report_content,
+                market_regime=getattr(t1_pipeline_result, "market_regime", "") if t1_pipeline_result else "",
             )
         except Exception as e:
             logger.warning(f"盘前预测写入失败: {e}")

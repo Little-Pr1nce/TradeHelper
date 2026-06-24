@@ -17,7 +17,7 @@ import pandas as pd
 
 from strategies.base import (
     BaseExecutionStrategy, Order, Position, StrategyContext,
-    compute_atr, compute_percentile_score,
+    compute_atr, compute_percentile_score, round_lot_shares,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,7 @@ class BollingerBreakoutStrategy(BaseExecutionStrategy):
 
         stop_distance = self.atr_mult_stop * atr
         risk_amount = context.equity * self.risk_budget
-        shares = max(int(risk_amount / max(stop_distance, 1e-6) / 100) * 100, 100)
+        shares = round_lot_shares(risk_amount / max(stop_distance, 1e-6), context.market)
         stop_loss = bb_mid - stop_distance
 
         logger.info(

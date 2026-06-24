@@ -294,7 +294,7 @@ def aggregate(news_list: list[NewsItem]) -> dict:
     neg = sum(1 for n in news_list if n.sentiment == "negative")
     neu = sum(1 for n in news_list if n.sentiment == "neutral")
     total = len(news_list)
-    score = (pos - neg) / total if total > 0 else 0.0
+    score = _weighted_sentiment_score(news_list)
 
     if score > 0.3:
         summary = f"近期新闻整体偏正面，积极新闻占比 {pos/total*100:.1f}%。"
@@ -311,3 +311,23 @@ def aggregate(news_list: list[NewsItem]) -> dict:
 
     return {"total": total, "positive": pos, "negative": neg, "neutral": neu,
             "sentiment_score": round(score, 4), "summary": summary, "top_news": "\n".join(top_news)}
+
+
+def _sentiment_value(item: NewsItem) -> float:
+    return {"positive": 1.0, "negative": -1.0, "neutral": 0.0}.get(item.sentiment, 0.0)
+
+
+def _sentiment_weight(item: NewsItem) -> float:
+    confidence = item.confidence if item.confidence and item.confidence > 0 else 0.5
+    source_weight = 0.5 if getattr(item, "is_macro", False) else 1.0
+    return max(min(confidence, 1.0), 0.1) * source_weight
+
+
+def _weighted_sentiment_score(news_list: list[NewsItem]) -> float:
+    weighted_sum = 0.0
+    weight_total = 0.0
+    for item in news_list:
+        weight = _sentiment_weight(item)
+        weighted_sum += _sentiment_value(item) * weight
+        weight_total += weight
+    return weighted_sum / weight_total if weight_total > 0 else 0.0

@@ -221,18 +221,7 @@ def fetch_nasdaq_extended_quote(code: str) -> dict | None:
         except (ValueError, TypeError):
             pass
 
-        # 时间戳：解析 lastTradeTimestamp 例如 "Jun 22, 2026 4:19 AM ET"
-        ts = 0
-        ts_str = primary.get("lastTradeTimestamp", "")
-        if ts_str:
-            try:
-                from datetime import datetime as _dt
-                # 去掉时区后缀 " ET"
-                ts_clean = ts_str.replace(" ET", "").replace("Closed at ", "")
-                parsed = _dt.strptime(ts_clean, "%b %d, %Y %I:%M %p")
-                ts = int(parsed.timestamp() * 1000)
-            except Exception:
-                pass
+        ts = _parse_nasdaq_timestamp(primary.get("lastTradeTimestamp", ""))
 
         market_status = inner.get("marketStatus", "Unknown")
 
@@ -262,6 +251,22 @@ def fetch_nasdaq_extended_quote(code: str) -> dict | None:
     except Exception as e:
         logger.warning(f"Nasdaq.com 延伸时段获取失败 ({code}): {e}")
         return None
+
+
+def _parse_nasdaq_timestamp(value: str) -> int:
+    """Parse Nasdaq ET timestamps to epoch milliseconds."""
+    if not value:
+        return 0
+    try:
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        ts_clean = str(value).replace(" ET", "").replace("Closed at ", "").strip()
+        parsed = _dt.strptime(ts_clean, "%b %d, %Y %I:%M %p")
+        parsed = parsed.replace(tzinfo=ZoneInfo("America/New_York"))
+        return int(parsed.timestamp() * 1000)
+    except Exception:
+        return 0
 
 
 def _fetch_yfinance_extended_quote(code: str) -> dict | None:
@@ -442,8 +447,18 @@ class TickFlowFetcher(BaseStockFetcher):
 
         try:
             symbol = self._to_symbol(code)
-            df = self._tf.klines.get(symbol, period="1d", count=count,
-                                     as_dataframe=True)
+            start_ts = int(_dt.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
+            end_ts = int(_dt.strptime(end_date, "%Y-%m-%d").replace(
+                hour=23, minute=59, second=59
+            ).timestamp() * 1000)
+            df = self._tf.klines.get(
+                symbol,
+                period="1d",
+                start_time=start_ts,
+                end_time=end_ts,
+                count=count,
+                as_dataframe=True,
+            )
             if df is None or df.empty:
                 logger.warning(f"TickFlow K 线为空 ({code})")
                 return []
@@ -451,7 +466,7 @@ class TickFlowFetcher(BaseStockFetcher):
             prices = []
             is_a_share = code.isdigit() and len(code) == 6
             for _, row in df.iterrows():
-                date_str = str(row.get("trade_date", ""))[:10]
+                date_str = _row_trade_date(row)
                 if date_str < start_date or date_str > end_date:
                     continue
                 try:
@@ -570,6 +585,19 @@ class TickFlowFetcher(BaseStockFetcher):
         return self.fetch_quote(etf_code)
 
 
+def _row_trade_date(row) -> str:
+    """Return YYYY-MM-DD from TickFlow rows across SDK versions."""
+    for key in ("trade_date", "date", "datetime", "trade_time"):
+        val = row.get(key, "")
+        if val:
+            return str(val)[:10]
+
+    name = getattr(row, "name", None)
+    if hasattr(name, "strftime"):
+        return name.strftime("%Y-%m-%d")
+    return str(name)[:10] if name is not None else ""
+
+
 def check_tickflow_available(market: str = "US", code: str | None = None) -> dict:
     """检测 TickFlow K线/实时接口是否可用，返回结构化状态。"""
     code = code or ("AAPL" if market == "US" else "600519")
@@ -640,21 +668,38 @@ def fetch_cached_prices(
             db.insert_prices(new_prices)
         prices = db.get_prices(code, start, end)
     else:
+        first_date = prices[0].date
         last_date = prices[-1].date
-        logger.info(f"{code} 缓存: {len(prices)} 条 ({prices[0].date}~{last_date})")
+        logger.info(f"{code} 缓存: {len(prices)} 条 ({first_date}~{last_date})，请求 {start}~{end}")
 
-        next_day = (dt_date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
-        today_str = dt_date.today().isoformat()
-        logger.info(f"{code} 检查增量 {next_day}~{today_str}")
-        new_prices = fetcher.fetch_price_history(code, next_day, today_str)
-        latest_new_date = max((p.date for p in new_prices), default="")
-        if latest_new_date > last_date:
-            db.insert_prices(new_prices)
+        fetched_any = False
+
+        # 用户从短周期切到长周期时，已有缓存可能只覆盖尾部；必须补齐起始段。
+        if first_date > start:
+            head_end = (dt_date.fromisoformat(first_date) - timedelta(days=1)).isoformat()
+            logger.info(f"{code} 缓存缺起始段，补拉 {start}~{head_end}")
+            head_prices = fetcher.fetch_price_history(code, start, head_end)
+            if head_prices:
+                db.insert_prices(head_prices)
+                fetched_any = True
+                logger.info(f"{code} 起始段补入 {len(head_prices)} 条")
+
+        # 缓存尾部落后于请求结束日期时，补齐尾部。
+        if last_date < end:
+            tail_start = (dt_date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
+            logger.info(f"{code} 检查尾部增量 {tail_start}~{end}")
+            tail_prices = fetcher.fetch_price_history(code, tail_start, end)
+            latest_new_date = max((p.date for p in tail_prices), default="")
+            if latest_new_date > last_date:
+                db.insert_prices(tail_prices)
+                fetched_any = True
+                new_count = sum(1 for p in tail_prices if p.date > last_date)
+                logger.info(f"{code} 尾部增量 {new_count} 条（最新 {latest_new_date}）")
+            else:
+                logger.info(f"{code} 无尾部增量（缓存最新 {last_date}，数据源最新 {latest_new_date or '无'}）")
+
+        if fetched_any:
             prices = db.get_prices(code, start, end)
-            new_count = sum(1 for p in new_prices if p.date > last_date)
-            logger.info(f"{code} 增量获取 {new_count} 条新数据（最新 {latest_new_date}）")
-        else:
-            logger.info(f"{code} 无增量数据（缓存最新 {last_date}，数据源最新 {latest_new_date or '无'}）")
 
     if not prices or (min_records > 0 and len(prices) < min_records):
         return None

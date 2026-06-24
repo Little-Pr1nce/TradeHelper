@@ -154,15 +154,16 @@ scripts\build_windows.bat          # Windows → dist/win/TradeHelper/
 
 ## Alpha 多因子模型
 
-| 因子 | 权重（有基本面） | 权重（无基本面） | 来源 |
-|------|:--:|:--:|------|
-| 技术面（7 指标） | 30% | 55% | K 线计算 |
-| 风格（PE/PB） | 15% | — | akshare / Finnhub |
-| 基本面（ROE/毛利率等） | 20% | — | akshare / Finnhub |
-| 新闻情感（FinBERT） | 25% | 35% | FinBERT 模型 |
-| 盘口因子 | 10% | 10% | TickFlow Level-1（盘口暂缺时自动回退） |
+| 行情状态 | 技术面 | 风格（PE/PB） | 基本面 | 新闻 |
+|------|:--:|:--:|:--:|:--:|
+| 强趋势高波动 `trending_volatile` | 40% | 5% | 30% | 25% |
+| 稳定趋势 `trending_steady` / `trending` | 38% | 10% | 27% | 25% |
+| 震荡/过渡 `ranging` / `transitional` | 35% | 15% | 25% | 25% |
+| 无基本面数据 | 60% | — | — | 40% |
 
-无盘口数据时权重自动回退。因子经 IC/IR 检验：D 级剔除、C 级半权。新闻情感带时间衰减（半衰期 1 天）。
+数据来源：技术面来自 K 线计算；风格/基本面来自 baostock / Finnhub；新闻来自 FinBERT 情感模型。
+
+无盘口数据时权重自动回退；有盘口数据时仅影响最新一条实时评分，不写入历史回测序列。因子经 IC/IR 检验：D 级剔除、C 级半权。新闻情感带时间衰减（半衰期 1 天）。
 
 ---
 
@@ -220,7 +221,7 @@ scripts\build_windows.bat          # Windows → dist/win/TradeHelper/
 | 市场 | K线+实时+盘口 | 新闻 | 基本面 | 延伸时段 |
 |------|-------------|------|--------|---------|
 | 美股 | TickFlow | Finnhub / yfinance | Finnhub → yfinance | Nasdaq.com → yfinance |
-| A 股 | TickFlow | akshare 免费 | akshare / baostock | — |
+| A 股 | TickFlow | akshare 免费 | baostock → akshare | — |
 
 配置文件存储于系统标准应用目录（macOS `~/Library/Application Support/`，Windows `%APPDATA%`，Linux `~/.config/`）下的 `TradeHelper/config.json`。
 
@@ -266,6 +267,8 @@ scripts\build_windows.bat          # Windows → dist/win/TradeHelper/
 ## 待办
 
 
+- **历史预测评估 UI 面板**: 独立展示 prediction_log，按股票/策略/市场状态/分析模式统计胜率、平均收益和正期望状态
+- **既有功能可信度优化**: 继续处理 LLM 建议边界、数据完整度降级、样本不足降级、实时价重算风控、策略审计置信区间等，详见 DESIGN.md
 - **Web 版本**: flet run --web 模式完善
 - **打包体积优化**: 当前 ~2GB（含 PyTorch），可探索 ONNX 量化
 

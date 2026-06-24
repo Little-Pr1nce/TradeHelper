@@ -18,7 +18,7 @@ import pandas as pd
 
 from strategies.base import (
     BaseExecutionStrategy, Order, StrategyContext,
-    compute_atr, compute_percentile_score,
+    compute_atr, compute_percentile_score, round_lot_shares,
 )
 
 logger = logging.getLogger(__name__)
@@ -131,7 +131,7 @@ class MomentumNewsStrategy(BaseExecutionStrategy):
 
         stop_distance = self.trailing_atr_mult * atr
         risk_amount = context.equity * self.risk_budget
-        shares = max(int(risk_amount / max(stop_distance, 1e-6) / 100) * 100, 100)
+        shares = round_lot_shares(risk_amount / max(stop_distance, 1e-6), context.market)
         stop_loss = close - stop_distance
 
         logger.info(

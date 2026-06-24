@@ -221,7 +221,8 @@ def build_executive_summary(
 
 def build_prediction_footer(code: str, prediction_stats,
                             validated_predictions: list,
-                            unverified_count: int = 0) -> str:
+                            unverified_count: int = 0,
+                            evaluation_panel: dict | None = None) -> str:
     """构建预测追踪报告尾部 Markdown，供 Tab1/Tab3 直接拼接到报告末尾。"""
     lines = ["\n---\n", "## 📈 系统追踪\n"]
 
@@ -266,6 +267,59 @@ def build_prediction_footer(code: str, prediction_stats,
                 f"| {correct} |"
             )
         lines.append("")
+
+    if evaluation_panel:
+        def _status_text(expectancy: str) -> str:
+            return {
+                "positive": "正期望",
+                "negative": "负期望",
+                "insufficient": "样本不足",
+            }.get(expectancy, expectancy or "样本不足")
+
+        overall = evaluation_panel.get("overall") or {}
+        if overall.get("count", 0) > 0:
+            lines.append("### 真实历史预测评估")
+            lines.append(
+                f"- 整体：{overall.get('count', 0)} 次验证，"
+                f"方向正确率 {overall.get('accuracy', 0):.0%}，"
+                f"平均实际收益 {overall.get('avg_return', 0):+.2%}，"
+                f"结论：**{_status_text(overall.get('expectancy', 'insufficient'))}**"
+            )
+
+            by_strategy = [
+                x for x in (evaluation_panel.get("by_strategy") or [])
+                if x.get("label") and x.get("label") != "整体预测"
+            ][:5]
+            if by_strategy:
+                lines.append("")
+                lines.append("| 策略 | 验证次数 | 方向正确率 | 平均实际收益 | 期望 |")
+                lines.append("|------|------:|------:|------:|------|")
+                for row in by_strategy:
+                    lines.append(
+                        f"| {row.get('label', '')[:24]} "
+                        f"| {row.get('count', 0)} "
+                        f"| {row.get('accuracy', 0):.0%} "
+                        f"| {row.get('avg_return', 0):+.2%} "
+                        f"| {_status_text(row.get('expectancy', 'insufficient'))} |"
+                    )
+
+            by_regime = [
+                x for x in (evaluation_panel.get("by_regime") or [])
+                if x.get("label") and x.get("label") != "unknown"
+            ][:5]
+            if by_regime:
+                lines.append("")
+                lines.append("| 行情状态 | 验证次数 | 方向正确率 | 平均实际收益 | 期望 |")
+                lines.append("|------|------:|------:|------:|------|")
+                for row in by_regime:
+                    lines.append(
+                        f"| {row.get('label', '')} "
+                        f"| {row.get('count', 0)} "
+                        f"| {row.get('accuracy', 0):.0%} "
+                        f"| {row.get('avg_return', 0):+.2%} "
+                        f"| {_status_text(row.get('expectancy', 'insufficient'))} |"
+                    )
+            lines.append("")
 
     lines.append("*以上为系统自动追踪数据，仅供参考。*\n")
     return "\n".join(lines)

@@ -23,7 +23,7 @@ import pandas as pd
 
 from strategies.base import (
     BaseExecutionStrategy, Order, Position, StrategyContext,
-    compute_atr, compute_percentile_score,
+    compute_atr, compute_percentile_score, round_lot_shares,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,7 @@ class MA60TrendStrategy(BaseExecutionStrategy):
                 # 风险预算仓位：shares = risk_budget × equity / (atr_stop_mult × ATR)
                 stop_distance = self.atr_stop_mult * latest_atr
                 risk_amount = self.risk_budget * context.equity
-                shares = max(100, int(risk_amount / stop_distance / 100) * 100)
+                shares = round_lot_shares(risk_amount / stop_distance, context.market)
                 stop_loss = latest_close - stop_distance
 
                 orders.append(Order(

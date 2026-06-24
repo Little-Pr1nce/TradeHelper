@@ -32,22 +32,29 @@ class BrokerConfig:
     limit_down_pct: float = 0.099    # 跌停幅度
     hard_stop_pct: float = 0.08      # 硬止损比例（-8%）
     time_stop_days: int = 10         # 时间止损天数
-    min_shares: int = 100            # 最小交易单位
+    min_shares: int = 100            # 最小交易单位：A 股 100，美股 1（由 BacktestEngine 按市场设置）
 
 
 @dataclass
 class Account:
     """账户状态。"""
     initial_capital: float = 100000.0
-    cash: float = 100000.0
+    cash: float | None = None
+    last_equity: float | None = None
     position: Optional[Position] = None
     equity_curve: list[dict] = field(default_factory=list)
     trades: list[dict] = field(default_factory=list)
     fills: list[Fill] = field(default_factory=list)
 
+    def __post_init__(self):
+        if self.cash is None:
+            self.cash = self.initial_capital
+        if self.last_equity is None:
+            self.last_equity = self.initial_capital
+
     @property
     def equity(self) -> float:
-        return self.cash
+        return float(self.last_equity if self.last_equity is not None else (self.cash or 0.0))
 
 
 class Broker:
@@ -66,6 +73,10 @@ class Broker:
         cfg = self.config
         open_price = float(bar_t1["open"])
         volume_t1 = float(bar_t1.get("volume", 0))
+
+        if order.shares < cfg.min_shares:
+            logger.debug(f"{order.date}: 买入订单作废 — 股数不足最小交易单位 shares={order.shares}")
+            return None
 
         # 1. 涨跌停过滤
         if self._is_limit_up(open_price, prev_close):
@@ -285,6 +296,7 @@ class Broker:
             position_value = account.position.shares * close
 
         total_equity = account.cash + position_value
+        account.last_equity = total_equity
         account.equity_curve.append({
             "date": date_str,
             "equity": round(total_equity, 2),
