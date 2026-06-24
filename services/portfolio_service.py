@@ -56,7 +56,7 @@ def _build_portfolio_operation_summary(
         code = obj.code if obj else "?"
         name = obj.name if obj else code
         sc_list = d.get("signal_check") or []
-        op_plan = d.get("operation_plan")  # OperationPlan 对象
+        op_plan = d.get("operation_plan")  # str（plan.markdown）或 None
 
         buys = [s for s in sc_list if s.get("signal") == "buy"]
         if buys:
@@ -73,18 +73,37 @@ def _build_portfolio_operation_summary(
                 "op_plan": op_plan,
             })
 
+    def _clean_plan_md(md: str) -> str:
+        """清理 signal_check.py 生成的 markdown，去掉重复的大标题和分隔线。"""
+        if not md:
+            return ""
+        md = md.strip()
+        # 去掉开头的 --- 和 ## 🎯 系统操作方案 标题（已有外层标题）
+        for prefix in ["---", "## 🎯 系统操作方案（代码生成）"]:
+            if md.startswith(prefix):
+                md = md[len(prefix):].strip()
+        # 去掉 > ⚠️ 以下方案... 和 > ⏱ 有效窗口... 提示行（外层已有）
+        for hint in [
+            "> ⚠️ 以下方案由系统基于策略审计和实时信号**自动生成**，非 LLM 建议。",
+            "> ⏱ 有效窗口: **5 个交易日**",
+        ]:
+            if md.startswith(hint):
+                # 找到换行后截断
+                nl = md.find("\n")
+                if nl != -1:
+                    md = md[nl+1:].strip()
+        return md
+
     # ── 有买入信号的股票：直接嵌入各自的保守/激进方案 ──
     if buy_stocks:
         lines.append(f"### 🟢 有买入信号的股票（{len(buy_stocks)} 只）\n")
         for bs in buy_stocks:
             lines.append(f"#### {bs['name']}（{bs['code']}）— 现价 {currency}{bs['price']:.2f}\n")
-            if bs["op_plan"] and hasattr(bs["op_plan"], "markdown") and bs["op_plan"].markdown:
-                # 嵌入 signal_check.py 生成的完整保守/激进方案
-                # 去掉开头和结尾的 --- 分隔线，避免嵌套
-                md = bs["op_plan"].markdown.strip()
-                lines.append(md)
+            plan_md = bs["op_plan"]
+            if isinstance(plan_md, str) and plan_md.strip():
+                lines.append(_clean_plan_md(plan_md))
             else:
-                lines.append(f"> 系统未生成详细方案，{bs['buy_count']} 个策略发出买入信号。\n")
+                lines.append(f"> {bs['buy_count']} 个策略发出买入信号，但系统未生成详细操作方案。\n")
             lines.append("")
 
     # ── 无信号的股票：嵌入候选策略 + 触发条件 ──
@@ -92,9 +111,9 @@ def _build_portfolio_operation_summary(
         lines.append(f"### ⚪ 无买入信号的股票（{len(hold_stocks)} 只）\n")
         for hs in hold_stocks:
             lines.append(f"#### {hs['name']}（{hs['code']}）— 现价 {currency}{hs['price']:.2f}\n")
-            if hs["op_plan"] and hasattr(hs["op_plan"], "markdown") and hs["op_plan"].markdown:
-                md = hs["op_plan"].markdown.strip()
-                lines.append(md)
+            plan_md = hs["op_plan"]
+            if isinstance(plan_md, str) and plan_md.strip():
+                lines.append(_clean_plan_md(plan_md))
             else:
                 lines.append("> 当前无策略发出买入信号，保持观望。\n")
             lines.append("")
@@ -527,7 +546,8 @@ class PortfolioService:
 
         # 2a. 组合操作方案（代码生成，放在最前面）
         if portfolio_plan:
-            report_content += portfolio_plan + "\n\n"
+            report_content += portfolio_plan + "\n\n---\n\n"
+            report_content += "> 📖 **以下为 AI 分析师的解读报告**，基于上述系统方案进行翻译和风险分析。\n\n"
 
         # 2b. LLM 报告（翻译代码方案为 K 线图语言）
         from report.generator import generate_portfolio_report
