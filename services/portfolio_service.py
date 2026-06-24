@@ -527,8 +527,14 @@ class PortfolioService:
             portfolio_operation_plan=portfolio_plan,
         )
 
-        # Step 3: 拼接预测追踪尾部 + 存入 reports 表
+        # Step 3: 追加代码生成章节到报告正文
         portfolio_code = f"PORTFOLIO_{market}"
+
+        # 3a. 组合操作方案（追加到报告正文，不只是注入 prompt）
+        if portfolio_plan:
+            report_content += portfolio_plan
+
+        # 3b. 预测追踪
         try:
             from report.prompts import build_prediction_footer
             port_stats = self.db.get_prediction_stats(portfolio_code)
@@ -540,7 +546,7 @@ class PortfolioService:
         except Exception as e:
             logger.warning(f"组合预测 footer 构建失败: {e}")
 
-        # 拼接策略健康度追踪（持续优化闭环 — 汇总所有持仓+关注）
+        # 3c. 策略健康度追踪（持续优化闭环 — 汇总所有持仓+关注）
         try:
             all_health = []
             for obj in (holdings_data + watchlist_data):

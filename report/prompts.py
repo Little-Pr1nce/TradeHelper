@@ -1134,6 +1134,17 @@ def build_portfolio_user_prompt(
                         )
         if hd.get("news_summary"):
             lines.append(f"- 新闻情感摘要：{hd['news_summary']}")
+        # ── 新架构：系统信号 + 审计数据 ──
+        sc = hd.get("signal_check") or []
+        buy_sc = [s for s in sc if s.get("signal") == "buy"]
+        if buy_sc:
+            strat_names = ", ".join(s.get("name", "?")[:15] for s in buy_sc[:3])
+            lines.append(f"- 🔴 系统买入信号：**{len(buy_sc)} 个策略触发** → {strat_names}")
+        else:
+            lines.append(f"- ⚪ 系统买入信号：**0 个策略触发**（所有策略均不满足入场条件）")
+        audit = hd.get("strategy_audit") or {}
+        if audit:
+            lines.append(f"- 策略审计：PASS={audit.get('pass', 0)}, COND={audit.get('conditional', 0)}, FAIL={audit.get('fail', 0)}")
         lines.append("")
 
     # ── 关注股票详细数据 ──
@@ -1185,6 +1196,17 @@ def build_portfolio_user_prompt(
                             )
             if wd.get("news_summary"):
                 lines.append(f"- 新闻情感摘要：{wd['news_summary']}")
+            # ── 新架构：系统信号 + 审计数据 ──
+            sc = wd.get("signal_check") or []
+            buy_sc = [s for s in sc if s.get("signal") == "buy"]
+            if buy_sc:
+                strat_names = ", ".join(s.get("name", "?")[:15] for s in buy_sc[:3])
+                lines.append(f"- 🔴 系统买入信号：**{len(buy_sc)} 个策略触发** → {strat_names}")
+            else:
+                lines.append(f"- ⚪ 系统买入信号：**0 个策略触发**")
+            audit = wd.get("strategy_audit") or {}
+            if audit:
+                lines.append(f"- 策略审计：PASS={audit.get('pass', 0)}, COND={audit.get('conditional', 0)}, FAIL={audit.get('fail', 0)}")
             lines.append("")
 
     # ── 横向对比数据 ──
