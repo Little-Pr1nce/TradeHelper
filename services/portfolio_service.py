@@ -34,90 +34,87 @@ def _build_portfolio_operation_summary(
 ) -> str:
     """构建组合级操作方案 Markdown 汇总。
 
-    汇总所有持仓+关注股票的信号检查结果，生成组合级建议：
-      - 哪些股票该加仓（有买入信号 + 审计 PASS）
-      - 哪些该持有/观望（无信号）
-      - 仓位分配建议
+    汇总每只股票已有的 operation_plan（来自 signal_check.py 的完整方案），
+    生成组合级视图：有信号股票直接嵌入保守/激进方案，无信号股票嵌入候选策略+触发条件。
     """
+    currency = "$" if market == "US" else "¥"
     lines = [
         "\n---\n",
         "## 🎯 组合操作方案（代码生成）\n",
-        f"> ⚠️ 以下方案由系统基于每只股票的策略审计和实时信号**自动生成**，非 LLM 建议。\n",
+        "> ⚠️ 以下方案由系统基于策略审计和实时信号**自动生成**，非 LLM 建议。\n",
+        "> ⏱ 有效窗口: **5 个交易日** | 若到期未触发，下次分析时重新评估。\n",
     ]
 
     all_data = holdings_data + watchlist_data
-    buy_signals = []
-    hold_signals = []
+
+    # ── 分类：有信号 vs 无信号 ──
+    buy_stocks = []   # 有买入信号的股票
+    hold_stocks = []  # 无信号的股票
 
     for d in all_data:
         obj = d.get("holding") or d.get("watch_item")
         code = obj.code if obj else "?"
         name = obj.name if obj else code
-        sc = d.get("signal_check") or []
-        audit_summary = d.get("strategy_audit") or {}
+        sc_list = d.get("signal_check") or []
+        op_plan = d.get("operation_plan")  # OperationPlan 对象
 
-        buys = [s for s in sc if s.get("signal") == "buy"]
+        buys = [s for s in sc_list if s.get("signal") == "buy"]
         if buys:
-            buy_signals.append({
+            buy_stocks.append({
                 "code": code, "name": name,
                 "price": d.get("current_price", 0),
-                "buy_strategies": buys,
-                "audit": audit_summary,
-                "is_holding": d.get("holding") is not None,
+                "buy_count": len(buys),
+                "op_plan": op_plan,
             })
         else:
-            hold_signals.append({
+            hold_stocks.append({
                 "code": code, "name": name,
                 "price": d.get("current_price", 0),
-                "is_holding": d.get("holding") is not None,
+                "op_plan": op_plan,
             })
 
-    # ── 有买入信号的股票 ──
-    if buy_signals:
-        lines.append("### 🟢 有买入信号的股票\n")
-        lines.append("| 股票 | 现价 | 推荐策略 | 审计 | 操作 |")
-        lines.append("|------|------|---------|------|------|")
-        for bs in buy_signals:
-            best = bs["buy_strategies"][0]
-            audit_label = (
-                f"PASS={bs['audit'].get('pass', 0)}, "
-                f"FAIL={bs['audit'].get('fail', 0)}"
-            )
-            action = "加仓/买入" if bs["is_holding"] else "关注买入"
-            lines.append(
-                f"| {bs['name']}({bs['code']}) "
-                f"| ${bs['price']:.2f} "
-                f"| {best.get('name', '?')[:20]} "
-                f"| {audit_label} "
-                f"| **{action}** |"
-            )
-        lines.append("")
+    # ── 有买入信号的股票：直接嵌入各自的保守/激进方案 ──
+    if buy_stocks:
+        lines.append(f"### 🟢 有买入信号的股票（{len(buy_stocks)} 只）\n")
+        for bs in buy_stocks:
+            lines.append(f"#### {bs['name']}（{bs['code']}）— 现价 {currency}{bs['price']:.2f}\n")
+            if bs["op_plan"] and hasattr(bs["op_plan"], "markdown") and bs["op_plan"].markdown:
+                # 嵌入 signal_check.py 生成的完整保守/激进方案
+                # 去掉开头和结尾的 --- 分隔线，避免嵌套
+                md = bs["op_plan"].markdown.strip()
+                lines.append(md)
+            else:
+                lines.append(f"> 系统未生成详细方案，{bs['buy_count']} 个策略发出买入信号。\n")
+            lines.append("")
 
-    # ── 无信号的股票 ──
-    if hold_signals:
-        lines.append("### ⚪ 观望中的股票\n")
-        lines.append("| 股票 | 现价 | 状态 |")
-        lines.append("|------|------|------|")
-        for hs in hold_signals[:10]:
-            action = "持有观望" if hs["is_holding"] else "等信号"
-            lines.append(f"| {hs['name']}({hs['code']}) | ${hs['price']:.2f} | {action} |")
-        lines.append("")
+    # ── 无信号的股票：嵌入候选策略 + 触发条件 ──
+    if hold_stocks:
+        lines.append(f"### ⚪ 无买入信号的股票（{len(hold_stocks)} 只）\n")
+        for hs in hold_stocks:
+            lines.append(f"#### {hs['name']}（{hs['code']}）— 现价 {currency}{hs['price']:.2f}\n")
+            if hs["op_plan"] and hasattr(hs["op_plan"], "markdown") and hs["op_plan"].markdown:
+                md = hs["op_plan"].markdown.strip()
+                lines.append(md)
+            else:
+                lines.append("> 当前无策略发出买入信号，保持观望。\n")
+            lines.append("")
 
-    # ── 组合级统计 ──
+    # ── 组合级仓位分配建议 ──
     total = len(all_data)
-    buy_count = len(buy_signals)
+    buy_count = len(buy_stocks)
     lines.append(f"**组合信号统计**: {buy_count}/{total} 只股票有买入信号\n")
 
-    # ── 仓位建议 ──
-    if buy_signals:
+    if buy_stocks:
         available = (
             balance.us_balance if market == "US" else balance.a_balance
         )
+        lines.append(f"**可用资金**: {currency}{available:,.2f}\n")
         if available > 0:
-            per_stock_pct = min(0.30, 1.0 / len(buy_signals))
+            per_stock_pct = min(0.30, 1.0 / len(buy_stocks))
             per_stock_cash = available * per_stock_pct
-            lines.append(f"**仓位分配建议**: 可用资金 ${available:,.0f}，分散到 {len(buy_signals)} 只信号股，")
-            lines.append(f"每只建议仓位约 {per_stock_pct*100:.0f}%（${per_stock_cash:,.0f}）。")
+            lines.append(f"**仓位分配建议**: 分散到 {len(buy_stocks)} 只信号股，每只建议仓位约 {per_stock_pct*100:.0f}%（约 {currency}{per_stock_cash:,.0f}）。\n")
+        else:
+            lines.append("> ⚠️ 可用资金不足，如需买入请先卖出部分持仓。\n")
         lines.append("")
 
     lines.append("*以上方案由系统自动生成，具体执行请结合个人风险偏好。*\n")
@@ -515,7 +512,7 @@ class PortfolioService:
             holdings_data, watchlist_data, market, balance
         )
 
-        # Step 2: 生成报告
+        # Step 2: 生成报告（代码方案在前，LLM 翻译在后）
         if on_progress:
             on_progress("正在生成综合持仓报告...")
 
@@ -524,8 +521,17 @@ class PortfolioService:
             "a_balance": balance.a_balance,
         }
 
+        # 先拼代码生成章节（操作方案 → LLM 解读之前展示）
+        portfolio_code = f"PORTFOLIO_{market}"
+        report_content = ""
+
+        # 2a. 组合操作方案（代码生成，放在最前面）
+        if portfolio_plan:
+            report_content += portfolio_plan + "\n\n"
+
+        # 2b. LLM 报告（翻译代码方案为 K 线图语言）
         from report.generator import generate_portfolio_report
-        report_content = generate_portfolio_report(
+        llm_report = generate_portfolio_report(
             balance=balance_dict,
             holdings_data=holdings_data,
             watchlist_data=watchlist_data,
@@ -534,15 +540,9 @@ class PortfolioService:
             mode=mode,
             portfolio_operation_plan=portfolio_plan,
         )
+        report_content += llm_report
 
-        # Step 3: 追加代码生成章节到报告正文
-        portfolio_code = f"PORTFOLIO_{market}"
-
-        # 3a. 组合操作方案（追加到报告正文，不只是注入 prompt）
-        if portfolio_plan:
-            report_content += portfolio_plan
-
-        # 3b. 预测追踪
+        # Step 3: 追加追踪章节到报告正文
         try:
             from report.prompts import build_prediction_footer
             port_stats = self.db.get_prediction_stats(portfolio_code)
