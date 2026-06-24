@@ -303,9 +303,17 @@ class PortfolioService:
                 except Exception as e:
                     logger.warning(f"{code} 基本面数据获取失败: {e}")
 
+                # 无新闻数据时自动调整权重：技术面 100%，新闻面 0%
+                # 否则 Final_Score 永远达不到策略阈值（与 Tab1 保持一致）
+                if news_df is None or news_df.empty:
+                    w_tech, w_news = 1.0, 0.0
+                else:
+                    w_tech, w_news = 0.6, 0.4
+
                 # 跑量化管道（跳过度参数，加速）
                 result = run_pipeline(
                     df, news_df=news_df, market=market,
+                    w_tech=w_tech, w_news=w_news,
                     fundamental_data=fundamental_data,
                     skip_param_tuning=True,
                     stock_code=code,
