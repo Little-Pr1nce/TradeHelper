@@ -12,6 +12,7 @@ import pandas as pd
 
 from data.stock_fetcher import (
     TickFlowFetcher,
+    _filter_prices_for_cache,
     _parse_nasdaq_timestamp,
     check_tickflow_available,
     check_extended_quote_available,
@@ -52,6 +53,24 @@ class MemoryPriceDB:
         self.prices = [
             PriceData(code="AAPL", date="2026-01-10", open=2, high=3, low=2, close=3, volume=100),
             PriceData(code="AAPL", date="2026-01-12", open=2, high=3, low=2, close=3, volume=100),
+        ]
+
+    def get_prices(self, code, start_date="", end_date=""):
+        return sorted(
+            [p for p in self.prices if p.code == code and p.date >= start_date and p.date <= end_date],
+            key=lambda p: p.date,
+        )
+
+    def insert_prices(self, prices):
+        self.prices.extend(prices)
+
+
+class DirtyTailDB:
+    def __init__(self):
+        self.prices = [
+            PriceData(code="MU", date="2026-01-02", open=100, high=102, low=98, close=100, volume=100),
+            PriceData(code="MU", date="2026-01-03", open=101, high=104, low=99, close=103, volume=100),
+            PriceData(code="MU", date="2026-01-04", open=1000, high=1010, low=990, close=1005, volume=100),
         ]
 
     def get_prices(self, code, start_date="", end_date=""):
@@ -122,6 +141,50 @@ def test_fetch_cached_prices_backfills_head_and_tail():
     assert df["date"].max().strftime("%Y-%m-%d") == "2026-01-15"
 
 
+def test_filter_prices_for_cache_drops_unfinished_and_invalid_bars():
+    prices = [
+        PriceData(code="AAPL", date="2026-01-02", open=1, high=2, low=1, close=1.5, volume=100),
+        PriceData(code="AAPL", date="2026-01-03", open=1, high=0.8, low=1.2, close=1, volume=100),
+        PriceData(code="AAPL", date="2026-01-04", open=1, high=2, low=1, close=1.5, volume=100),
+    ]
+
+    filtered = _filter_prices_for_cache(
+        prices,
+        "US",
+        latest_completed_date="2026-01-02",
+    )
+
+    assert [p.date for p in filtered] == ["2026-01-02"]
+
+
+def test_filter_prices_for_cache_quarantines_jump_tail():
+    prices = [
+        PriceData(code="MU", date="2026-01-02", open=100, high=102, low=98, close=100, volume=100),
+        PriceData(code="MU", date="2026-01-03", open=101, high=104, low=99, close=103, volume=100),
+        PriceData(code="MU", date="2026-01-04", open=1000, high=1010, low=990, close=1005, volume=100),
+        PriceData(code="MU", date="2026-01-05", open=1006, high=1020, low=1000, close=1015, volume=100),
+    ]
+
+    filtered = _filter_prices_for_cache(
+        prices,
+        "US",
+        latest_completed_date="2026-01-05",
+    )
+
+    assert [p.date for p in filtered] == ["2026-01-02", "2026-01-03"]
+
+
+def test_fetch_cached_prices_ignores_dirty_cached_tail():
+    db = DirtyTailDB()
+    fetcher = RecordingFetcher()
+
+    with patch("data.stock_fetcher.get_stock_fetcher", return_value=fetcher):
+        df = fetch_cached_prices("MU", "US", "2026-01-02", "2026-01-04", db=db)
+
+    assert df["date"].max().strftime("%Y-%m-%d") == "2026-01-03"
+    assert ("2026-01-04", "2026-01-04") in fetcher.calls
+
+
 def test_tickflow_fetch_price_history_uses_date_window():
     fake_tf = FakeTickFlow()
     fetcher = TickFlowFetcher.__new__(TickFlowFetcher)
@@ -161,7 +224,10 @@ if __name__ == "__main__":
     test_tickflow_availability_ok()
     test_extended_quote_availability_ok()
     test_fetch_cached_prices_backfills_head_and_tail()
+    test_filter_prices_for_cache_drops_unfinished_and_invalid_bars()
+    test_filter_prices_for_cache_quarantines_jump_tail()
+    test_fetch_cached_prices_ignores_dirty_cached_tail()
     test_tickflow_fetch_price_history_uses_date_window()
     test_finnhub_debt_ratio_uses_normalized_metric()
     test_nasdaq_timestamp_is_parsed_as_eastern_time()
-    print("6/6 passed")
+    print("9/9 passed")

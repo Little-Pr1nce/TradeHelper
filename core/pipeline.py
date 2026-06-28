@@ -18,6 +18,7 @@ from strategies import get_execution_strategy
 from strategies.base import Position
 from backtest.engine import BacktestEngine, BacktestConfig
 from backtest.analytics import compare_strategies, compute_rank_ic
+from core.data_quality import evaluate_data_quality
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class AnalysisResult:
     strategy_pool: "StrategyPoolResult | None" = None       # 策略池扩展+审计结果
     operation_plan: str | None = None                       # 代码生成的操作方案 Markdown
     signal_check: list | None = None                        # 各策略信号状态 list[dict]
+    data_quality: dict = field(default_factory=dict)         # 数据质量评分与交易闸门
 
 
 def run_pipeline(
@@ -63,6 +65,9 @@ def run_pipeline(
     expand_pool: bool = True,
     stock_code: str = "",
     current_price: float | None = None,
+    current_bar: dict | None = None,
+    run_backtests: bool = True,
+    run_signals: bool = True,
 ):
     """
     执行完整的量化分析计算管道。
@@ -86,6 +91,9 @@ def run_pipeline(
         account_equity: 真实账户权益；传入时用于当前信号检查和操作方案仓位换算
         current_position: 真实持仓；传入时当前信号检查会识别退出/减仓信号
         current_price: 当前实时/延伸时段价格；仅用于当前操作方案，不写入历史回测序列
+        current_bar: 当前时段 OHLCV 快照；仅用于内存临时 K 线和实时策略判断
+        run_backtests: False 时只计算指标/Alpha/行情状态（用于同板块快速比较）
+        run_signals: False 时跳过策略信号与操作方案（仅供只读筛选场景）
         market: A或US
         strategy_names: 策略列表
         w_tech: 技术面权重
@@ -102,6 +110,21 @@ def run_pipeline(
 
     logger.info("=" * 50)
     logger.info(f"管道启动: {len(df)} 条K线, 市场={market}, 策略={strategy_names}")
+
+    # ---- 0 数据质量评分：可信交易建议的硬闸门 ----
+    data_quality_report = evaluate_data_quality(
+        df,
+        current_price=current_price,
+        news_df=news_df,
+        fundamental_data=fundamental_data,
+        depth_available=depth_available,
+        market=market,
+    )
+    data_quality = data_quality_report.to_dict()
+    logger.info(
+        f"  [数据质量] score={data_quality['score']:.0f}, "
+        f"status={data_quality['status']}, action={data_quality['action']}"
+    )
 
     # ---- ① 技术指标预计算 ----
     logger.info("  [管道 1/4] 计算技术指标（MA/MACD/RSI/布林带/KDJ）...")
@@ -172,11 +195,35 @@ def run_pipeline(
         )
 
     # ---- ⑤ 行情检测 + 策略过滤 ----
+    health_data: list[dict] = []
+    db_instance = None
+    if stock_code:
+        try:
+            from data.database import Database
+            db_instance = Database()
+            health_data = db_instance.get_strategy_health_report(stock_code)
+            feedback = db_instance.apply_strategy_health_feedback(stock_code, health_data)
+            if feedback.get("demoted"):
+                logger.info(
+                    f"  [自我升级] {stock_code}: "
+                    f"{feedback['demoted']} 个负期望策略已标记 demoted，等待重新验证"
+                )
+        except Exception as e:
+            logger.warning(f"策略健康度回灌失败（非致命）: {e}")
+
     active_strategy_keys = []
     skipped_strategy_keys = []
     active_strategies = []  # Strategy 实例列表
     for name in strategy_names:
-        s = get_execution_strategy(name)
+        params = {}
+        if db_instance is not None:
+            try:
+                best = db_instance.get_best_params(stock_code, name)
+                if best and best.get("source") != "demoted":
+                    params = best.get("params") or {}
+            except Exception:
+                params = {}
+        s = get_execution_strategy(name, **params)
         if not s.suitable_regimes or market_regime in s.suitable_regimes:
             active_strategies.append(s)
             active_strategy_keys.append(name)
@@ -185,15 +232,63 @@ def run_pipeline(
             logger.info(f"  [策略] {name} ({s.name}) 不适合 {market_regime} 行情，跳过")
 
     logger.info(f"  [管道 4/4] 行情={market_regime}, 激活策略={[s.name for s in active_strategies]}, 跳过={skipped_strategy_keys}")
-    logger.info(f"  策略回测 (初始资金={initial_capital:,.0f})...")
-    config = BacktestConfig(initial_capital=initial_capital)
-    if market == "US":
-        config.broker.limit_up_pct = 999.0
-        config.broker.limit_down_pct = 999.0
+    results = {}
+    comparison = {}
+    if run_backtests:
+        logger.info(f"  策略回测 (初始资金={initial_capital:,.0f})...")
+        config = BacktestConfig(initial_capital=initial_capital)
+        engine = BacktestEngine(config)
+        if db_instance is not None and stock_code:
+            import json
+            from core.strategy_pool import (
+                _cache_params_json,
+                _reconstruct_result,
+                _serialize_result,
+            )
 
-    engine = BacktestEngine(config)
-    results = engine.run_multi(df, active_strategies, news_df)
-    comparison = compare_strategies(results)
+            data_start = str(df["date"].iloc[0])[:10] if "date" in df.columns else ""
+            data_end = str(df["date"].iloc[-1])[:10] if "date" in df.columns else ""
+            cache_hits = 0
+            for key, strategy in zip(active_strategy_keys, active_strategies):
+                params = {
+                    p["name"]: getattr(strategy, p["name"])
+                    for p in strategy.tunable_params()
+                    if hasattr(strategy, p["name"])
+                }
+                params_json = _cache_params_json(params, df, initial_capital)
+                cached = db_instance.get_cached_backtest(
+                    stock_code, key, params_json,
+                    data_start, data_end, data_length=len(df),
+                )
+                if cached:
+                    results[strategy.name] = _reconstruct_result(cached)
+                    cache_hits += 1
+                    continue
+                result = engine.run(df.copy(), strategy, news_df)
+                results[strategy.name] = result
+                db_instance.save_backtest_cache(
+                    stock_code=stock_code,
+                    strategy_key=key,
+                    params_json=params_json,
+                    data_start=data_start,
+                    data_end=data_end,
+                    data_length=len(df),
+                    sharpe_ratio=result.sharpe_ratio,
+                    total_return=result.total_return,
+                    max_drawdown=result.max_drawdown,
+                    win_rate=result.win_rate,
+                    total_trades=result.total_trades,
+                    result_json=json.dumps(_serialize_result(result)),
+                )
+            if cache_hits:
+                logger.info(
+                    f"  [前台回测缓存] 命中 {cache_hits}/{len(active_strategies)} 个正式策略"
+                )
+        else:
+            results = engine.run_multi(df, active_strategies, news_df)
+        comparison = compare_strategies(results)
+    else:
+        logger.info("  [快速筛选] 跳过策略回测、审计和参数池")
 
     for name, r in results.items():
         logger.info(
@@ -202,36 +297,13 @@ def run_pipeline(
             f"交易={r.total_trades}次"
         )
 
-    # ---- ⑥ 参数扫参调优 ----
+    # ---- ⑥ 参数调优由策略池 walk-forward 候选生命周期统一负责 ----
     param_tuning = {}
     if not skip_param_tuning:
-        logger.info("  [管道 5/5] 策略参数扫参调优...")
-        for name in active_strategy_keys:
-            base = get_execution_strategy(name)
-            tunable = base.tunable_params()
-            if not tunable:
-                continue
-            # 只调第一个参数
-            p = tunable[0]
-            best_val = p["default"]
-            best_score = -999.0
-            for val in p["values"]:
-                kwargs = {p["name"]: val}
-                s = get_execution_strategy(name, **kwargs)
-                test_result = engine.run(df.copy(), s, news_df)
-                score = test_result.sharpe_ratio if test_result.total_trades > 0 else -999.0
-                if score > best_score:
-                    best_score = score
-                    best_val = val
-            param_tuning[name] = {
-                "param": p["name"], "default": p["default"],
-                "best_value": best_val,
-                "default_sharpe": results.get(base.name, results.get(name, None)),
-            }
-            default_r = results.get(base.name)
-            best_str = (f"默认 entry={p['default']:.2f} → {default_r.total_return*100:+.1f}%/{default_r.sharpe_ratio:.2f}"
-                        if default_r else f"默认 entry={p['default']:.2f}")
-            logger.info(f"  [调优] {name}: {best_str} | 最优 entry={best_val:.2f} → 夏普={best_score:.2f}")
+        logger.info(
+            "  [参数治理] 已停用全样本最优参数扫描；"
+            "参数只允许通过 walk-forward 候选确认后晋升"
+        )
 
     # ---- ⑦ 策略时间切分审计 ----
     strategy_audit = None
@@ -257,21 +329,19 @@ def run_pipeline(
     strategy_pool_result = None
     operation_plan = None
     signal_check_results = None
-
     # 选取用于信号检查的策略变体
     check_variants = []
 
-    if expand_pool and active_strategy_keys:
+    if run_backtests and run_signals and expand_pool and active_strategy_keys:
         # 完整模式：扩展策略池 → 回测 → 审计 → 筛选
         try:
             from core.strategy_pool import expand_and_audit
-            from data.database import Database
             pool = expand_and_audit(
                 df=df, strategy_keys=active_strategy_keys,
                 market=market, stock_code=stock_code,
                 initial_capital=initial_capital,
                 news_df=news_df,
-                db=Database() if stock_code else None,
+                db=db_instance if stock_code else None,
             )
             strategy_pool_result = pool
             logger.info(
@@ -283,18 +353,46 @@ def run_pipeline(
         except Exception as e:
             logger.warning(f"策略池扩展失败（非致命）: {e}", exc_info=True)
 
-    elif active_strategy_keys:
-        # 快速模式：用默认策略检查信号（不扩展池）
-        for key in active_strategy_keys:
+    elif run_signals and active_strategy_keys:
+        # 快速模式：复用已经晋升的正式参数，不扩展候选池。
+        for key, strategy in zip(active_strategy_keys, active_strategies):
             try:
-                s = get_execution_strategy(key)
                 from core.strategy_pool import StrategyVariant
                 check_variants.append(StrategyVariant(
                     base_key=key, variant_label=key,
-                    strategy=s, params={}, is_default=True,
+                    strategy=strategy,
+                    params={
+                        p["name"]: getattr(strategy, p["name"])
+                        for p in strategy.tunable_params()
+                        if hasattr(strategy, p["name"])
+                    },
+                    is_default=False,
                 ))
             except Exception:
                 pass
+
+    # 条件触发/持仓风控覆盖策略不依赖历史审计通过与否。
+    # 它们用于当前报告生成“还差什么条件”和真实持仓风险提示。
+    if run_signals:
+        try:
+            from core.strategy_pool import StrategyVariant
+            overlay_keys = ["P", "T"]
+            if current_position and current_position.shares > 0:
+                overlay_keys.extend(["Q", "R", "S"])
+            existing_labels = {getattr(v, "variant_label", "") for v in check_variants}
+            for key in overlay_keys:
+                if key in existing_labels:
+                    continue
+                s = get_execution_strategy(key)
+                check_variants.append(StrategyVariant(
+                    base_key=key,
+                    variant_label=key,
+                    strategy=s,
+                    params={},
+                    is_default=True,
+                ))
+        except Exception as e:
+            logger.warning(f"条件/风控覆盖策略加载失败（非致命）: {e}")
 
     # 运行信号检查（快速和完整模式通用）
     if check_variants:
@@ -318,8 +416,11 @@ def run_pipeline(
                 ),
                 final_score=current_fs,
                 current_price=current_price,
+                current_bar=current_bar,
                 account_equity=account_equity,
                 current_position=current_position,
+                health_data=health_data,
+                data_quality=data_quality,
             )
             signal_check_results = [r.to_dict() for r in ranked]
             if plan:
@@ -361,6 +462,7 @@ def run_pipeline(
         strategy_pool=strategy_pool_result,
         operation_plan=operation_plan,
         signal_check=signal_check_results,
+        data_quality=data_quality,
     )
 
 
@@ -878,27 +980,6 @@ def compute_premarket_snapshot(
     lines.append(f"")
     lines.append(f"**ETF 宏观情绪得分**: {futures_score:+.3f}")
     lines.append(f"")
-
-    # ETF 分钟线走势形态 — 仅在数据可用时展示（TickFlow 免费层不支持分钟线）
-    has_kline_data = (nq_kline and len(nq_kline) >= 3) or (es_kline and len(es_kline) >= 3)
-    if has_kline_data:
-        lines.append(f"### ETF 盘前走势（5分钟K线，最近1小时）")
-        lines.append(f"")
-        lines.append(f"| 标的 | 首根K收盘 | 末根K收盘 | 涨跌 | 阳线数/总根数 |")
-        lines.append(f"|------|----------|----------|------|--------------|")
-        for label, kline in [(etf1_label, nq_kline), (etf2_label, es_kline)]:
-            if kline and len(kline) >= 3:
-                closes = [bar.get("c", bar.get("close", 0)) for bar in kline]
-                opens = [bar.get("o", bar.get("open", 0)) for bar in kline]
-                up_bars = sum(1 for i in range(len(kline))
-                              if closes[i] and opens[i] and closes[i] >= opens[i])
-                first_c = closes[0] if closes[0] else opens[0]
-                last_c = closes[-1] if closes[-1] else opens[-1]
-                kline_chg = (last_c - first_c) / first_c * 100 if first_c > 0 else 0
-                lines.append(f"| {label} | {first_c:.2f} | {last_c:.2f} | {kline_chg:+.2f}% | {up_bars}/{len(kline)} |")
-            else:
-                lines.append(f"| {label} | — | — | — | — |")
-        lines.append(f"")
 
     lines.append(f"### 个股盘前")
     lines.append(f"")

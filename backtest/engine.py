@@ -19,10 +19,11 @@ from typing import Optional
 import pandas as pd
 import numpy as np
 
-from strategies.base import BaseExecutionStrategy, StrategyContext, Position
+from strategies.base import BaseExecutionStrategy, StrategyContext, Position, decision_to_orders
 from strategies import get_execution_strategy
 from backtest.broker import Broker, BrokerConfig, Account
 from backtest.analytics import compute_metrics
+from utils.market_rules import get_market_rules
 
 logger = logging.getLogger(__name__)
 
@@ -103,14 +104,23 @@ class BacktestEngine:
         original_limit_up = self.broker.config.limit_up_pct
         original_limit_down = self.broker.config.limit_down_pct
         original_min_shares = self.broker.config.min_shares
+        original_slippage = self.broker.config.slippage
+        original_commission = self.broker.config.commission
+        original_min_commission = self.broker.config.min_commission
+        original_sell_tax = self.broker.config.sell_tax
+        original_t_plus_one = self.broker.config.t_plus_one
 
         # 市场交易规则
-        if market == "US":
-            self.broker.config.limit_up_pct = 999.0
-            self.broker.config.limit_down_pct = 999.0
-            self.broker.config.min_shares = 1
-        else:
-            self.broker.config.min_shares = 100
+        stock_code = str(df["code"].iloc[-1]) if "code" in df.columns else ""
+        rules = get_market_rules(market, code=stock_code)
+        self.broker.config.limit_up_pct = rules.limit_up_pct
+        self.broker.config.limit_down_pct = rules.limit_down_pct
+        self.broker.config.min_shares = rules.lot_size
+        self.broker.config.slippage = rules.slippage
+        self.broker.config.commission = rules.commission
+        self.broker.config.min_commission = rules.min_commission
+        self.broker.config.sell_tax = rules.sell_tax
+        self.broker.config.t_plus_one = rules.t_plus_one
 
         logger.info(f"回测开始: {strategy.name}, {len(df)} 条K线, "
                      f"初始资金={self.config.initial_capital:,.0f}")
@@ -142,7 +152,8 @@ class BacktestEngine:
             )
 
             try:
-                orders = strategy.generate_orders(df.iloc[:i + 1], context)
+                decision = strategy.generate_decision(df.iloc[:i + 1], context)
+                orders = decision_to_orders(decision, context)
             except Exception as e:
                 logger.warning(f"策略 {strategy.name} 在 {t_date} 异常: {e}")
                 orders = []
@@ -159,6 +170,7 @@ class BacktestEngine:
                         "entry_date": fill.date,
                         "entry_price": fill.price,
                         "shares": fill.shares,
+                        "remaining_shares": fill.shares,
                         "signal_date": order.date,
                         "reason": order.reason,
                     })
@@ -167,19 +179,33 @@ class BacktestEngine:
                     )
 
                 elif order.action == "sell":
-                    # 记录卖出明细
                     if account.trades:
                         last_trade = account.trades[-1]
                         if "exit_date" not in last_trade:
-                            last_trade["exit_date"] = fill.date
-                            last_trade["exit_price"] = fill.price
-                            last_trade["exit_reason"] = order.reason
-                            pnl = (fill.price - last_trade["entry_price"]) * last_trade["shares"]
-                            last_trade["pnl"] = round(pnl, 2)
-                            last_trade["return_pct"] = round(
-                                (fill.price - last_trade["entry_price"])
-                                / last_trade["entry_price"] * 100, 2
+                            realized = (fill.price - last_trade["entry_price"]) * fill.shares
+                            last_trade["realized_pnl"] = round(
+                                float(last_trade.get("realized_pnl", 0.0)) + realized, 2
                             )
+                            last_trade["remaining_shares"] = max(
+                                int(last_trade.get("remaining_shares", last_trade["shares"])) - fill.shares,
+                                0,
+                            )
+                            last_trade.setdefault("partial_exits", []).append({
+                                "date": fill.date,
+                                "price": fill.price,
+                                "shares": fill.shares,
+                                "reason": order.reason,
+                            })
+                            if account.position is None:
+                                last_trade["exit_date"] = fill.date
+                                last_trade["exit_price"] = fill.price
+                                last_trade["exit_reason"] = order.reason
+                                last_trade["pnl"] = last_trade["realized_pnl"]
+                                denominator = last_trade["entry_price"] * last_trade["shares"]
+                                last_trade["return_pct"] = round(
+                                    last_trade["pnl"] / denominator * 100 if denominator > 0 else 0.0,
+                                    2,
+                                )
                     cooldown_until = self._calc_cooldown(strategy, i + 1, "sell")
                     logger.debug(
                         f"  [{t1_date}] 卖出 {fill.shares}股 @ {fill.price:.2f} | {order.reason}"
@@ -196,11 +222,14 @@ class BacktestEngine:
                         last_trade["exit_date"] = sf.date
                         last_trade["exit_price"] = sf.price
                         last_trade["exit_reason"] = sf.reason
-                        pnl = (sf.price - last_trade["entry_price"]) * last_trade["shares"]
-                        last_trade["pnl"] = round(pnl, 2)
+                        realized = (sf.price - last_trade["entry_price"]) * sf.shares
+                        total_pnl = float(last_trade.get("realized_pnl", 0.0)) + realized
+                        last_trade["remaining_shares"] = 0
+                        last_trade["pnl"] = round(total_pnl, 2)
+                        denominator = last_trade["entry_price"] * last_trade["shares"]
                         last_trade["return_pct"] = round(
-                            (sf.price - last_trade["entry_price"])
-                            / last_trade["entry_price"] * 100, 2
+                            total_pnl / denominator * 100 if denominator > 0 else 0.0,
+                            2,
                         )
                 logger.info(f"  [{t1_date}] ⚠️ {sf.reason}")
 
@@ -212,19 +241,29 @@ class BacktestEngine:
             last_close = float(df["close"].iloc[-1])
             last_date = str(df["date"].iloc[-1])[:10]
             fill_value = last_close * account.position.shares
-            commission = fill_value * self.config.broker.commission
-            account.cash += fill_value - commission
+            commission = max(
+                fill_value * self.broker.config.commission,
+                self.broker.config.min_commission,
+            )
+            sell_tax = fill_value * self.broker.config.sell_tax
+            account.cash += fill_value - commission - sell_tax
             if account.trades:
                 last_trade = account.trades[-1]
                 if "exit_date" not in last_trade:
                     last_trade["exit_date"] = last_date
                     last_trade["exit_price"] = last_close
                     last_trade["exit_reason"] = "回测结束强制平仓"
-                    pnl = (last_close - last_trade["entry_price"]) * last_trade["shares"]
-                    last_trade["pnl"] = round(pnl, 2)
-                    last_trade["return_pct"] = round(
+                    realized = (
                         (last_close - last_trade["entry_price"])
-                        / last_trade["entry_price"] * 100, 2
+                        * account.position.shares
+                    )
+                    total_pnl = float(last_trade.get("realized_pnl", 0.0)) + realized
+                    last_trade["remaining_shares"] = 0
+                    last_trade["pnl"] = round(total_pnl, 2)
+                    denominator = last_trade["entry_price"] * last_trade["shares"]
+                    last_trade["return_pct"] = round(
+                        total_pnl / denominator * 100 if denominator > 0 else 0.0,
+                        2,
                     )
             account.position = None
             logger.info(f"  [{last_date}] 回测结束，强制平仓 @ {last_close:.2f}")
@@ -233,6 +272,11 @@ class BacktestEngine:
         self.broker.config.limit_up_pct = original_limit_up
         self.broker.config.limit_down_pct = original_limit_down
         self.broker.config.min_shares = original_min_shares
+        self.broker.config.slippage = original_slippage
+        self.broker.config.commission = original_commission
+        self.broker.config.min_commission = original_min_commission
+        self.broker.config.sell_tax = original_sell_tax
+        self.broker.config.t_plus_one = original_t_plus_one
 
         final_equity = account.cash
 

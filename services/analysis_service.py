@@ -13,6 +13,7 @@ UI 层仅需调用 AnalysisService.analyze() 并处理返回结果，
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Callable
 
 import pandas as pd
@@ -53,6 +54,53 @@ def _requires_realtime_token(market: str, mode: str) -> bool:
     if mode == "pre" and market == "A":
         return True
     return False
+
+
+def _single_stock_research_item(
+    info: StockInfo,
+    pipeline_result: PipelineResult,
+    current_price: float | None = None,
+) -> dict:
+    """把 Tab1 单股结果包装成研究员观察模块可消费的结构。"""
+    df = pipeline_result.df
+    marker = {}
+    price = float(current_price or 0)
+    if df is not None and not df.empty:
+        last = df.iloc[-1]
+        recent = df.tail(min(len(df), 120))
+
+        def f(name: str) -> float:
+            value = last.get(name)
+            try:
+                return float(value) if value is not None and pd.notna(value) else 0.0
+            except Exception:
+                return 0.0
+
+        marker = {
+            "open": f("open"),
+            "high": f("high"),
+            "low": f("low"),
+            "close": f("close"),
+            "ma_20": f("ma_20"),
+            "ma_60": f("ma_60"),
+            "ma_120": f("ma_120"),
+            "rsi": f("rsi"),
+            "high_120": float(recent["high"].max()) if "high" in recent.columns and not recent.empty else 0.0,
+        }
+        if price <= 0:
+            price = marker.get("close", 0.0)
+
+    alpha = 0.0
+    if df is not None and "Final_Score" in df.columns and not df["Final_Score"].dropna().empty:
+        alpha = float(df["Final_Score"].dropna().iloc[-1])
+
+    return {
+        "watch_item": SimpleNamespace(code=info.code, name=info.name, market=info.market),
+        "current_price": price,
+        "alpha_score": alpha,
+        "technical_marker": marker,
+        "signal_check": pipeline_result.signal_check or [],
+    }
 
 
 @dataclass
@@ -202,6 +250,8 @@ class AnalysisService:
             depth_available=depth_avail,
             prediction_reliability=max(pred_rel, 0.3) if pred_rel > 0 else 1.0,
             stock_code=code,
+            expand_pool=False,
+            skip_param_tuning=True,
         )
         if _stop(): return self._empty_response(code)
 
@@ -326,19 +376,29 @@ class AnalysisService:
         if not report_content:
             report_content = "报告生成失败，请稍后重试。"
 
-        # ── 执行摘要（插入报告顶部）──
+        # ── 可信度硬摘要 + 执行摘要（插入报告顶部）──
         try:
-            from report.prompts import build_executive_summary
+            from report.prompts import build_executive_summary, build_trust_hard_summary
             sc = pipeline_result.signal_check or []
             fs = float(pipeline_result.df["Final_Score"].dropna().iloc[-1]) if "Final_Score" in pipeline_result.df.columns and not pipeline_result.df["Final_Score"].dropna().empty else 0
             bias = "bullish" if fs > 0.05 else ("bearish" if fs < -0.05 else "neutral")
+            evaluation_panel = Database().get_prediction_evaluation_panel(code)
+            health_report = Database().get_strategy_health_report(code)
+            trust_summary = build_trust_hard_summary(
+                data_quality_reports=getattr(pipeline_result, "data_quality", None),
+                audit_reports=pipeline_result.strategy_audit,
+                signal_checks=sc,
+                prediction_stats=prediction_stats,
+                evaluation_panel=evaluation_panel,
+                health_reports=health_report,
+                scope=f"{info.name}（{code}）",
+            )
             exec_summary = build_executive_summary(
                 audit_report=pipeline_result.strategy_audit,
                 operation_plan_signal_count=(len(sc), sum(1 for s in sc if s.get("signal") == "buy")),
                 market_bias=bias, final_score=fs,
             )
-            if exec_summary:
-                report_content = exec_summary + "\n" + report_content
+            report_content = trust_summary + "\n" + (exec_summary + "\n" if exec_summary else "") + report_content
         except Exception as e:
             logger.warning(f"执行摘要构建失败: {e}")
 
@@ -363,6 +423,44 @@ class AnalysisService:
             else:
                 report_content += "\n" + section_block
 
+        # ── 研究员观察候选池（Tab1 单股）──
+        research_observations = []
+        try:
+            from services.research_observations import (
+                apply_history_feedback,
+                build_research_confirmation_markdown,
+                build_research_history_markdown,
+                confirm_research_observations,
+            )
+            quote_price = None
+            if realtime_quote and realtime_quote.get("latest", 0):
+                quote_price = float(realtime_quote.get("latest") or 0)
+            single_item = _single_stock_research_item(info, pipeline_result, quote_price)
+            research_observations = confirm_research_observations(
+                holdings_data=[],
+                watchlist_data=[single_item],
+                llm_report=report_content,
+            )
+            research_observations = apply_history_feedback(
+                research_observations,
+                lambda obs_code, pattern: db.get_research_observation_stats(
+                    code=obs_code, pattern_type=pattern
+                ),
+            )
+            research_section = build_research_confirmation_markdown(research_observations)
+            if research_section:
+                report_content += "\n\n" + research_section
+            history_section = build_research_history_markdown(
+                research_observations,
+                lambda obs_code, pattern: db.get_research_observation_stats(
+                    code=obs_code, pattern_type=pattern
+                ),
+            )
+            if history_section:
+                report_content += "\n" + history_section
+        except Exception as e:
+            logger.warning(f"单股研究员观察候选池构建失败: {e}")
+
         # ── 预测追踪 + 健康度（报告末尾）──
         unverified = db.get_latest_unverified_prediction(code)
         report_content += self._build_prediction_footer(
@@ -371,9 +469,10 @@ class AnalysisService:
 
         try:
             health = db.get_strategy_health_report(code)
-            if health:
+            candidates = db.get_strategy_param_candidates(code)
+            if health or candidates:
                 from report.prompts import build_strategy_health_section
-                health_section = build_strategy_health_section(health)
+                health_section = build_strategy_health_section(health, candidates)
                 if health_section:
                     report_content += health_section
         except Exception as e:
@@ -384,17 +483,34 @@ class AnalysisService:
         report_id = self._persist_report(info, request.market, request.period,
                                           report_content, chart_path)
 
+        try:
+            if research_observations:
+                from services.research_observations import observations_to_logs
+                for log in observations_to_logs(
+                    research_observations,
+                    market=request.market,
+                    mode=request.mode,
+                    report_id=report_id,
+                    observed_at=datetime.now().isoformat(),
+                ):
+                    db.insert_research_observation(log)
+        except Exception as e:
+            logger.warning(f"单股研究员观察记录入库失败: {e}")
+
         # ---- 9.5 预测追踪：存入预测记录 ----
         try:
             fs = float(pipeline_result.df["Final_Score"].dropna().iloc[-1])
             pp = float(pipeline_result.df["close"].iloc[-1])
             last_date = str(pipeline_result.df["date"].iloc[-1])[:10]
-            plan_entry, plan_stop, plan_strategy = self._prediction_trade_levels(pipeline_result)
+            plan_entry, plan_stop, plan_take_profit, plan_strategy = self._prediction_trade_levels(
+                pipeline_result
+            )
 
             # 整体预测（兼容旧逻辑）
             self._save_prediction(
                 code=code, market=request.market, mode="eod",
                 report_id=report_id,
+                reference_date=last_date,
                 direction=_extract_direction(report_content, fs),
                 final_score=fs,
                 predicted_price=pp,
@@ -402,6 +518,7 @@ class AnalysisService:
                 report_content=report_content,
                 conservative_entry=plan_entry,
                 stop_loss=plan_stop,
+                take_profit=plan_take_profit,
                 strategy_name=plan_strategy,
                 market_regime=getattr(pipeline_result, "market_regime", ""),
             )
@@ -417,6 +534,7 @@ class AnalysisService:
                             self._save_prediction(
                                 code=code, market=request.market, mode="eod",
                                 report_id=report_id,
+                                reference_date=last_date,
                                 direction="bullish",  # 入场 = 看多
                                 final_score=fs,
                                 predicted_price=pp,
@@ -424,6 +542,7 @@ class AnalysisService:
                                 report_content=report_content,
                                 conservative_entry=plan_entry,
                                 stop_loss=plan_stop,
+                                take_profit=plan_take_profit,
                                 strategy_name=strat_key,
                                 market_regime=getattr(pipeline_result, "market_regime", ""),
                             )
@@ -431,6 +550,21 @@ class AnalysisService:
                     pass  # 单策略预测失败不阻塞整体流程
         except Exception as e:
             logger.warning(f"预测写入失败: {e}")
+
+        try:
+            from services.optimization_scheduler import schedule_deep_optimization
+            submitted = schedule_deep_optimization(
+                stock_code=code,
+                market=market_type,
+                df=pipeline_result.df,
+                strategy_keys=pipeline_result.active_strategies,
+                initial_capital=100000.0,
+                news_df=news_df,
+            )
+            if submitted:
+                logger.info(f"{code} 深度参数优化已转入后台，不阻塞报告返回")
+        except Exception as e:
+            logger.warning(f"后台参数优化调度失败（非致命）: {e}")
 
         _progress("分析完成")
         return AnalysisResponse(
@@ -645,16 +779,16 @@ class AnalysisService:
             unverified_count, evaluation_panel=evaluation_panel)
 
     @staticmethod
-
-    @staticmethod
     def _save_prediction(code: str, market: str, mode: str,
                          direction: str, final_score: float,
                          predicted_price: float,
                          prediction_stats=None,
                          report_id: int | None = None,
+                         reference_date: str = "",
                          report_content: str = "",
                          conservative_entry: float = 0.0,
                          stop_loss: float = 0.0,
+                         take_profit: float = 0.0,
                          strategy_name: str = "",
                          market_regime: str = "") -> int | None:
         """写入一条新的预测记录到 prediction_log。"""
@@ -678,11 +812,19 @@ class AnalysisService:
             code=code, market=market, mode=mode,
             report_id=report_id,
             predict_time=_dt.now().isoformat(),
+            reference_date=reference_date,
             direction=direction,
             final_score=final_score,
             predicted_price=predicted_price,
             conservative_entry=entry,
+            entry_mode=(
+                "signal_price" if conservative_entry > 0 and mode == "intraday"
+                else "next_open" if conservative_entry > 0 and mode in ("eod", "pre")
+                else "conditional" if entry > 0
+                else "reference"
+            ),
             stop_loss=stop_loss,
+            take_profit=take_profit,
             verify_after_days=verify_days.get(mode, 5),
             key_reason=f"Final_Score={final_score:+.3f}, status={prediction_stats.status if prediction_stats else 'N/A'}",
             confidence="high" if abs(final_score) > 0.5 else ("medium" if abs(final_score) > 0.2 else "low"),
@@ -696,18 +838,21 @@ class AnalysisService:
             return None
 
     @staticmethod
-    def _prediction_trade_levels(pipeline_result: PipelineResult | None) -> tuple[float, float, str]:
+    def _prediction_trade_levels(
+        pipeline_result: PipelineResult | None,
+    ) -> tuple[float, float, float, str]:
         """从结构化信号检查结果中提取预测跟踪用入场/止损。"""
         if not pipeline_result or not pipeline_result.signal_check:
-            return 0.0, 0.0, ""
+            return 0.0, 0.0, 0.0, ""
         for item in pipeline_result.signal_check:
-            if item.get("signal") == "buy":
+            if item.get("signal") in ("buy", "sell"):
                 return (
                     float(item.get("entry_price") or 0.0),
                     float(item.get("stop_loss") or 0.0),
+                    float(item.get("take_profit") or 0.0),
                     str(item.get("key") or item.get("variant") or ""),
                 )
-        return 0.0, 0.0, ""
+        return 0.0, 0.0, 0.0, ""
 
     # ── SWOT 数据构建 ──
 
@@ -866,6 +1011,10 @@ class AnalysisService:
                     df, news_df=None, market=request.market,
                     w_tech=1.0, w_news=0.0,
                     skip_param_tuning=True,
+                    strategy_names=[],
+                    expand_pool=False,
+                    run_backtests=False,
+                    run_signals=False,
                 )
 
                 latest_score = 0.0
@@ -1099,6 +1248,22 @@ class AnalysisService:
             market=request.market,
             premarket_prediction_json=pre_prediction_data,
         )
+        realtime_decision_df = t1_pipeline_result.df
+        try:
+            from core.signal_check import refresh_realtime_signal_plan
+            realtime_decision_df = refresh_realtime_signal_plan(
+                t1_pipeline_result,
+                market=request.market,
+                current_quote=realtime_quote,
+                account_equity=100000.0,
+                stock_code=code,
+            )
+            logger.info(
+                f"盘中策略已按实时 OHLC 重算：price={snapshot.latest_price:.2f}, "
+                f"signals={len(t1_pipeline_result.signal_check or [])}"
+            )
+        except Exception as e:
+            logger.warning(f"盘中策略实时重算失败，保留T-1条件计划: {e}")
         if _stop(): return self._empty_response(code)
 
         # ---- 5.5. SWOT + 同板块 ----
@@ -1139,9 +1304,9 @@ class AnalysisService:
         t1_sc = getattr(t1_pipeline_result, "signal_check", None) if t1_pipeline_result else None
         t1_sc_list = t1_sc or []
         t1_fs = 0.0
-        if t1_pipeline_result and "Final_Score" in t1_pipeline_result.df.columns:
+        if realtime_decision_df is not None and "Final_Score" in realtime_decision_df.columns:
             try:
-                t1_fs = float(t1_pipeline_result.df["Final_Score"].dropna().iloc[-1])
+                t1_fs = float(realtime_decision_df["Final_Score"].dropna().iloc[-1])
             except Exception:
                 pass
         t1_bias = "bullish" if t1_fs > 0.05 else ("bearish" if t1_fs < -0.05 else "neutral")
@@ -1189,9 +1354,10 @@ class AnalysisService:
 
         try:
             health = db.get_strategy_health_report(code)
-            if health:
+            candidates = db.get_strategy_param_candidates(code)
+            if health or candidates:
                 from report.prompts import build_strategy_health_section
-                sec = build_strategy_health_section(health)
+                sec = build_strategy_health_section(health, candidates)
                 if sec:
                     report_content += sec
         except Exception:
@@ -1206,15 +1372,27 @@ class AnalysisService:
 
         # 预测追踪：写入盘中预测
         try:
-            fs = float(t1_pipeline_result.df["Final_Score"].dropna().iloc[-1]) if t1_pipeline_result and "Final_Score" in t1_pipeline_result.df.columns else 0.0
-            pp = float(t1_pipeline_result.df["close"].iloc[-1]) if t1_pipeline_result else 0.0
+            fs = float(realtime_decision_df["Final_Score"].dropna().iloc[-1]) if realtime_decision_df is not None and "Final_Score" in realtime_decision_df.columns else 0.0
+            pp = float(snapshot.latest_price or 0.0)
+            plan_entry, plan_stop, plan_take_profit, plan_strategy = self._prediction_trade_levels(
+                t1_pipeline_result
+            )
             self._save_prediction(
                 code=code, market=request.market, mode="intraday",
+                reference_date=(
+                    str(t1_pipeline_result.df["date"].iloc[-1])[:10]
+                    if t1_pipeline_result is not None and "date" in t1_pipeline_result.df.columns
+                    else ""
+                ),
                 direction=_extract_direction(report_content, fs),
                 final_score=fs,
                 predicted_price=pp,
                 prediction_stats=prediction_stats,
                 report_content=report_content,
+                conservative_entry=plan_entry,
+                stop_loss=plan_stop,
+                take_profit=plan_take_profit,
+                strategy_name=plan_strategy,
                 market_regime=getattr(t1_pipeline_result, "market_regime", "") if t1_pipeline_result else "",
             )
         except Exception as e:
@@ -1569,9 +1747,10 @@ class AnalysisService:
 
         try:
             health = db.get_strategy_health_report(code)
-            if health:
+            candidates = db.get_strategy_param_candidates(code)
+            if health or candidates:
                 from report.prompts import build_strategy_health_section
-                sec = build_strategy_health_section(health)
+                sec = build_strategy_health_section(health, candidates)
                 if sec:
                     report_content += sec
         except Exception:
@@ -1597,13 +1776,25 @@ class AnalysisService:
         try:
             fs = float(t1_pipeline_result.df["Final_Score"].dropna().iloc[-1]) if t1_pipeline_result and "Final_Score" in t1_pipeline_result.df.columns else 0.0
             pp = float(t1_pipeline_result.df["close"].iloc[-1]) if t1_pipeline_result else 0.0
+            plan_entry, plan_stop, plan_take_profit, plan_strategy = self._prediction_trade_levels(
+                t1_pipeline_result
+            )
             self._save_prediction(
                 code=code, market=request.market, mode="pre",
+                reference_date=(
+                    str(t1_pipeline_result.df["date"].iloc[-1])[:10]
+                    if t1_pipeline_result is not None and "date" in t1_pipeline_result.df.columns
+                    else ""
+                ),
                 direction=_extract_direction(report_content, fs),
                 final_score=fs,
                 predicted_price=pp,
                 prediction_stats=prediction_stats,
                 report_content=report_content,
+                conservative_entry=plan_entry,
+                stop_loss=plan_stop,
+                take_profit=plan_take_profit,
+                strategy_name=plan_strategy,
                 market_regime=getattr(t1_pipeline_result, "market_regime", "") if t1_pipeline_result else "",
             )
         except Exception as e:
@@ -1722,6 +1913,9 @@ class AnalysisService:
                 w_tech=w_tech, w_news=w_news,
                 validation_mode=validation_mode,
                 fundamental_data=fundamental_data,
+                stock_code=code,
+                expand_pool=False,
+                skip_param_tuning=True,
             )
             return pipeline_result
         except Exception as e:

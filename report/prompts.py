@@ -219,6 +219,194 @@ def build_executive_summary(
     return "\n".join(lines)
 
 
+def build_trust_hard_summary(
+    *,
+    data_quality_reports: list[dict] | dict | None = None,
+    audit_reports: list | object | None = None,
+    signal_checks: list[dict] | None = None,
+    prediction_stats=None,
+    evaluation_panel: dict | None = None,
+    health_reports: list[dict] | None = None,
+    scope: str = "单股",
+) -> str:
+    """构建报告顶部可信度硬摘要。
+
+    这个章节只使用代码系统已经计算出的硬指标，不让 LLM 改写结论。
+    """
+
+    def _as_list(value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
+
+    def _dq_dict(item):
+        if not item:
+            return {}
+        if hasattr(item, "to_dict"):
+            return item.to_dict()
+        return dict(item)
+
+    data_quality = [_dq_dict(x) for x in _as_list(data_quality_reports) if x]
+    signals = signal_checks or []
+    health = health_reports or []
+
+    actionable_signals = []
+    relevant_signal_keys: set[tuple[str, str]] = set()
+    relevant_stock_codes: set[str] = set()
+    for signal in signals:
+        action = str(signal.get("signal", signal.get("action", "")) or "").lower()
+        if action not in ("buy", "sell"):
+            continue
+        actionable_signals.append(signal)
+        stock_code = str(signal.get("_stock_code", "") or "")
+        if stock_code:
+            relevant_stock_codes.add(stock_code)
+        for field in ("name", "key", "variant", "strategy_name"):
+            strategy_name = str(signal.get(field, "") or "")
+            if strategy_name:
+                relevant_signal_keys.add((stock_code, strategy_name))
+
+    # 组合报告只让当前可执行信号对应股票的数据质量参与硬评级。
+    rated_data_quality = data_quality
+    if relevant_stock_codes and any(d.get("_stock_code") for d in data_quality):
+        rated_data_quality = [
+            d for d in data_quality if str(d.get("_stock_code", "")) in relevant_stock_codes
+        ] or data_quality
+
+    dq_status_rank = {"ok": 0, "watch": 1, "degraded": 2, "blocked": 3}
+    dq_label = {
+        "ok": "可执行",
+        "watch": "观察执行",
+        "degraded": "降级执行",
+        "blocked": "阻断新开仓",
+    }
+    worst_dq = "unknown"
+    avg_score = None
+    if rated_data_quality:
+        worst_dq = max(
+            (str(x.get("status", "unknown")) for x in rated_data_quality),
+            key=lambda s: dq_status_rank.get(s, 9),
+        )
+        avg_score = sum(float(x.get("score", 0) or 0) for x in rated_data_quality) / max(len(rated_data_quality), 1)
+
+    audit_summary = {"pass": 0, "conditional": 0, "fail": 0, "overfit": 0}
+    for audit in _as_list(audit_reports):
+        if not audit:
+            continue
+        summary = getattr(audit, "summary", None) or (audit.get("summary") if isinstance(audit, dict) else {}) or {}
+        for key in audit_summary:
+            audit_summary[key] += int(summary.get(key, 0) or 0)
+
+    level_counts = {"A": 0, "B": 0, "C": 0, "D": 0}
+    signal_counts = {"buy": 0, "sell": 0, "hold": 0, "watch": 0}
+    for s in signals:
+        level = str(s.get("execution_level", "") or "").upper()
+        if level in level_counts:
+            level_counts[level] += 1
+        action = str(s.get("signal", s.get("action", "")) or "").lower()
+        if action in signal_counts:
+            signal_counts[action] += 1
+
+    health_counts = {"keep": 0, "watch": 0, "demote": 0}
+    relevant_health_counts = {"keep": 0, "watch": 0, "demote": 0}
+    for h in health:
+        action = str(h.get("action", "") or "")
+        if action in health_counts:
+            health_counts[action] += 1
+        health_stock = str(h.get("stock_code", "") or "")
+        health_name = str(h.get("strategy_name", "") or "")
+        is_relevant = any(
+            name == health_name and (not signal_stock or not health_stock or signal_stock == health_stock)
+            for signal_stock, name in relevant_signal_keys
+        )
+        if is_relevant and action in relevant_health_counts:
+            relevant_health_counts[action] += 1
+
+    expectancy = "样本不足"
+    history_count = 0
+    avg_return = None
+    if evaluation_panel:
+        overall = evaluation_panel.get("overall") or {}
+        history_count = int(overall.get("count", 0) or 0)
+        avg_return = float(overall.get("avg_return", 0.0) or 0.0)
+        expectancy = {
+            "positive": "正期望",
+            "negative": "负期望",
+            "insufficient": "样本不足",
+        }.get(overall.get("expectancy", "insufficient"), overall.get("expectancy", "样本不足"))
+    elif prediction_stats:
+        ps = prediction_stats.to_dict() if hasattr(prediction_stats, "to_dict") else prediction_stats
+        history_count = int(ps.get("total_predictions", 0) or 0)
+        if history_count > 0:
+            acc = float(ps.get("direction_accuracy_all", 0) or 0)
+            expectancy = "方向胜率偏高" if acc >= 0.55 else ("方向胜率偏低" if acc < 0.45 else "方向胜率中性")
+
+    blockers = []
+    if worst_dq == "blocked":
+        blockers.append("数据质量阻断")
+    if expectancy == "负期望":
+        blockers.append("历史预测负期望")
+    if relevant_health_counts["demote"] > 0:
+        blockers.append(f"当前信号关联的 {relevant_health_counts['demote']} 个策略已降级")
+    current_overfit = sum(
+        1 for s in actionable_signals
+        if str(s.get("audit", s.get("audit_verdict", "")) or "").upper() == "OVERFIT"
+    )
+    if current_overfit > 0:
+        blockers.append(f"当前信号中 {current_overfit} 个策略疑似过拟合")
+
+    if worst_dq == "blocked":
+        trust_level = "D 数据冲突/禁止新开仓"
+    elif blockers:
+        trust_level = "C 仅观察或小仓验证"
+    elif expectancy in ("正期望", "方向胜率偏高") and level_counts["A"] > 0:
+        trust_level = "A 可执行候选"
+    elif history_count <= 0 or expectancy == "样本不足":
+        trust_level = "B 样本不足，小仓验证"
+    else:
+        trust_level = "B 条件执行"
+
+    lines = [
+        "## 🧱 可信度硬摘要（代码生成）\n",
+        f"> 这部分只来自数据质量、策略审计、历史验证和策略健康度，不由 LLM 生成交易结论。\n",
+        f"- 覆盖范围：**{scope}**",
+        f"- 综合可信等级：**{trust_level}**",
+    ]
+    if avg_score is not None:
+        lines.append(
+            f"- 数据质量：平均 **{avg_score:.0f}/100**，最弱闸门：**{dq_label.get(worst_dq, worst_dq)}**"
+        )
+    else:
+        lines.append("- 数据质量：暂无评分")
+    lines.append(
+        "- 当前信号："
+        f"A级 {level_counts['A']}、B级 {level_counts['B']}、C级 {level_counts['C']}、D级 {level_counts['D']}；"
+        f"买入/加仓 {signal_counts['buy']}、卖出/减仓 {signal_counts['sell']}"
+    )
+    lines.append(
+        "- 样本外审计："
+        f"PASS {audit_summary['pass']}、COND {audit_summary['conditional']}、"
+        f"FAIL {audit_summary['fail']}、OVERFIT {audit_summary['overfit']}"
+    )
+    history_text = f"- 历史验证：{history_count} 次，结论：**{expectancy}**"
+    if avg_return is not None and history_count > 0:
+        history_text += f"，平均方向净收益 {avg_return:+.2%}"
+    lines.append(history_text)
+    if health:
+        lines.append(
+            "- 策略健康："
+            f"保留 {health_counts['keep']}、观察 {health_counts['watch']}、降级 {health_counts['demote']}"
+        )
+        if health_counts["demote"] and not relevant_health_counts["demote"]:
+            lines.append("- 背景提示：存在已降级策略，但与当前可执行信号无关，不降低本次执行等级")
+    if blockers:
+        lines.append(f"- 硬约束提醒：**{'；'.join(blockers)}**")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def build_prediction_footer(code: str, prediction_stats,
                             validated_predictions: list,
                             unverified_count: int = 0,
@@ -241,7 +429,7 @@ def build_prediction_footer(code: str, prediction_stats,
         lines.append("")
 
     if validated_predictions:
-        lines.append("| 预测时间 | 方向 | 预测价 | 建议入场 | 入场触发 | 实际收益 | 正确 |")
+        lines.append("| 预测时间 | 方向 | 预测价 | 建议入场 | 入场触发 | 方向净收益 | 正确 |")
         lines.append("|---------|------|--------|---------|---------|---------|-----|")
         for p in validated_predictions[:5]:
             d = p.to_dict() if hasattr(p, 'to_dict') else p
@@ -282,7 +470,7 @@ def build_prediction_footer(code: str, prediction_stats,
             lines.append(
                 f"- 整体：{overall.get('count', 0)} 次验证，"
                 f"方向正确率 {overall.get('accuracy', 0):.0%}，"
-                f"平均实际收益 {overall.get('avg_return', 0):+.2%}，"
+                f"平均方向净收益 {overall.get('avg_return', 0):+.2%}，"
                 f"结论：**{_status_text(overall.get('expectancy', 'insufficient'))}**"
             )
 
@@ -292,7 +480,7 @@ def build_prediction_footer(code: str, prediction_stats,
             ][:5]
             if by_strategy:
                 lines.append("")
-                lines.append("| 策略 | 验证次数 | 方向正确率 | 平均实际收益 | 期望 |")
+                lines.append("| 策略 | 验证次数 | 方向正确率 | 平均方向净收益 | 期望 |")
                 lines.append("|------|------:|------:|------:|------|")
                 for row in by_strategy:
                     lines.append(
@@ -309,7 +497,7 @@ def build_prediction_footer(code: str, prediction_stats,
             ][:5]
             if by_regime:
                 lines.append("")
-                lines.append("| 行情状态 | 验证次数 | 方向正确率 | 平均实际收益 | 期望 |")
+                lines.append("| 行情状态 | 验证次数 | 方向正确率 | 平均方向净收益 | 期望 |")
                 lines.append("|------|------:|------:|------:|------|")
                 for row in by_regime:
                     lines.append(
@@ -394,25 +582,29 @@ def build_strategy_audit_section(audit_report) -> str:
     return "\n".join(lines)
 
 
-def build_strategy_health_section(health_report: list[dict]) -> str:
+def build_strategy_health_section(
+    health_report: list[dict],
+    param_candidates: list[dict] | None = None,
+) -> str:
     """构建策略健康度追踪章节（持续优化闭环）。
 
     Args:
         health_report: Database.get_strategy_health_report() 的返回值
     """
-    if not health_report:
+    if not health_report and not param_candidates:
         return ""
 
     lines = ["\n---\n", "## 🩺 策略健康度追踪（持续优化闭环）\n"]
-    lines.append("> 基于历史预测验证数据，按策略统计方向正确率。\n")
+    if health_report:
+        lines.append("> 基于新版历史预测验证数据，按策略统计净盈利率、95%置信下界和扣除估算成本后的方向净收益。\n")
 
-    lines.append("| 策略 | 预测次数 | 正确率 | 近期正确率 | 趋势 | 状态 | 建议 |")
-    lines.append("|------|:---:|:---:|:---:|:---:|------|------|")
+        lines.append("| 策略 | 预测次数 | 净盈利率 | 95%下界 | 近期净盈利率 | 方向净收益 | 趋势 | 状态 | 建议 |")
+        lines.append("|------|:---:|:---:|:---:|:---:|:---:|:---:|------|------|")
 
     action_labels = {"keep": "✅ 保留", "watch": "⚠️ 观察", "demote": "🔻 降级"}
     status_labels = {"reliable": "可靠", "unstable": "不稳定", "unreliable": "不可靠"}
 
-    for h in health_report:
+    for h in health_report or []:
         action = action_labels.get(h["action"], h["action"])
         status = status_labels.get(h["status"], h["status"])
         trend_emoji = {"improving": "📈", "stable": "➡️", "declining": "📉"}
@@ -422,7 +614,9 @@ def build_strategy_health_section(health_report: list[dict]) -> str:
             f"| {h['strategy_name'][:20]} "
             f"| {h['total']} "
             f"| {h['accuracy']:.0%} "
+            f"| {float(h.get('confidence_lower_95', 0) or 0):.0%} "
             f"| {h['recent_accuracy']:.0%} "
+            f"| {float(h.get('avg_return', 0) or 0):+.2%} "
             f"| {trend} "
             f"| {status} "
             f"| {action} |"
@@ -430,17 +624,56 @@ def build_strategy_health_section(health_report: list[dict]) -> str:
     lines.append("")
 
     # 建议
-    demotes = [h for h in health_report if h["action"] == "demote"]
-    watches = [h for h in health_report if h["action"] == "watch"]
+    demotes = [h for h in (health_report or []) if h["action"] == "demote"]
+    watches = [h for h in (health_report or []) if h["action"] == "watch"]
     if demotes:
         names = ", ".join(h["strategy_name"][:15] for h in demotes)
-        lines.append(f"⚠️ **建议降级**: {names} — 连续预测准确率低，建议从操作方案中排除，仅在回测表格中参考。")
+        reasons = "；".join(
+            f"{h['strategy_name'][:12]}: {h.get('risk_note') or '历史置信度不足'}"
+            for h in demotes[:3]
+        )
+        lines.append(f"⚠️ **建议降级**: {names} — {reasons}。建议从操作方案中排除，仅在回测表格中参考。")
     if watches:
         names = ", ".join(h["strategy_name"][:15] for h in watches)
-        lines.append(f"👀 **建议观察**: {names} — 近期准确率不稳定，降低其在操作方案中的权重。")
+        reasons = "；".join(
+            f"{h['strategy_name'][:12]}: {h.get('risk_note') or '样本/置信度尚不足'}"
+            for h in watches[:3]
+        )
+        lines.append(f"👀 **建议观察**: {names} — {reasons}。降低其在操作方案中的权重和仓位。")
 
     lines.append("")
-    lines.append("*策略健康度基于 prediction_log 实际预测验证数据，随数据积累持续更新。*\n")
+    if param_candidates:
+        import json
+        status_labels = {
+            "candidate": "观察中",
+            "champion": "已晋升",
+            "superseded": "已替代",
+            "rolled_back": "已回滚",
+            "rejected": "未通过",
+        }
+        lines.extend([
+            "### 参数候选生命周期\n",
+            "> 参数必须在不同数据截止日重复通过 walk-forward，才会替换正式参数。\n",
+            "| 股票 | 策略 | 参数 | 确认 | OOS收益 | OOS夏普 | 交易数 | 状态 |",
+            "|------|------|------|:---:|------:|------:|------:|------|",
+        ])
+        for row in param_candidates[:20]:
+            try:
+                params = json.loads(row.get("params_json") or "{}")
+                params_text = ", ".join(f"{k}={v}" for k, v in params.items()) or "默认"
+            except Exception:
+                params_text = str(row.get("params_json") or "—")
+            lines.append(
+                f"| {row.get('stock_code', '—')} | {row.get('strategy_key', '—')} | "
+                f"{params_text[:32]} | {int(row.get('confirmations', 0) or 0)} | "
+                f"{float(row.get('avg_oos_return', 0) or 0):+.2%} | "
+                f"{float(row.get('avg_oos_sharpe', 0) or 0):.2f} | "
+                f"{int(row.get('oos_trades', 0) or 0)} | "
+                f"{status_labels.get(row.get('status'), row.get('status', '—'))} |"
+            )
+        lines.append("")
+
+    lines.append("*策略健康度与参数候选状态会随新版预测验证和样本外窗口持续更新。*\n")
     return "\n".join(lines)
 
 
@@ -1018,7 +1251,7 @@ f'''**重要**：T-1 报告为自动生成的基础版，缺少 SWOT 和同板�
 
 PORTFOLIO_SYSTEM_PROMPT = """你是一个专业的全持仓分析师和资产配置顾问。请基于下面提供的**真实数据**，为用户生成一份全面的持仓综合分析报告。
 
-你的报告中会**前置**一段「🎯 组合操作方案（代码生成）」——这是量化系统基于策略审计和实时信号自动计算出来的。**你的任务不是重写或替代这个方案，而是翻译它**：把量化语言变成 K 线图语言，解释为什么系统选这些策略、保守和激进方案的差异在哪里、执行时要注意什么风险。
+你的报告中会**前置**一段「🎯 组合操作方案（代码生成）」——这是量化系统基于策略审计、实时信号和组合风控自动计算出来的，其中可能包含「条件触发交易计划」。**你的任务不是重写或替代这个方案，而是翻译它**：把量化语言变成 K 线图语言，解释为什么系统给出这些买入/卖出/持有触发条件、保守和激进方案的差异在哪里、执行时要注意什么风险。
 
 ## 重要规则
 1. **全部使用中文输出** — 如果原始数据中有英文内容，请准确翻译为中文呈现，不得修改原意。
@@ -1028,8 +1261,9 @@ PORTFOLIO_SYSTEM_PROMPT = """你是一个专业的全持仓分析师和资产配
 5. **报告格式** — 使用 Markdown 格式输出。
 6. **每个价位必须是精确数字，不是区间** — 入场价、止损价、止盈价、关键点位，全部给精确到小数点后两位的单一数字。每条价位后面注明它是怎么算出来的。
 7. **禁忌词必须替换为数值描述** — 以下词汇禁止单独出现（必须写出数值标准）：「企稳」「放量」「缩量」「阳线」「阴线」「强势」「弱势」「恐慌性抛售」「探底回升」「回调到位」「确认支撑」。例如不能说「放量阳线企稳后入场」，必须说「当日涨幅 +2.3%、成交量较前5日均量放大40%、价格连续3日未创新低后，在 $935.01 入场」。
-8. **⚠️ 不要自己写调仓方案** — 系统已生成了「🎯 组合操作方案（代码生成）」，包含每只股票的保守/激进策略、关键价位、触发条件。你的第 5 章是**翻译解读**：用通俗语言解释系统方案，帮助用户理解两套方案的含义和风险。不要编造系统方案中没有的价位、股数、操作。
-9. **「调整后持仓结构」表格的成本字段** — 表格必须包含两列成本：①「原始成本（每股）」——美股不摊薄，卖出不影响剩余持仓的每股成本，A股同理；②「摊薄成本（每股）」——将卖出已实现的盈利/亏损摊入剩余持仓后得到的成本价（国内券商常用算法）。计算公式：(该股票总买入成本 - 卖出回收金额) ÷ 剩余股数。表格后加注脚说明两列的区别。
+8. **⚠️ 不要自己写调仓方案** — 系统已生成了「🎯 组合操作方案（代码生成）」，包含每只股票的保守/激进策略、关键价位、触发条件。你的第 5 章是**翻译解读**：用通俗语言解释系统方案，帮助用户理解哪些条件触发买入、哪些条件触发卖出/减仓、哪些条件维持持有。严禁新增系统方案中没有的交易动作、股数、入场价、止损价、调仓比例或调整后持仓结构。
+9. **执行表限制** — 只有当系统方案明确给出买入/卖出/减仓动作和股数时，才允许输出「调整后持仓结构」表格。没有明确动作时，只能输出「待观察清单」和「触发后再执行」，不得自行假设清仓、减仓 50%、买入几股等。
+10. **研究员观察候选** — 你可以在报告末尾提出“观察候选”，但这些不是交易指令。必须使用固定标题 `### 研究员观察候选`，并输出 Markdown 表格，表头必须是：`| 股票 | LLM观察 | 依据 |`。每条观察只描述值得系统复核的事实或机会，不写买入股数/卖出股数/调仓比例。
 
 ## 报告结构
 1. **账户概览** — 账户总资产（现金 + 持仓市值）、各市场持仓结构、行业分布、现金比例、集中度风险
@@ -1041,7 +1275,9 @@ PORTFOLIO_SYSTEM_PROMPT = """你是一个专业的全持仓分析师和资产配
     - 🛡️ 保守方案解读：系统为什么选这些策略？保守方案的逻辑是什么？执行时要注意什么风险？等不到怎么办？
     - 🚀 激进方案解读：系统为什么选这些策略？激进方案的逻辑是什么？比保守多承担了什么风险？错了亏多少？
     - 系统方案中每只股票的价位和策略，解释它们为什么合理（或不合理）——你有权基于自己的分析提出质疑，但必须标注「系统方案建议 X，我的判断是 Y，因为 Z」
+    - 如果系统方案只有「持仓风控提示」或「无买入信号」，你只能解释风险来源和后续观察条件，不得扩展成具体清仓/买入几股的执行方案。
     - **⚠️ 自检规则**：完成解读后，逐只对照第二章和第三章中给出的操作建议，检查你的解读是否与前面的分析一致。如有不一致，必须明确解释原因。
+6. **研究员观察候选** — 只提出值得系统复核的候选观察；后续代码系统会生成「研究员观察 vs 系统确认」章节，对这些观察确认、降级或驳回。
 """
 
 
@@ -1166,27 +1402,19 @@ def build_portfolio_user_prompt(
             lines.append(f"- 技术面摘要：\n{hd['technical']}")
         if hd.get("backtest"):
             bt = hd["backtest"]
-            lines.append("- 策略回测绩效：")
-            for strat_name, result in bt.items():
+            lines.append("- 策略回测绩效（按验证质量仅保留前3项）：")
+            ranked_bt = sorted(
+                bt.items(),
+                key=lambda item: (item[1].sharpe_ratio, item[1].total_return),
+                reverse=True,
+            )[:3]
+            for strat_name, result in ranked_bt:
                 lines.append(
                     f"  - {strat_name}：总收益={result.total_return*100:+.2f}% | "
                     f"年化={result.annual_return*100:+.2f}% | "
                     f"最大回撤={result.max_drawdown*100:.2f}% | "
                     f"夏普={result.sharpe_ratio:.2f} | 交易{result.total_trades}次"
                 )
-                # 附上交易记录
-                if result.trades:
-                    for t in result.trades[:3]:  # 最多3笔
-                        entry_d = t.get("entry_date", "?")
-                        entry_p = t.get("entry_price", 0)
-                        exit_d = t.get("exit_date", "?")
-                        exit_p = t.get("exit_price", 0)
-                        pnl_t = t.get("pnl", 0)
-                        ret_t = t.get("return_pct", 0)
-                        lines.append(
-                            f"    · {entry_d} 买入→{exit_d} 卖出，"
-                            f"盈亏 {pnl_t:+.0f}（{ret_t:+.1f}%）"
-                        )
         if hd.get("news_summary"):
             lines.append(f"- 新闻情感摘要：{hd['news_summary']}")
         # ── 新架构：系统信号 + 审计数据 ──
@@ -1229,26 +1457,19 @@ def build_portfolio_user_prompt(
                 lines.append(f"- 技术面摘要：\n{wd['technical']}")
             if wd.get("backtest"):
                 bt = wd["backtest"]
-                lines.append("- 策略回测绩效：")
-                for strat_name, result in bt.items():
+                lines.append("- 策略回测绩效（按验证质量仅保留前3项）：")
+                ranked_bt = sorted(
+                    bt.items(),
+                    key=lambda item: (item[1].sharpe_ratio, item[1].total_return),
+                    reverse=True,
+                )[:3]
+                for strat_name, result in ranked_bt:
                     lines.append(
                         f"  - {strat_name}：总收益={result.total_return*100:+.2f}% | "
                         f"年化={result.annual_return*100:+.2f}% | "
                         f"最大回撤={result.max_drawdown*100:.2f}% | "
                         f"夏普={result.sharpe_ratio:.2f} | 交易{result.total_trades}次"
                     )
-                    if result.trades:
-                        for t in result.trades[:3]:
-                            entry_d = t.get("entry_date", "?")
-                            entry_p = t.get("entry_price", 0)
-                            exit_d = t.get("exit_date", "?")
-                            exit_p = t.get("exit_price", 0)
-                            pnl_t = t.get("pnl", 0)
-                            ret_t = t.get("return_pct", 0)
-                            lines.append(
-                                f"    · {entry_d} 买入→{exit_d} 卖出，"
-                                f"盈亏 {pnl_t:+.0f}（{ret_t:+.1f}%）"
-                            )
             if wd.get("news_summary"):
                 lines.append(f"- 新闻情感摘要：{wd['news_summary']}")
             # ── 新架构：系统信号 + 审计数据 ──

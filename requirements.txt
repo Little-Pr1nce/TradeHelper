@@ -37,6 +37,7 @@ huggingface_hub>=0.20           # FinBERT 模型缓存
 requests>=2.31.0                # Finnhub API、百度API 等
 
 # ── 报告导出 ──
+markdown-it-py>=3.0.0            # Markdown→HTML 渲染（import 名为 markdown_it，UI 导出 HTML 报告用）
 reportlab>=4.2.0                # PDF 报告导出
 
 # ── 打包工具（开发用，非运行时依赖） ──

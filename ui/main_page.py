@@ -11,6 +11,7 @@
 
 import logging
 import threading
+import time
 from datetime import datetime
 
 import flet as ft
@@ -35,17 +36,18 @@ class MainPage(ft.Container):
         self._report_content = ""
         self._stock_info = None
         self._backtest_results = None
+        self._analysis_started_at = None
 
     # ======================== 按钮样式 ========================
 
     _PANEL_STYLE = {
         "bgcolor": ft.Colors.WHITE,
-        "border_radius": 12,
-        "padding": ft.Padding(28, 24, 28, 24),
+        "border_radius": 8,
+        "padding": ft.Padding(20, 18, 20, 18),
         "shadow": ft.BoxShadow(
-            spread_radius=0, blur_radius=12,
-            color=ft.Colors.with_opacity(0.08, ft.Colors.BLACK),
-            offset=ft.Offset(0, 2),
+            spread_radius=0, blur_radius=8,
+            color=ft.Colors.with_opacity(0.06, ft.Colors.BLACK),
+            offset=ft.Offset(0, 1),
         ),
     }
 
@@ -149,30 +151,30 @@ class MainPage(ft.Container):
         # ── 控制面板（白色卡片） ──
         control_panel = ft.Container(
             **self._PANEL_STYLE,
-            content=ft.Column(spacing=16, controls=[
+            content=ft.Column(spacing=14, controls=[
                 # 标题行
                 ft.Row(
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     controls=[
-                        ft.Text("分析设置", size=18, weight=ft.FontWeight.BOLD),
+                        ft.Column(spacing=2, controls=[
+                            ft.Text("单股分析", size=18, weight=ft.FontWeight.BOLD),
+                            ft.Text("输入标的后生成交易计划、风控条件和完整报告", size=12, color=ft.Colors.GREY_600),
+                        ]),
                         ft.Row(spacing=8, controls=[self._start_btn, self._stop_btn]),
                     ],
                 ),
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
 
-                # 第一行：市场 + 周期 + 分析模式
-                ft.Row(
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                    spacing=16,
-                    controls=[
-                        self._market_dd,
-                        self._period_dd,
-                        self._mode_dd,
-                    ],
-                ),
-
-                # 第二行：搜索框（独占全宽）
+                # 第一行：核心输入
                 self._code_input,
+                # 第二行：参数
+                ft.Row(spacing=12, wrap=True, controls=[
+                    self._market_dd,
+                    self._period_dd,
+                    self._mode_dd,
+                ]),
+                self._progress_row,
+                self._error_text,
             ]),
         )
 
@@ -206,6 +208,7 @@ class MainPage(ft.Container):
             **self._PANEL_STYLE,
             content=ft.Column([
                 ft.Text("K 线图", size=16, weight=ft.FontWeight.BOLD),
+                ft.Divider(height=1, color=ft.Colors.GREY_200),
                 self._chart_image,
             ]),
         )
@@ -214,14 +217,22 @@ class MainPage(ft.Container):
             margin=ft.Margin(0, 16, 0, 0),
             **self._PANEL_STYLE,
             content=ft.Column([
-                ft.Text("分析报告", size=16, weight=ft.FontWeight.BOLD),
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    controls=[
+                        ft.Column(spacing=2, controls=[
+                            ft.Text("分析报告", size=17, weight=ft.FontWeight.BOLD),
+                            ft.Text("先看操作方案，再看技术、基本面、历史验证", size=12, color=ft.Colors.GREY_600),
+                        ]),
+                        self._export_btn,
+                    ],
+                ),
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
                 self._report_view,
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
                 ft.Row(
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    alignment=ft.MainAxisAlignment.END,
                     controls=[
-                        self._export_btn,
                         ft.Row(spacing=8, controls=[
                             self._star_rating,
                             ft.Text("评分", size=13, color=ft.Colors.GREY_600),
@@ -257,17 +268,72 @@ class MainPage(ft.Container):
         )
         self._session_indicator = session_indicator
 
-        # ── 整体布局 ──
-        self.content = ft.Column(
-            scroll=ft.ScrollMode.AUTO, expand=True,
-            spacing=0,
+        # ── 分析工作台：生成报告前显示 ──
+        self._workbench_container = ft.Column(
+            spacing=12,
             controls=[
                 control_panel,
                 session_indicator,
-                self._progress_row,
-                self._error_text,
+            ],
+        )
+
+        # ── 报告阅读模式：生成报告后全宽显示 ──
+        self._back_to_workbench_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=6, controls=[
+                ft.Icon(ft.Icons.ARROW_BACK, size=16),
+                ft.Text("返回分析"),
+            ]),
+            on_click=self._on_back_to_workbench,
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding(14, 10, 14, 10),
+            ),
+        )
+        self._rerun_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=6, controls=[
+                ft.Icon(ft.Icons.REPLAY, size=16),
+                ft.Text("重新分析"),
+            ]),
+            on_click=self._on_start,
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding(14, 10, 14, 10),
+            ),
+        )
+        self._report_page_title = ft.Text("单股分析报告", size=24, weight=ft.FontWeight.BOLD)
+        self._report_page_subtitle = ft.Text(
+            "全宽阅读模式：先看交易计划，再看图表、研究员观察和历史验证",
+            size=13,
+            color=ft.Colors.GREY_600,
+        )
+        self._report_page_container = ft.Container(
+            visible=False,
+            content=ft.Column(spacing=12, controls=[
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    controls=[
+                        ft.Column(spacing=3, controls=[
+                            self._report_page_title,
+                            self._report_page_subtitle,
+                        ]),
+                        ft.Row(spacing=8, controls=[
+                            self._back_to_workbench_btn,
+                            self._rerun_btn,
+                        ]),
+                    ],
+                ),
                 chart_container,
                 report_container,
+            ]),
+        )
+
+        # ── 整体布局 ──
+        self.content = ft.Column(
+            scroll=ft.ScrollMode.AUTO, expand=True,
+            spacing=12,
+            controls=[
+                self._workbench_container,
+                self._report_page_container,
             ],
         )
         self.update_session_indicator()
@@ -335,6 +401,15 @@ class MainPage(ft.Container):
         # 盘前模式不再强制切美股
         pass
 
+    def _on_back_to_workbench(self, e):
+        self._report_page_container.visible = False
+        self._workbench_container.visible = True
+        try:
+            self._report_page_container.update()
+            self._workbench_container.update()
+        except Exception:
+            pass
+
     def _on_start(self, e):
         raw = self._code_input.value.strip()
         if not raw:
@@ -373,6 +448,7 @@ class MainPage(ft.Container):
 
         self._show_error("")
         self._reset_ui()
+        self._analysis_started_at = time.monotonic()
         self._set_running()
         self._progress_row.visible = True
         self._progress_text.value = "正在准备..."
@@ -401,6 +477,8 @@ class MainPage(ft.Container):
         self._report_view.visible = False
         self._chart_container.visible = False
         self._report_container.visible = False
+        self._report_page_container.visible = False
+        self._workbench_container.visible = True
         self._chart_image.visible = False
         self._chart_image.src = ""
         self._export_btn.visible = False
@@ -461,12 +539,17 @@ class MainPage(ft.Container):
     # ======================== UI 更新（线程安全） ========================
 
     async def _update_progress_async(self, text: str):
-        self._progress_text.value = text
+        prefix = ""
+        if self._analysis_started_at:
+            elapsed = max(0, int(time.monotonic() - self._analysis_started_at))
+            prefix = f"已用时 {elapsed//60:02d}:{elapsed%60:02d} · "
+        self._progress_text.value = prefix + text
         self._progress_row.update()
 
     async def _done_async(self):
         self._progress_row.visible = False
         self._progress_row.update()
+        self._analysis_started_at = None
         self._set_idle()
         self.page.update()
 
@@ -496,6 +579,13 @@ class MainPage(ft.Container):
         self._report_view.value = self._report_content
         self._report_view.visible = True
         self._report_view.update()
+        title_parts = []
+        if self._stock_info:
+            title_parts.append(self._stock_info.code)
+            if self._stock_info.name and self._stock_info.name != self._stock_info.code:
+                title_parts.append(self._stock_info.name)
+        self._report_page_title.value = " · ".join(title_parts) + " 分析报告" if title_parts else "单股分析报告"
+        self._report_page_title.update()
         if self._chart_path:
             self._chart_image.src = self._chart_path
             self._chart_image.visible = True
@@ -504,6 +594,10 @@ class MainPage(ft.Container):
             self._chart_container.update()
         self._report_container.visible = True
         self._report_container.update()
+        self._workbench_container.visible = False
+        self._report_page_container.visible = True
+        self._workbench_container.update()
+        self._report_page_container.update()
         self._export_btn.visible = True
         self._export_btn.update()
         self._star_rating.rating = 0
@@ -560,17 +654,21 @@ class MainPage(ft.Container):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{si.name if si else code} 分析报告</title>
 <style>
-  body {{ font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #333; line-height: 1.8; }}
-  h1 {{ border-bottom: 2px solid #2a6496; padding-bottom: 8px; }}
-  h2 {{ color: #2a6496; margin-top: 32px; }}
-  table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
-  th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
-  th {{ background: #2a6496; color: #fff; }}
+  body {{ font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 1120px; margin: 32px auto; padding: 0 24px; color: #263238; line-height: 1.72; background: #fbfcfd; }}
+  h1 {{ border-bottom: 2px solid #1f5f8b; padding-bottom: 8px; margin-top: 0; }}
+  h2 {{ color: #1f5f8b; margin-top: 34px; padding-bottom: 6px; border-bottom: 1px solid #d8e2ec; }}
+  h3 {{ margin-top: 24px; padding-left: 10px; border-left: 4px solid #1f5f8b; color: #25465f; }}
+  h4 {{ margin-top: 18px; color: #334; }}
+  table {{ border-collapse: collapse; display: block; width: 100%; margin: 14px 0 20px; overflow-x: auto; font-size: 14px; background: #fff; }}
+  th, td {{ border: 1px solid #d7dde5; padding: 8px 10px; text-align: left; vertical-align: top; min-width: 72px; }}
+  td {{ word-break: break-word; }}
+  th {{ background: #1f5f8b; color: #fff; }}
   tr:nth-child(even) {{ background: #f5f7fa; }}
-  blockquote {{ border-left: 3px solid #2a6496; padding-left: 16px; color: #666; margin: 12px 0; }}
+  blockquote {{ border-left: 3px solid #1f5f8b; padding: 8px 14px; color: #4f5b62; margin: 12px 0; background: #f4f8fb; }}
+  li {{ margin: 4px 0; }}
   code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
   pre {{ background: #f5f5f5; padding: 16px; border-radius: 6px; overflow-x: auto; }}
-  img {{ max-width: 100%; }}
+  img {{ max-width: 100%; border: 1px solid #dfe5ec; border-radius: 6px; background: #fff; }}
 </style>
 </head>
 <body>

@@ -41,16 +41,17 @@ def calc_ma(df: pd.DataFrame, periods: list[int] | None = None) -> pd.DataFrame:
       - MA10: 双周线
       - MA20: 月线（中期趋势，常用于回测策略）
       - MA60: 季线（长期趋势参考）
+      - MA120: 半年线（中长期支撑/压力参考）
 
     Args:
         df: 包含 close 列的 DataFrame
-        periods: 均线周期列表，默认 [5, 10, 20, 60]
+        periods: 均线周期列表，默认 [5, 10, 20, 60, 120]
 
     Returns:
-        添加了 ma_5, ma_10, ma_20, ma_60 列的 DataFrame
+        添加了 ma_5, ma_10, ma_20, ma_60, ma_120 列的 DataFrame
     """
     if periods is None:
-        periods = [5, 10, 20, 60]
+        periods = [5, 10, 20, 60, 120]
     result = df.copy()
     for p in periods:
         if len(result) >= p:
@@ -291,7 +292,13 @@ def summarize(df: pd.DataFrame, name: str = "") -> str:
 
     # ---- 均线系统 ----
     lines.append("### 均线系统")
-    ma_fields = [("ma_5", "5日均线"), ("ma_10", "10日均线"), ("ma_20", "20日均线")]
+    ma_fields = [
+        ("ma_5", "5日均线"),
+        ("ma_10", "10日均线"),
+        ("ma_20", "20日均线"),
+        ("ma_60", "60日均线"),
+        ("ma_120", "120日均线"),
+    ]
     for field, label in ma_fields:
         if field in df.columns and pd.notna(last.get(field)):
             val = last[field]

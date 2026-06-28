@@ -10,6 +10,7 @@
 
 import logging
 import threading
+import time
 from datetime import datetime
 
 import flet as ft
@@ -31,17 +32,20 @@ class PortfolioPage(ft.Container):
         self._service = PortfolioService()
         self._current_report_id = None
         self._report_content = ""
+        self._analysis_started_at = None
+        self._editing_holding_id = None
+        self._active_editor_tab = "holdings"
 
     # ======================== 样式 ========================
 
     _PANEL_STYLE = {
         "bgcolor": ft.Colors.WHITE,
-        "border_radius": 12,
-        "padding": ft.Padding(28, 24, 28, 24),
+        "border_radius": 8,
+        "padding": ft.Padding(20, 18, 20, 18),
         "shadow": ft.BoxShadow(
-            spread_radius=0, blur_radius=12,
-            color=ft.Colors.with_opacity(0.08, ft.Colors.BLACK),
-            offset=ft.Offset(0, 2),
+            spread_radius=0, blur_radius=8,
+            color=ft.Colors.with_opacity(0.06, ft.Colors.BLACK),
+            offset=ft.Offset(0, 1),
         ),
     }
 
@@ -52,12 +56,12 @@ class PortfolioPage(ft.Container):
         balance = self._service.get_balance()
         self._us_balance = ft.TextField(
             label="美股可用资金 (USD)", value=str(balance.us_balance),
-            width=320, border_radius=8,
+            width=250, border_radius=8,
             keyboard_type=ft.KeyboardType.NUMBER,
         )
         self._a_balance = ft.TextField(
             label="A股可用资金 (CNY)", value=str(balance.a_balance),
-            width=320, border_radius=8,
+            width=250, border_radius=8,
             keyboard_type=ft.KeyboardType.NUMBER,
         )
         save_balance_btn = ft.IconButton(
@@ -68,8 +72,8 @@ class PortfolioPage(ft.Container):
         balance_panel = ft.Container(
             **self._PANEL_STYLE,
             content=ft.Column(spacing=12, controls=[
-                ft.Text("💰 账户资金", size=18, weight=ft.FontWeight.BOLD),
-                ft.Row(spacing=16, controls=[
+                ft.Text("账户资金", size=17, weight=ft.FontWeight.BOLD),
+                ft.Row(spacing=10, wrap=True, controls=[
                     self._us_balance,
                     self._a_balance,
                     save_balance_btn,
@@ -81,19 +85,19 @@ class PortfolioPage(ft.Container):
         self._holdings_list = ft.Column(spacing=6)
         # 添加持仓行（顺序与表头一致：市场 → 代码 → 名称 → 股数 → 成本价 → 按钮）
         self._h_market_dd = ft.Dropdown(
-            width=110, value="US",
+            width=100, value="US",
             options=[
                 ft.dropdown.Option("US", "美股"),
                 ft.dropdown.Option("A", "A股"),
             ],
         )
         self._h_code_input = ft.TextField(
-            label="代码", hint_text="如 AAPL", width=170, border_radius=8,
+            label="代码", hint_text="AAPL", width=118, border_radius=8,
             on_change=self._on_h_code_change,
         )
-        self._h_name_text = ft.Text("", size=13, width=220, color=ft.Colors.GREY_600)
-        self._h_shares = ft.TextField(label="股数", value="0", width=150, border_radius=8)
-        self._h_cost = ft.TextField(label="成本价", value="0.00", width=160, border_radius=8)
+        self._h_name_text = ft.Text("", size=13, width=130, color=ft.Colors.GREY_600)
+        self._h_shares = ft.TextField(label="股数", value="0", width=96, border_radius=8)
+        self._h_cost = ft.TextField(label="成本价", value="0.00", width=106, border_radius=8)
         self._h_add_btn = ft.IconButton(
             icon=ft.Icons.ADD_CIRCLE, tooltip="添加持仓",
             on_click=self._on_add_holding,
@@ -103,20 +107,20 @@ class PortfolioPage(ft.Container):
         holdings_panel = ft.Container(
             **self._PANEL_STYLE,
             content=ft.Column(spacing=12, controls=[
-                ft.Text("📊 当前持仓", size=18, weight=ft.FontWeight.BOLD),
+                ft.Text("当前持仓", size=17, weight=ft.FontWeight.BOLD),
                 # 表头
                 ft.Row(spacing=0, controls=[
-                    ft.Container(ft.Text("市场", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=90),
-                    ft.Container(ft.Text("代码", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=150),
-                    ft.Container(ft.Text("名称", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=240),
-                    ft.Container(ft.Text("股数", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=150),
-                    ft.Container(ft.Text("成本价", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=160),
-                    ft.Container(ft.Text("操作", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=60),
+                    ft.Container(ft.Text("市场", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=64),
+                    ft.Container(ft.Text("代码", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=104),
+                    ft.Container(ft.Text("名称", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=150),
+                    ft.Container(ft.Text("股数", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=92),
+                    ft.Container(ft.Text("成本价", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=98),
+                    ft.Container(ft.Text("操作", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=92),
                 ]),
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
                 self._holdings_list,
                 # 添加行（顺序与表头对齐）
-                ft.Row(spacing=12, controls=[
+                ft.Row(spacing=8, wrap=True, controls=[
                     self._h_market_dd,
                     self._h_code_input,
                     self._h_name_text,
@@ -131,17 +135,17 @@ class PortfolioPage(ft.Container):
         self._watchlist_list = ft.Column(spacing=6)
         # 添加关注行（顺序与表头一致：市场 → 代码 → 名称 → 按钮）
         self._w_market_dd = ft.Dropdown(
-            width=110, value="US",
+            width=100, value="US",
             options=[
                 ft.dropdown.Option("US", "美股"),
                 ft.dropdown.Option("A", "A股"),
             ],
         )
         self._w_code_input = ft.TextField(
-            label="代码", hint_text="如 NVDA", width=170, border_radius=8,
+            label="代码", hint_text="NVDA", width=118, border_radius=8,
             on_change=self._on_w_code_change,
         )
-        self._w_name_text = ft.Text("", size=13, width=240, color=ft.Colors.GREY_600)
+        self._w_name_text = ft.Text("", size=13, width=180, color=ft.Colors.GREY_600)
         self._w_add_btn = ft.IconButton(
             icon=ft.Icons.ADD_CIRCLE, tooltip="添加关注",
             on_click=self._on_add_watch,
@@ -151,18 +155,18 @@ class PortfolioPage(ft.Container):
         watchlist_panel = ft.Container(
             **self._PANEL_STYLE,
             content=ft.Column(spacing=12, controls=[
-                ft.Text("⭐ 关注股票", size=18, weight=ft.FontWeight.BOLD),
+                ft.Text("关注股票", size=17, weight=ft.FontWeight.BOLD),
                 # 表头
                 ft.Row(spacing=0, controls=[
-                    ft.Container(ft.Text("市场", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=90),
-                    ft.Container(ft.Text("代码", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=150),
-                    ft.Container(ft.Text("名称", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=320),
-                    ft.Container(ft.Text("操作", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=60),
+                    ft.Container(ft.Text("市场", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=64),
+                    ft.Container(ft.Text("代码", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=104),
+                    ft.Container(ft.Text("名称", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=240),
+                    ft.Container(ft.Text("操作", size=12, weight=ft.FontWeight.W_600, color=ft.Colors.GREY_600), width=42),
                 ]),
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
                 self._watchlist_list,
                 # 添加行（顺序与表头对齐：市场 → 代码 → 名称 → 按钮）
-                ft.Row(spacing=12, controls=[
+                ft.Row(spacing=8, wrap=True, controls=[
                     self._w_market_dd,
                     self._w_code_input,
                     self._w_name_text,
@@ -239,18 +243,55 @@ class PortfolioPage(ft.Container):
         analysis_panel = ft.Container(
             **self._PANEL_STYLE,
             content=ft.Column(spacing=16, controls=[
-                ft.Text("🔬 分析设置", size=18, weight=ft.FontWeight.BOLD),
-                ft.Row(spacing=16, controls=[
-                    ft.Text("分析市场:", size=14, weight=ft.FontWeight.W_500),
-                    self._market_toggle,
-                ]),
-                ft.Row(spacing=16, controls=[
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    controls=[
+                        ft.Column(spacing=2, controls=[
+                            ft.Text("组合分析", size=18, weight=ft.FontWeight.BOLD),
+                            ft.Text("先生成可执行计划，再阅读历史评估和完整报告", size=12, color=ft.Colors.GREY_600),
+                        ]),
+                        self._start_btn,
+                    ],
+                ),
+                ft.Row(spacing=12, wrap=True, controls=[
+                    ft.Container(content=self._market_toggle),
                     self._period_dd,
                     self._mode_dd,
-                    self._start_btn,
                 ]),
                 self._progress_row,
                 self._error_text,
+            ]),
+        )
+
+        # ── 历史预测评估面板 ──
+        self._evaluation_view = ft.Markdown(
+            value="",
+            selectable=True,
+            extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
+        )
+        self._evaluation_refresh_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=6, controls=[
+                ft.Icon(ft.Icons.REFRESH, size=16),
+                ft.Text("刷新评估"),
+            ]),
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding(14, 10, 14, 10),
+            ),
+            on_click=self._on_refresh_evaluation,
+        )
+        self._evaluation_container = ft.Container(
+            **self._PANEL_STYLE,
+            content=ft.Column(spacing=12, controls=[
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    controls=[
+                        ft.Text("历史预测评估", size=17, weight=ft.FontWeight.BOLD),
+                        self._evaluation_refresh_btn,
+                    ],
+                ),
+                ft.Divider(height=1, color=ft.Colors.GREY_200),
+                self._evaluation_view,
             ]),
         )
 
@@ -281,14 +322,22 @@ class PortfolioPage(ft.Container):
             margin=ft.Margin(0, 16, 0, 0),
             **self._PANEL_STYLE,
             content=ft.Column([
-                ft.Text("📋 综合分析报告", size=18, weight=ft.FontWeight.BOLD),
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    controls=[
+                        ft.Column(spacing=2, controls=[
+                            ft.Text("报告正文", size=18, weight=ft.FontWeight.BOLD),
+                            ft.Text("先看顶部操作方案，再看研究员观察和历史验证", size=12, color=ft.Colors.GREY_600),
+                        ]),
+                        self._export_btn,
+                    ],
+                ),
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
                 self._report_view,
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
                 ft.Row(
-                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    alignment=ft.MainAxisAlignment.END,
                     controls=[
-                        self._export_btn,
                         ft.Row(spacing=8, controls=[
                             self._star_rating,
                             ft.Text("评分", size=13, color=ft.Colors.GREY_600),
@@ -298,17 +347,114 @@ class PortfolioPage(ft.Container):
             ]),
         )
 
-        # ── 整页布局 ──
+        # ── 编辑工作台：生成报告前显示 ──
+        self._tab_holdings_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=6, controls=[
+                ft.Icon(ft.Icons.ACCOUNT_BALANCE_WALLET, size=16),
+                ft.Text("账户与持仓"),
+            ]),
+            on_click=lambda e: self._select_editor_tab("holdings"),
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+        )
+        self._tab_watchlist_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=6, controls=[
+                ft.Icon(ft.Icons.STAR, size=16),
+                ft.Text("关注股票"),
+            ]),
+            on_click=lambda e: self._select_editor_tab("watchlist"),
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+        )
+        self._tab_evaluation_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=6, controls=[
+                ft.Icon(ft.Icons.INSIGHTS, size=16),
+                ft.Text("历史评估"),
+            ]),
+            on_click=lambda e: self._select_editor_tab("evaluation"),
+            style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=8)),
+        )
+        self._holdings_tab_container = ft.Container(
+            content=ft.Column(spacing=14, controls=[balance_panel, holdings_panel]),
+        )
+        self._watchlist_tab_container = ft.Container(content=watchlist_panel, visible=False)
+        self._evaluation_tab_container = ft.Container(content=self._evaluation_container, visible=False)
+        self._editor_container = ft.Column(
+            spacing=14,
+            controls=[
+                analysis_panel,
+                ft.Row(
+                    spacing=10,
+                    wrap=True,
+                    controls=[
+                        self._tab_holdings_btn,
+                        self._tab_watchlist_btn,
+                        self._tab_evaluation_btn,
+                    ],
+                ),
+                self._holdings_tab_container,
+                self._watchlist_tab_container,
+                self._evaluation_tab_container,
+            ],
+        )
+        self._update_editor_tab_buttons()
+
+        # ── 报告阅读模式：生成报告后全宽显示 ──
+        self._back_to_editor_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=6, controls=[
+                ft.Icon(ft.Icons.ARROW_BACK, size=16),
+                ft.Text("返回编辑"),
+            ]),
+            on_click=self._on_back_to_editor,
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding(14, 10, 14, 10),
+            ),
+        )
+        self._rerun_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=6, controls=[
+                ft.Icon(ft.Icons.REPLAY, size=16),
+                ft.Text("重新分析"),
+            ]),
+            on_click=self._on_analyze,
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding(14, 10, 14, 10),
+            ),
+        )
+        self._report_page_container = ft.Container(
+            visible=False,
+            content=ft.Column(spacing=12, controls=[
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    controls=[
+                        ft.Column(spacing=3, controls=[
+                            ft.Text("综合分析报告", size=24, weight=ft.FontWeight.BOLD),
+                            ft.Text("全宽阅读模式：先看一分钟操作台，再看条件触发计划", size=13, color=ft.Colors.GREY_600),
+                        ]),
+                        ft.Row(spacing=8, controls=[
+                            self._back_to_editor_btn,
+                            self._rerun_btn,
+                        ]),
+                    ],
+                ),
+                self._report_container,
+            ]),
+        )
+
         self.content = ft.Column(
             scroll=ft.ScrollMode.AUTO, expand=True,
-            spacing=16,
+            spacing=14,
             controls=[
-                ft.Text("我的持仓", size=24, weight=ft.FontWeight.BOLD),
-                balance_panel,
-                holdings_panel,
-                watchlist_panel,
-                analysis_panel,
-                self._report_container,
+                ft.Row(
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    controls=[
+                        ft.Column(spacing=3, controls=[
+                            ft.Text("我的持仓", size=24, weight=ft.FontWeight.BOLD),
+                            ft.Text("录入账户和标的后，在右侧生成组合级交易计划", size=13, color=ft.Colors.GREY_600),
+                        ]),
+                    ],
+                ),
+                self._editor_container,
+                self._report_page_container,
             ],
         )
 
@@ -323,12 +469,14 @@ class PortfolioPage(ft.Container):
             self._update_market_buttons()
         except Exception:
             pass
+        self._load_evaluation_panel()
 
     # ======================== 市场切换 ========================
 
     def _select_market(self, market: str):
         self._selected_market = market
         self._update_market_buttons()
+        self._load_evaluation_panel()
 
     def _update_market_buttons(self):
         us_active = self._selected_market == "US"
@@ -347,6 +495,70 @@ class PortfolioPage(ft.Container):
             self._a_btn.update()
         except Exception:
             pass  # 控件尚未挂载到页面
+
+    # ======================== 编辑区切换 ========================
+
+    def _select_editor_tab(self, name: str):
+        self._active_editor_tab = name
+        self._holdings_tab_container.visible = name == "holdings"
+        self._watchlist_tab_container.visible = name == "watchlist"
+        self._evaluation_tab_container.visible = name == "evaluation"
+        self._update_editor_tab_buttons()
+        try:
+            self._holdings_tab_container.update()
+            self._watchlist_tab_container.update()
+            self._evaluation_tab_container.update()
+        except Exception:
+            pass
+
+    def _update_editor_tab_buttons(self):
+        active = self._active_editor_tab
+
+        def style_for(name: str):
+            is_active = active == name
+            return ft.ButtonStyle(
+                bgcolor={"": ft.Colors.BLUE_700 if is_active else ft.Colors.GREY_200},
+                color={"": ft.Colors.WHITE if is_active else ft.Colors.GREY_700},
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding(14, 10, 14, 10),
+            )
+
+        self._tab_holdings_btn.style = style_for("holdings")
+        self._tab_watchlist_btn.style = style_for("watchlist")
+        self._tab_evaluation_btn.style = style_for("evaluation")
+        try:
+            self._tab_holdings_btn.update()
+            self._tab_watchlist_btn.update()
+            self._tab_evaluation_btn.update()
+        except Exception:
+            pass
+
+    def _on_back_to_editor(self, e):
+        self._report_page_container.visible = False
+        self._editor_container.visible = True
+        try:
+            self._report_page_container.update()
+            self._editor_container.update()
+        except Exception:
+            pass
+
+    # ======================== 历史预测评估 ========================
+
+    def _load_evaluation_panel(self):
+        try:
+            self._evaluation_view.value = self._service.build_historical_evaluation_panel(self._selected_market)
+            self._evaluation_view.update()
+        except Exception as ex:
+            logger.warning(f"历史预测评估面板加载失败: {ex}")
+            self._evaluation_view.value = f"### 历史预测评估面板\n\n- 加载失败：{ex}"
+            try:
+                self._evaluation_view.update()
+            except Exception:
+                pass
+
+    def _on_refresh_evaluation(self, e):
+        self._load_evaluation_panel()
+        self._show_snack("历史预测评估已刷新", "blue")
 
     # ======================== 余额保存 ========================
 
@@ -375,18 +587,66 @@ class PortfolioPage(ft.Container):
 
     def _build_holding_row(self, h) -> ft.Row:
         market_label = "美股" if h.market == "US" else "A股"
+        if self._editing_holding_id == h.id:
+            shares_field = ft.TextField(
+                value=f"{h.shares:g}",
+                width=86,
+                height=38,
+                dense=True,
+                content_padding=ft.Padding(8, 6, 8, 6),
+                keyboard_type=ft.KeyboardType.NUMBER,
+            )
+            cost_field = ft.TextField(
+                value=f"{h.cost_price:.2f}",
+                width=92,
+                height=38,
+                dense=True,
+                content_padding=ft.Padding(8, 6, 8, 6),
+                keyboard_type=ft.KeyboardType.NUMBER,
+            )
+            return ft.Row(spacing=0, controls=[
+                ft.Container(ft.Text(market_label, size=13, weight=ft.FontWeight.W_500), width=64),
+                ft.Container(ft.Text(h.code, size=13, weight=ft.FontWeight.BOLD), width=104),
+                ft.Container(ft.Text(h.name, size=13, overflow=ft.TextOverflow.ELLIPSIS), width=150),
+                ft.Container(shares_field, width=92),
+                ft.Container(cost_field, width=98),
+                ft.Row(spacing=0, controls=[
+                    ft.IconButton(
+                        icon=ft.Icons.CHECK, icon_size=18,
+                        icon_color=ft.Colors.GREEN_700,
+                        tooltip="保存",
+                        on_click=lambda e, holding=h, sf=shares_field, cf=cost_field:
+                            self._on_save_holding_edit(holding, sf.value, cf.value),
+                    ),
+                    ft.IconButton(
+                        icon=ft.Icons.CLOSE, icon_size=18,
+                        icon_color=ft.Colors.GREY_600,
+                        tooltip="取消",
+                        on_click=self._on_cancel_holding_edit,
+                    ),
+                ], width=92),
+            ])
+
         return ft.Row(spacing=0, controls=[
-            ft.Container(ft.Text(market_label, size=13, weight=ft.FontWeight.W_500), width=90),
-            ft.Container(ft.Text(h.code, size=13, weight=ft.FontWeight.BOLD), width=150),
-            ft.Container(ft.Text(h.name, size=13), width=240),
-            ft.Container(ft.Text(f"{h.shares:,.0f}", size=13), width=150),
-            ft.Container(ft.Text(f"{h.cost_price:.2f}", size=13), width=160),
-            ft.IconButton(
-                icon=ft.Icons.DELETE, icon_size=18,
-                icon_color=ft.Colors.RED_400,
-                tooltip="删除",
-                on_click=lambda e, hid=h.id: self._on_delete_holding(hid),
-            ),
+            ft.Container(ft.Text(market_label, size=13, weight=ft.FontWeight.W_500), width=64),
+            ft.Container(ft.Text(h.code, size=13, weight=ft.FontWeight.BOLD), width=104),
+            ft.Container(ft.Text(h.name, size=13, overflow=ft.TextOverflow.ELLIPSIS), width=150),
+            ft.Container(ft.Text(f"{h.shares:,.0f}", size=13), width=92),
+            ft.Container(ft.Text(f"{h.cost_price:.2f}", size=13), width=98),
+            ft.Row(spacing=0, controls=[
+                ft.IconButton(
+                    icon=ft.Icons.EDIT, icon_size=18,
+                    icon_color=ft.Colors.BLUE_700,
+                    tooltip="编辑股数和成本价",
+                    on_click=lambda e, hid=h.id: self._on_edit_holding(hid),
+                ),
+                ft.IconButton(
+                    icon=ft.Icons.DELETE, icon_size=18,
+                    icon_color=ft.Colors.RED_400,
+                    tooltip="删除",
+                    on_click=lambda e, hid=h.id: self._on_delete_holding(hid),
+                ),
+            ], width=92),
         ])
 
     async def _on_h_code_change(self, e):
@@ -436,8 +696,40 @@ class PortfolioPage(ft.Container):
 
     def _on_delete_holding(self, holding_id: int | None):
         if holding_id:
+            if self._editing_holding_id == holding_id:
+                self._editing_holding_id = None
             self._service.delete_holding(holding_id)
             self._load_holdings()
+
+    def _on_edit_holding(self, holding_id: int | None):
+        if not holding_id:
+            return
+        self._editing_holding_id = holding_id
+        self._load_holdings()
+
+    def _on_cancel_holding_edit(self, e):
+        self._editing_holding_id = None
+        self._load_holdings()
+
+    def _on_save_holding_edit(self, holding, shares_value: str, cost_value: str):
+        try:
+            shares = float(shares_value or 0)
+            cost = float(cost_value or 0)
+        except ValueError:
+            self._show_snack("股数和成本价请输入有效数字", "orange")
+            return
+        if shares <= 0:
+            self._show_snack("股数必须大于 0；清仓请使用删除", "orange")
+            return
+        if cost < 0:
+            self._show_snack("成本价不能小于 0", "orange")
+            return
+        self._service.add_or_update_holding(
+            holding.code, holding.name, holding.market, shares, cost
+        )
+        self._editing_holding_id = None
+        self._load_holdings()
+        self._show_snack(f"{holding.code} 持仓已更新", "green")
 
     # ======================== 关注 CRUD ========================
 
@@ -456,9 +748,9 @@ class PortfolioPage(ft.Container):
     def _build_watch_row(self, w) -> ft.Row:
         market_label = "美股" if w.market == "US" else "A股"
         return ft.Row(spacing=0, controls=[
-            ft.Container(ft.Text(market_label, size=13, weight=ft.FontWeight.W_500), width=90),
-            ft.Container(ft.Text(w.code, size=13, weight=ft.FontWeight.BOLD), width=150),
-            ft.Container(ft.Text(w.name, size=13), width=320),
+            ft.Container(ft.Text(market_label, size=13, weight=ft.FontWeight.W_500), width=64),
+            ft.Container(ft.Text(w.code, size=13, weight=ft.FontWeight.BOLD), width=104),
+            ft.Container(ft.Text(w.name, size=13, overflow=ft.TextOverflow.ELLIPSIS), width=240),
             ft.IconButton(
                 icon=ft.Icons.DELETE, icon_size=18,
                 icon_color=ft.Colors.RED_400,
@@ -524,6 +816,7 @@ class PortfolioPage(ft.Container):
             return
 
         self._reset_report_ui()
+        self._analysis_started_at = time.monotonic()
         self._start_btn.disabled = True
         self._start_btn.update()
         self._progress_row.visible = True
@@ -546,6 +839,8 @@ class PortfolioPage(ft.Container):
         self._report_view.value = ""
         self._report_view.visible = False
         self._report_container.visible = False
+        self._report_page_container.visible = False
+        self._editor_container.visible = True
         self._export_btn.visible = False
         self._star_rating.visible = False
         self._star_rating.rating = 0
@@ -577,7 +872,11 @@ class PortfolioPage(ft.Container):
                 pass
 
     async def _update_progress_async(self, text: str):
-        self._progress_text.value = text
+        prefix = ""
+        if self._analysis_started_at:
+            elapsed = max(0, int(time.monotonic() - self._analysis_started_at))
+            prefix = f"已用时 {elapsed//60:02d}:{elapsed%60:02d} · "
+        self._progress_text.value = prefix + text
         self._progress_row.update()
 
     async def _show_results_async(self, result: dict):
@@ -590,6 +889,10 @@ class PortfolioPage(ft.Container):
         self._report_view.update()
         self._report_container.visible = True
         self._report_container.update()
+        self._editor_container.visible = False
+        self._report_page_container.visible = True
+        self._editor_container.update()
+        self._report_page_container.update()
         self._export_btn.visible = True
         self._export_btn.update()
         self._star_rating.rating = 0
@@ -604,6 +907,7 @@ class PortfolioPage(ft.Container):
     async def _done_async(self):
         self._progress_row.visible = False
         self._progress_row.update()
+        self._analysis_started_at = None
         self._start_btn.disabled = False
         self._start_btn.update()
         self.page.update()
@@ -644,14 +948,18 @@ class PortfolioPage(ft.Container):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>持仓综合分析报告</title>
 <style>
-  body {{ font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #333; line-height: 1.8; }}
-  h1 {{ border-bottom: 2px solid #2a6496; padding-bottom: 8px; }}
-  h2 {{ color: #2a6496; margin-top: 32px; }}
-  table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
-  th, td {{ border: 1px solid #ddd; padding: 8px 12px; text-align: left; }}
-  th {{ background: #2a6496; color: #fff; }}
+  body {{ font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; max-width: 1200px; margin: 32px auto; padding: 0 24px; color: #263238; line-height: 1.72; background: #fbfcfd; }}
+  h1 {{ border-bottom: 2px solid #1f5f8b; padding-bottom: 8px; margin-top: 0; }}
+  h2 {{ color: #1f5f8b; margin-top: 34px; padding-bottom: 6px; border-bottom: 1px solid #d8e2ec; }}
+  h3 {{ margin-top: 24px; padding-left: 10px; border-left: 4px solid #1f5f8b; color: #25465f; }}
+  h4 {{ margin-top: 18px; color: #334; }}
+  table {{ border-collapse: collapse; display: block; width: 100%; margin: 14px 0 20px; overflow-x: auto; font-size: 14px; background: #fff; }}
+  th, td {{ border: 1px solid #d7dde5; padding: 8px 10px; text-align: left; vertical-align: top; min-width: 72px; }}
+  td {{ word-break: break-word; }}
+  th {{ background: #1f5f8b; color: #fff; }}
   tr:nth-child(even) {{ background: #f5f7fa; }}
-  blockquote {{ border-left: 3px solid #2a6496; padding-left: 16px; color: #666; margin: 12px 0; }}
+  blockquote {{ border-left: 3px solid #1f5f8b; padding: 8px 14px; color: #4f5b62; margin: 12px 0; background: #f4f8fb; }}
+  li {{ margin: 4px 0; }}
   code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
   pre {{ background: #f5f5f5; padding: 16px; border-radius: 6px; overflow-x: auto; }}
 </style>

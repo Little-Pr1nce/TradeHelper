@@ -28,6 +28,9 @@ class BrokerConfig:
     max_volume_ratio: float = 0.05   # 单笔不超过日成交量 5%
     extra_slippage: float = 0.005    # 超量额外惩罚滑点
     commission: float = 0.0003       # 万三佣金
+    min_commission: float = 0.0      # A股单边最低佣金
+    sell_tax: float = 0.0            # 卖出税费
+    t_plus_one: bool = False         # A股当日买入不可当日卖出
     limit_up_pct: float = 0.099      # 涨停幅度（A 股 10%，美股设大值）
     limit_down_pct: float = 0.099    # 跌停幅度
     hard_stop_pct: float = 0.08      # 硬止损比例（-8%）
@@ -62,6 +65,11 @@ class Broker:
 
     def __init__(self, config: BrokerConfig | None = None):
         self.config = config or BrokerConfig()
+
+    def _commission(self, value: float) -> float:
+        if value <= 0:
+            return 0.0
+        return max(value * self.config.commission, self.config.min_commission)
 
     def execute_buy(self, order: Order, bar_t1: pd.Series,
                     account: Account, prev_close: float) -> Fill | None:
@@ -100,7 +108,7 @@ class Broker:
         # 4. 成交价 = open × (1 + 滑点)
         fill_price = open_price * (1 + effective_slippage)
         fill_value = fill_price * order.shares
-        commission = fill_value * cfg.commission
+        commission = self._commission(fill_value)
         total_cost = fill_value + commission
         slippage_cost = fill_value - open_price * order.shares
 
@@ -112,9 +120,18 @@ class Broker:
                 return None
             order.shares = max_shares
             fill_value = fill_price * order.shares
-            commission = fill_value * cfg.commission
+            commission = self._commission(fill_value)
             total_cost = fill_value + commission
             slippage_cost = fill_value - open_price * order.shares
+            while total_cost > account.cash and order.shares >= cfg.min_shares:
+                order.shares -= cfg.min_shares
+                fill_value = fill_price * order.shares
+                commission = self._commission(fill_value)
+                total_cost = fill_value + commission
+                slippage_cost = fill_value - open_price * order.shares
+            if order.shares < cfg.min_shares:
+                logger.debug(f"{order.date}: 买入订单作废 — 资金不足最低佣金要求")
+                return None
 
         # 6. 扣除资金，更新持仓
         account.cash -= total_cost
@@ -165,6 +182,11 @@ class Broker:
         if not account.position or account.position.shares <= 0:
             return None
 
+        trade_date = str(bar_t1.get("date", ""))[:10]
+        if cfg.t_plus_one and account.position.entry_date == trade_date:
+            logger.debug(f"{order.date}: 卖出订单作废 — A股T+1限制")
+            return None
+
         shares_to_sell = min(order.shares, account.position.shares)
 
         # 涨跌停过滤
@@ -178,11 +200,16 @@ class Broker:
 
         fill_price = open_price * (1 - cfg.slippage)
         fill_value = fill_price * shares_to_sell
-        commission = fill_value * cfg.commission
+        commission = self._commission(fill_value)
+        sell_tax = fill_value * cfg.sell_tax
+        total_fee = commission + sell_tax
         slippage_cost = open_price * shares_to_sell - fill_value
 
-        account.cash += fill_value - commission
-        account.position = None
+        account.cash += fill_value - total_fee
+        if shares_to_sell >= account.position.shares:
+            account.position = None
+        else:
+            account.position.shares -= shares_to_sell
 
         fill = Fill(
             date=str(bar_t1.get("date", ""))[:10],
@@ -191,7 +218,7 @@ class Broker:
             price=round(fill_price, 4),
             shares=shares_to_sell,
             value=round(fill_value, 2),
-            commission=round(commission, 2),
+            commission=round(total_fee, 2),
             slippage_cost=round(slippage_cost, 2),
             reason=order.reason,
         )
@@ -224,6 +251,8 @@ class Broker:
 
         cfg = self.config
         pos = account.position
+        if cfg.t_plus_one and pos.entry_date == str(current_date)[:10]:
+            return []
         high = float(bar_t1["high"])
         low = float(bar_t1["low"])
         close = float(bar_t1["close"])
@@ -259,9 +288,11 @@ class Broker:
         if exit_reason and exit_price:
             exit_price = max(exit_price, low)
             fill_value = exit_price * pos.shares
-            commission = fill_value * cfg.commission
+            commission = self._commission(fill_value)
+            sell_tax = fill_value * cfg.sell_tax
+            total_fee = commission + sell_tax
 
-            account.cash += fill_value - commission
+            account.cash += fill_value - total_fee
             account.position = None
 
             fill = Fill(
@@ -271,7 +302,7 @@ class Broker:
                 price=round(exit_price, 4),
                 shares=pos.shares,
                 value=round(fill_value, 2),
-                commission=round(commission, 2),
+                commission=round(total_fee, 2),
                 slippage_cost=0,
                 reason=exit_reason,
             )

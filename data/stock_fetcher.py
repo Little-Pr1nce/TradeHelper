@@ -18,8 +18,9 @@ import subprocess
 import time
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date as dt_date, datetime, time as dt_time, timedelta
 from typing import Callable, Optional, TypeVar
+from zoneinfo import ZoneInfo
 
 from data.models import StockInfo, PriceData
 
@@ -598,6 +599,126 @@ def _row_trade_date(row) -> str:
     return str(name)[:10] if name is not None else ""
 
 
+def _previous_weekday(day: dt_date) -> dt_date:
+    """Return the nearest previous weekday, ignoring market holidays."""
+    day = day - timedelta(days=1)
+    while day.weekday() >= 5:
+        day = day - timedelta(days=1)
+    return day
+
+
+def _latest_completed_daily_bar_date(market: str, now: datetime | None = None) -> str:
+    """
+    Latest date that is safe to persist as a completed daily K-line.
+
+    Realtime quotes are intentionally kept out of SQLite. This helper prevents
+    an in-progress daily bar returned by a provider during pre/intraday hours
+    from being cached and later treated as a real close.
+    """
+    market = (market or "").upper()
+    if market == "US":
+        tz = ZoneInfo("America/New_York")
+        # Give vendors a small settlement buffer after the 16:00 ET close.
+        close_buffer = dt_time(16, 15)
+    else:
+        tz = ZoneInfo("Asia/Shanghai")
+        close_buffer = dt_time(15, 15)
+
+    local_now = now.astimezone(tz) if now else datetime.now(tz)
+    day = local_now.date()
+    if day.weekday() >= 5:
+        day = _previous_weekday(day)
+    elif local_now.time() < close_buffer:
+        day = _previous_weekday(day)
+    return day.isoformat()
+
+
+def _is_cacheable_daily_price(price: PriceData) -> bool:
+    """Basic OHLC sanity gate before writing provider K-lines to SQLite."""
+    try:
+        open_p = float(price.open)
+        high_p = float(price.high)
+        low_p = float(price.low)
+        close_p = float(price.close)
+        volume = float(price.volume)
+    except (TypeError, ValueError):
+        return False
+    if min(open_p, high_p, low_p, close_p) <= 0:
+        return False
+    if volume < 0:
+        return False
+    tolerance = 0.001
+    if high_p < low_p:
+        return False
+    if open_p > high_p * (1 + tolerance) or open_p < low_p * (1 - tolerance):
+        return False
+    if close_p > high_p * (1 + tolerance) or close_p < low_p * (1 - tolerance):
+        return False
+    return True
+
+
+def _filter_prices_for_cache(
+    prices: list[PriceData],
+    market: str,
+    *,
+    latest_completed_date: str | None = None,
+    previous_close: float | None = None,
+    max_single_day_jump: float = 0.60,
+) -> list[PriceData]:
+    """Drop unfinished daily bars and structurally invalid OHLC rows before caching."""
+    if not prices:
+        return []
+    safe_latest = latest_completed_date or _latest_completed_daily_bar_date(market)
+    filtered: list[PriceData] = []
+    dropped_unfinished = 0
+    dropped_bad_ohlc = 0
+    for price in prices:
+        if str(price.date) > safe_latest:
+            dropped_unfinished += 1
+            continue
+        if not _is_cacheable_daily_price(price):
+            dropped_bad_ohlc += 1
+            continue
+        filtered.append(price)
+    if dropped_unfinished:
+        logger.warning(
+            f"跳过 {dropped_unfinished} 条未完成日K，不使用/不写入缓存（market={market}, latest_completed={safe_latest}）"
+        )
+    if dropped_bad_ohlc:
+        logger.warning(f"跳过 {dropped_bad_ohlc} 条异常OHLC日K，不使用/不写入缓存（market={market}）")
+    filtered = sorted(filtered, key=lambda p: str(p.date))
+    stable: list[PriceData] = []
+    prev_close = previous_close
+    dropped_jump_tail = 0
+    for price in filtered:
+        close_p = float(price.close)
+        if prev_close and prev_close > 0:
+            jump = abs(close_p - prev_close) / prev_close
+            if jump > max_single_day_jump:
+                dropped_jump_tail = len(filtered) - len(stable)
+                logger.warning(
+                    f"检测到疑似复权/单位异常日K，停止缓存尾部数据（market={market}, "
+                    f"date={price.date}, prev_close={prev_close:.4f}, close={close_p:.4f}, jump={jump:.1%}）"
+                )
+                break
+        stable.append(price)
+        prev_close = close_p
+    if dropped_jump_tail:
+        logger.warning(f"跳过 {dropped_jump_tail} 条疑似价格跳变尾部日K，不使用/不写入缓存（market={market}）")
+    return stable
+
+
+def _sanitize_cached_prices_for_use(prices: list[PriceData], market: str, code: str) -> list[PriceData]:
+    """Apply the same trust gate to rows already stored in SQLite."""
+    if not prices:
+        return []
+    clean_prices = _filter_prices_for_cache(prices, market)
+    dropped = len(prices) - len(clean_prices)
+    if dropped:
+        logger.warning(f"{code} 已缓存K线有 {dropped} 条被可信度闸门忽略，将尝试从稳定数据尾部补拉")
+    return clean_prices
+
+
 def check_tickflow_available(market: str = "US", code: str | None = None) -> dict:
     """检测 TickFlow K线/实时接口是否可用，返回结构化状态。"""
     code = code or ("AAPL" if market == "US" else "600519")
@@ -658,15 +779,20 @@ def fetch_cached_prices(
     if db is None:
         db = Database()
 
-    prices = db.get_prices(code, start, end)
+    prices = _sanitize_cached_prices_for_use(db.get_prices(code, start, end), market, code)
     fetcher = get_stock_fetcher(market)
 
     if not prices:
         logger.info(f"{code} 缓存为空，联网拉取 {start}~{end}")
         new_prices = fetcher.fetch_price_history(code, start, end)
         if new_prices:
-            db.insert_prices(new_prices)
-        prices = db.get_prices(code, start, end)
+            cache_prices = _filter_prices_for_cache(new_prices, market)
+            if cache_prices:
+                db.insert_prices(cache_prices)
+            dropped = len(new_prices) - len(cache_prices)
+            if dropped:
+                logger.info(f"{code} 拉取到 {len(new_prices)} 条，缓存写入 {len(cache_prices)} 条，丢弃 {dropped} 条")
+        prices = _sanitize_cached_prices_for_use(db.get_prices(code, start, end), market, code)
     else:
         first_date = prices[0].date
         last_date = prices[-1].date
@@ -680,26 +806,38 @@ def fetch_cached_prices(
             logger.info(f"{code} 缓存缺起始段，补拉 {start}~{head_end}")
             head_prices = fetcher.fetch_price_history(code, start, head_end)
             if head_prices:
-                db.insert_prices(head_prices)
-                fetched_any = True
-                logger.info(f"{code} 起始段补入 {len(head_prices)} 条")
+                cache_prices = _filter_prices_for_cache(head_prices, market)
+                if cache_prices:
+                    db.insert_prices(cache_prices)
+                    fetched_any = True
+                logger.info(f"{code} 起始段拉取 {len(head_prices)} 条，补入 {len(cache_prices)} 条")
 
         # 缓存尾部落后于请求结束日期时，补齐尾部。
         if last_date < end:
             tail_start = (dt_date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
             logger.info(f"{code} 检查尾部增量 {tail_start}~{end}")
             tail_prices = fetcher.fetch_price_history(code, tail_start, end)
-            latest_new_date = max((p.date for p in tail_prices), default="")
+            try:
+                previous_close = float(prices[-1].close)
+            except (TypeError, ValueError, IndexError):
+                previous_close = None
+            cache_prices = _filter_prices_for_cache(tail_prices, market, previous_close=previous_close)
+            latest_new_date = max((p.date for p in cache_prices), default="")
             if latest_new_date > last_date:
-                db.insert_prices(tail_prices)
+                db.insert_prices(cache_prices)
                 fetched_any = True
-                new_count = sum(1 for p in tail_prices if p.date > last_date)
-                logger.info(f"{code} 尾部增量 {new_count} 条（最新 {latest_new_date}）")
+                new_count = sum(1 for p in cache_prices if p.date > last_date)
+                dropped = len(tail_prices) - len(cache_prices)
+                logger.info(f"{code} 尾部增量 {new_count} 条（最新 {latest_new_date}，丢弃 {dropped} 条）")
             else:
-                logger.info(f"{code} 无尾部增量（缓存最新 {last_date}，数据源最新 {latest_new_date or '无'}）")
+                source_latest = max((p.date for p in tail_prices), default="")
+                logger.info(
+                    f"{code} 无尾部增量（缓存最新 {last_date}，可缓存最新 {latest_new_date or '无'}，"
+                    f"数据源最新 {source_latest or '无'}）"
+                )
 
         if fetched_any:
-            prices = db.get_prices(code, start, end)
+            prices = _sanitize_cached_prices_for_use(db.get_prices(code, start, end), market, code)
 
     if not prices or (min_records > 0 and len(prices) < min_records):
         return None

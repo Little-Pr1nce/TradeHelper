@@ -15,15 +15,19 @@ import pandas as pd
 import numpy as np
 
 from strategies.base import (
+    BaseExecutionStrategy,
     Order,
     Position,
+    StrategyDecision,
     StrategyContext,
+    decision_to_orders,
     round_lot_shares,
     shares_from_cash,
 )
 from strategies import get_execution_strategy
 from backtest.broker import Broker, BrokerConfig, Account
 from backtest.engine import BacktestEngine, BacktestConfig
+from utils.market_rules import get_market_rules
 
 
 def is_close(a, b, rel=0.01):
@@ -106,6 +110,23 @@ class TestBroker:
         # 卖出现金应增加
         assert self.account.cash > 100000.0
 
+    def test_partial_sell_keeps_remaining_position(self):
+        self.account.position = Position(
+            shares=500, avg_cost=100.0, entry_date="2024-01-02",
+            entry_price=100.0, highest_close=101.0, stop_loss=92.0,
+        )
+        bar = pd.Series({
+            "date": "2024-01-03", "open": 101.0, "high": 103.0,
+            "low": 100.0, "close": 102.0, "volume": 10000000,
+        })
+        order = Order(date="2024-01-02", action="sell", shares=200, reason="partial")
+
+        fill = self.broker.execute_sell(order, bar, self.account, prev_close=100.0)
+
+        assert fill is not None and fill.shares == 200
+        assert self.account.position is not None
+        assert self.account.position.shares == 300
+
     def test_limit_up_reject(self):
         """涨停时买入订单被拒绝。"""
         bar = pd.Series({
@@ -115,6 +136,37 @@ class TestBroker:
         order = Order(date="2024-01-01", action="buy", shares=500, stop_loss=100.0)
         fill = self.broker.execute_buy(order, bar, self.account, prev_close=100.0)
         assert fill is None  # 涨停板拒绝
+
+    def test_a_share_t_plus_one_and_fees(self):
+        """A股同日不可卖，次日卖出应包含最低佣金和印花税。"""
+        self.broker = Broker(BrokerConfig(
+            slippage=0.0,
+            commission=0.0003,
+            min_commission=5.0,
+            sell_tax=0.0005,
+            t_plus_one=True,
+            min_shares=100,
+        ))
+        self.account.position = Position(
+            shares=100, avg_cost=100.0, entry_date="2026-01-02",
+            entry_price=100.0, highest_close=100.0, stop_loss=92.0,
+        )
+        same_day = pd.Series({
+            "date": "2026-01-02", "open": 100.0, "high": 101.0,
+            "low": 90.0, "close": 95.0, "volume": 1000000,
+        })
+        order = Order(date="2026-01-02", action="sell", shares=100, reason="test")
+
+        assert self.broker.execute_sell(order, same_day, self.account, 100.0) is None
+        assert self.broker.check_intraday_stops(
+            same_day, self.account, 100.0, "2026-01-02"
+        ) == []
+
+        next_day = same_day.copy()
+        next_day["date"] = "2026-01-05"
+        fill = self.broker.execute_sell(order, next_day, self.account, 100.0)
+        assert fill is not None
+        assert fill.commission == 10.0  # 最低佣金5元 + 0.05%印花税5元
 
     def test_limit_down_reject(self):
         """跌停时卖出订单被拒绝。"""
@@ -204,8 +256,99 @@ def test_share_helpers_do_not_create_orders_from_zero_inputs():
     assert shares_from_cash(100000, 100, "US", 0) == 0
 
 
+def test_legacy_order_strategy_round_trips_through_decision():
+    class LegacyFixedOrderStrategy(BaseExecutionStrategy):
+        @property
+        def name(self) -> str:
+            return "LegacyFixed"
+
+        @property
+        def description(self) -> str:
+            return "固定输出旧式 Order 的测试策略"
+
+        def generate_orders(self, df, context):
+            return [Order(
+                date=context.date,
+                action="buy",
+                shares=123,
+                stop_loss=91.0,
+                reason="legacy fixed",
+                time_stop_days=7,
+                hard_stop_pct=0.05,
+            )]
+
+    strategy = LegacyFixedOrderStrategy()
+    df = make_ohlcv_df(120)
+    ctx = StrategyContext(
+        date=str(df["date"].iloc[-1])[:10],
+        equity=100000,
+        cash=100000,
+        position=Position(),
+        market="US",
+    )
+
+    legacy_orders = strategy.generate_orders(df, ctx)
+    decision = strategy.generate_decision(df, ctx)
+    converted = decision_to_orders(decision, ctx)
+
+    assert legacy_orders
+    assert converted
+    assert converted[0].action == legacy_orders[0].action
+    assert converted[0].shares == legacy_orders[0].shares
+    assert converted[0].stop_loss == legacy_orders[0].stop_loss
+    assert converted[0].time_stop_days == legacy_orders[0].time_stop_days
+
+
+def test_a_share_board_specific_price_limits():
+    assert get_market_rules("A", code="600519").limit_up_pct == 0.099
+    assert get_market_rules("A", code="300750").limit_up_pct == 0.199
+    assert get_market_rules("A", code="688981").limit_up_pct == 0.199
+    assert get_market_rules("A", code="830799").limit_up_pct == 0.299
+    assert get_market_rules("A", code="600519", is_st=True).limit_up_pct == 0.049
+
+
 class TestBacktestEngine:
     """回测引擎端到端测试。"""
+
+    def test_decision_first_strategy_runs_through_backtest_engine(self):
+        """只实现 generate_decision 的新策略也必须能被回测引擎撮合。"""
+        class DecisionOnlyStrategy(BaseExecutionStrategy):
+            @property
+            def name(self) -> str:
+                return "DecisionOnly"
+
+            @property
+            def description(self) -> str:
+                return "固定输出 StrategyDecision 的测试策略"
+
+            def generate_decision(self, df, context):
+                if context.position.shares > 0:
+                    return StrategyDecision(
+                        action="hold",
+                        execution_level="C",
+                        reason="already holding",
+                        source=self.name,
+                    )
+                return StrategyDecision(
+                    action="buy",
+                    execution_level="A",
+                    shares=10,
+                    trigger_price=float(df["close"].iloc[-1]),
+                    stop_loss=90.0,
+                    reason="decision buy",
+                    source=self.name,
+                )
+
+        df = make_ohlcv_df(80)
+        df["code"] = "AAPL"
+        df["Final_Score"] = 0.0
+
+        result = BacktestEngine(BacktestConfig(initial_capital=100000.0)).run(
+            df, DecisionOnlyStrategy()
+        )
+
+        assert result.total_trades >= 1
+        assert result.trades[0]["shares"] == 10
 
     def test_initial_capital_controls_account_cash(self):
         """不同初始资金应产生不同仓位和最终权益。"""

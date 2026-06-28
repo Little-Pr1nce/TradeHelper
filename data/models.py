@@ -232,6 +232,7 @@ class PredictionLog:
     mode: str = "eod"                  # eod / intraday / pre / portfolio
     report_id: Optional[int] = None    # 关联 reports.id
     predict_time: str = ""             # 预测生成时间 ISO 格式
+    reference_date: str = ""           # 预测所依据的最后正式交易日
     direction: str = ""                # bullish / bearish / neutral
     final_score: float = 0.0           # 当时的 Final_Score
     predicted_price: float = 0.0       # 预测时的参考价格
@@ -239,15 +240,25 @@ class PredictionLog:
     confidence: str = ""               # high / medium / low
     conservative_entry: float = 0.0    # 保守方案入场价
     aggressive_entry: float = 0.0      # 激进方案入场价
+    entry_mode: str = "reference"       # reference/signal_price/next_open/conditional
     stop_loss: float = 0.0             # 止损价
+    take_profit: float = 0.0            # 止盈价
     verify_after_days: int = 5         # 几个交易日后验证
     validated: int = 0                 # 是否已验证
-    actual_return: float = 0.0         # 实际收益%（验证后填入）
+    actual_return: float = 0.0         # 方向调整、扣估算成本后的建议收益
+    underlying_return: float = 0.0     # 标的从评价基准到验证价的原始涨跌幅
+    validation_price: float = 0.0      # 第 N 个交易日或风控退出的验证价格
+    max_favorable_excursion: float = 0.0  # 验证窗口最大有利波动（方向调整）
+    max_adverse_excursion: float = 0.0    # 验证窗口最大不利波动（负值）
     actual_direction: str = ""         # 实际方向（验证后填入）
     entry_triggered: int = 0           # 入场价是否触发
     verified_at: str = ""              # 验证时间
+    validation_end_date: str = ""      # 实际使用的第 N 个交易日
+    validation_status: str = "pending" # pending/verified/not_triggered/unsupported
+    validation_version: int = 2        # 验证口径版本；v1 旧记录不参与健康度
     strategy_name: str = ""            # 策略标识（"A"/"B"/...），空字符串=整体预测
     market_regime: str = ""            # 预测时的行情状态（trending/ranging/...）
+    portfolio_snapshot: str = ""       # 组合预测的现金与持仓 JSON 快照
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -278,6 +289,48 @@ class PredictionStats:
 
     @classmethod
     def from_dict(cls, d: dict) -> "PredictionStats":
+        result = {}
+        for name, field_def in cls.__dataclass_fields__.items():
+            value = d.get(name)
+            result[name] = value if value is not None else field_def.default
+        return cls(**result)
+
+
+@dataclass
+class ResearchObservationLog:
+    """研究员/系统观察形态记录，用于风控官历史验证和自我升级。"""
+    id: Optional[int] = None
+    code: str = ""
+    name: str = ""
+    market: str = ""
+    mode: str = "eod"
+    report_id: Optional[int] = None
+    observed_at: str = ""
+    pattern_type: str = ""
+    observation: str = ""
+    source: str = ""
+    system_status: str = ""
+    execution_level: str = ""
+    trigger_price: float = 0.0
+    stop_loss: float = 0.0
+    expected_direction: str = ""       # bullish / bearish / neutral
+    llm_proposed: int = 0
+    market_regime: str = ""
+    validated: int = 0
+    return_1d: float = 0.0
+    return_3d: float = 0.0
+    return_5d: float = 0.0
+    return_10d: float = 0.0
+    max_adverse_return: float = 0.0
+    hit_take_profit: int = 0
+    hit_stop_loss: int = 0
+    verified_at: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ResearchObservationLog":
         result = {}
         for name, field_def in cls.__dataclass_fields__.items():
             value = d.get(name)

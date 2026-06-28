@@ -17,6 +17,8 @@ Phase 3 — 审计驱动自动筛选:
 
 import logging
 import itertools
+import hashlib
+import json
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -35,6 +37,21 @@ MAX_VARIANTS_PER_STRATEGY = 7
 # 模块级回测结果缓存：key = (stock_code, base_key, params_hash, first_date, last_date, length)
 # 同一 session 内重复跑相同 stock+params 直接命中
 _variant_bt_cache: dict[str, "BacktestResult"] = {}
+
+
+def _cache_params_json(
+    params: dict,
+    df: "pd.DataFrame",
+    initial_capital: float,
+) -> str:
+    """缓存上下文包含参数、资金和 Alpha 序列，避免跨口径误复用。"""
+    payload = dict(params or {})
+    payload["__capital"] = round(float(initial_capital), 2)
+    if "Final_Score" in df.columns:
+        scores = pd.to_numeric(df["Final_Score"], errors="coerce").fillna(0.0)
+        raw = scores.round(6).to_numpy(dtype="float64").tobytes()
+        payload["__score_sig"] = hashlib.sha1(raw).hexdigest()[:16]
+    return json.dumps(payload, sort_keys=True)
 
 
 def _make_cache_key(
@@ -219,8 +236,6 @@ def expand_and_audit(
         stock_code: 股票代码（用于缓存键和 per_stock_params 查询）
         db: 数据库实例（用于缓存读写）
     """
-    import json
-
     data_start = str(df["date"].iloc[0])[:10] if "date" in df.columns else ""
     data_end = str(df["date"].iloc[-1])[:10] if "date" in df.columns else ""
     data_len = len(df)
@@ -251,6 +266,14 @@ def expand_and_audit(
                     is_default=False,
                 ))
             params_hit_count += 1
+        elif best and best["source"] == "demoted":
+            recovery = _generate_recovery_variants(key, vt_list)
+            if recovery:
+                vt_list.extend(recovery)
+                logger.info(
+                    f"策略池: {stock_code} {key} 历史负期望，"
+                    f"追加 {len(recovery)} 个保守恢复候选"
+                )
 
         variants.extend(vt_list)
 
@@ -262,9 +285,6 @@ def expand_and_audit(
 
     # ── 2. 批量回测（优先读缓存）──
     config = BacktestConfig(initial_capital=initial_capital)
-    if market == "US":
-        config.broker.limit_up_pct = 999.0
-        config.broker.limit_down_pct = 999.0
     engine = BacktestEngine(config)
 
     bt_results: dict[str, BacktestResult] = {}
@@ -272,7 +292,7 @@ def expand_and_audit(
 
     for v in variants:
         try:
-            params_json = json.dumps(v.params, sort_keys=True) if v.params else "{}"
+            params_json = _cache_params_json(v.params, df, initial_capital)
 
             # 2a. 查 bt_variant_cache（SQLite 持久化）
             cached = None
@@ -286,7 +306,9 @@ def expand_and_audit(
                     continue
 
             # 2b. 查内存缓存
-            ck = _make_cache_key(stock_code, v.base_key, v.params, df)
+            ck = _make_cache_key(
+                stock_code, v.base_key, json.loads(params_json), df
+            )
             if ck in _variant_bt_cache:
                 bt_results[v.variant_label] = _variant_bt_cache[ck]
                 cache_hits += 1
@@ -383,7 +405,11 @@ def expand_and_audit(
                 allowed_labels = {v.variant_label for v in (pass_variants + cond_variants)}
                 _update_per_stock_params(
                     db, stock_code, variants, bt_results,
-                    audit.entries, allowed_labels=allowed_labels)
+                    audit.entries,
+                    allowed_labels=allowed_labels,
+                    walk_forward=walk_forward,
+                    data_end=data_end,
+                )
 
             logger.info(
                 f"审计筛选: PASS={len(pass_variants)}, "
@@ -432,9 +458,6 @@ def _run_walk_forward_selection(
         return {}
 
     config = BacktestConfig(initial_capital=initial_capital)
-    if market == "US":
-        config.broker.limit_up_pct = 999.0
-        config.broker.limit_down_pct = 999.0
     engine = BacktestEngine(config)
 
     by_base: dict[str, list[StrategyVariant]] = {}
@@ -529,6 +552,74 @@ def _slice_news(news_df: pd.DataFrame | None, price_df: pd.DataFrame) -> pd.Data
     except Exception:
         return news_df
 
+
+def _strict_param_value(base_key: str, name: str, values: list, default):
+    """为负期望恢复候选选择更保守的参数值。"""
+    if not values:
+        return default
+    low = values[0]
+    high = values[-1]
+    if name in ("risk_budget", "invest_pct", "hard_stop_pct", "atr_mult_stop", "atr_trail_mult"):
+        return low
+    if name in ("finbert_min", "k1", "exit_pct"):
+        return high
+    if name == "vol_percentile":
+        return low
+    if name == "entry_pct":
+        return low if base_key == "B" else high
+    return default
+
+
+def _generate_recovery_variants(
+    strategy_key: str,
+    existing_variants: list[StrategyVariant],
+    max_recovery: int = 3,
+) -> list[StrategyVariant]:
+    """为历史负期望策略生成更保守的自动恢复候选。"""
+    base = get_execution_strategy(strategy_key)
+    tunable = base.tunable_params()
+    if not tunable:
+        return []
+
+    defaults = {p["name"]: p["default"] for p in tunable}
+    strict = {
+        p["name"]: _strict_param_value(strategy_key, p["name"], p.get("values", []), p["default"])
+        for p in tunable
+    }
+    candidates: list[dict] = [strict]
+
+    # 单参数保守变体：给 walk-forward 留出不过度收紧的恢复路径。
+    for p in tunable:
+        name = p["name"]
+        val = strict.get(name, defaults.get(name))
+        if val != defaults.get(name):
+            one = dict(defaults)
+            one[name] = val
+            candidates.append(one)
+
+    existing = {tuple(sorted(v.params.items())) for v in existing_variants}
+    result: list[StrategyVariant] = []
+    seen: set[tuple] = set()
+    for params in candidates:
+        key = tuple(sorted(params.items()))
+        if key in existing or key in seen:
+            continue
+        seen.add(key)
+        try:
+            result.append(StrategyVariant(
+                base_key=strategy_key,
+                variant_label=f"{strategy_key}_recover_{len(result) + 1}",
+                strategy=get_execution_strategy(strategy_key, **params),
+                params=params,
+                is_default=False,
+            ))
+        except Exception as e:
+            logger.debug(f"恢复候选生成失败 {strategy_key} {params}: {e}")
+        if len(result) >= max_recovery:
+            break
+    return result
+
+
 def _serialize_result(result: BacktestResult) -> dict:
     """BacktestResult → JSON-safe dict。"""
     return {
@@ -579,8 +670,10 @@ def _update_per_stock_params(
     bt_results: dict[str, BacktestResult],
     audit_entries: list,
     allowed_labels: set[str] | None = None,
+    walk_forward: dict[str, dict] | None = None,
+    data_end: str = "",
 ):
-    """审计完成后，把 PASS 策略的最佳参数写入 per_stock_params。"""
+    """把 PASS+WF 参数登记为候选；跨窗口确认后才写入正式参数。"""
     import json
 
     # 按 base_key 分组，每组只存 test_sharpe 最高的 PASS 变体
@@ -595,14 +688,29 @@ def _update_per_stock_params(
         if not v or not v.params:
             continue
         try:
+            wf = (walk_forward or {}).get(v.variant_label) or {}
+            if not wf:
+                continue
             params_json = json.dumps(v.params, sort_keys=True)
-            db.save_best_params(
+            lifecycle = db.record_strategy_param_candidate(
                 stock_code=stock_code,
                 strategy_key=v.base_key,
                 params_json=params_json,
-                sharpe=e.test_sharpe,
-                source="audit_pass",
+                test_sharpe=e.test_sharpe,
+                walk_forward=wf,
+                data_end=data_end,
             )
+            if lifecycle.get("promoted"):
+                logger.info(
+                    f"参数候选晋升: {stock_code} {v.base_key} "
+                    f"使用 {v.variant_label}，确认{lifecycle['confirmations']}次，"
+                    f"test_sharpe={e.test_sharpe:.2f}"
+                )
+            else:
+                logger.info(
+                    f"参数候选观察: {stock_code} {v.base_key} {v.variant_label}，"
+                    f"状态={lifecycle['status']}，确认{lifecycle['confirmations']}次"
+                )
         except Exception:
             pass
 

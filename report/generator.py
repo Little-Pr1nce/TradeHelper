@@ -106,7 +106,8 @@ def _build_backtest_summary(
         trade_log = ""
         if r.trades:
             trade_lines = ["", "  **实际交易记录**（回测期内的真实买卖）："]
-            for i, t in enumerate(r.trades, 1):
+            # LLM 只需要最近一笔作为行为示例；完整交易明细留在代码报告/回测对象中。
+            for i, t in enumerate(r.trades[-1:], 1):
                 entry_d = t.get("entry_date", "?")
                 entry_p = t.get("entry_price", 0)
                 exit_d = t.get("exit_date", "?")
@@ -379,7 +380,7 @@ def generate_report(
     # 调用 LLM API（OpenAI 兼容格式，Ollama 通过 /v1 端点同样支持）
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=600.0)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=300.0)
         logger.info(f"调用 LLM: model={model}, thinking={enable_thinking}")
         extra = {}
         if enable_thinking:
@@ -393,7 +394,7 @@ def generate_report(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=16000,
+            max_tokens=9000,
             **extra,
         )
         choice = response.choices[0]
@@ -877,7 +878,7 @@ def generate_intraday_report(
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.3,
-                max_tokens=8000,
+                max_tokens=6000,
                 **extra,
             )
             choice = response.choices[0]
@@ -1014,7 +1015,7 @@ def generate_premarket_report(
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.3,
-                max_tokens=10000,
+                max_tokens=7000,
                 **extra,
             )
             choice = response.choices[0]
@@ -1133,7 +1134,7 @@ def generate_portfolio_report(
 
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=600.0)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=300.0)
         logger.info(f"调用 LLM (持仓分析): model={model}, thinking={enable_thinking}")
         extra = {}
         if enable_thinking:
@@ -1145,7 +1146,7 @@ def generate_portfolio_report(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=16000,
+            max_tokens=9000,
             **extra,
         )
         choice = response.choices[0]
