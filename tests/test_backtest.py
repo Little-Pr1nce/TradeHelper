@@ -21,6 +21,7 @@ from strategies.base import (
     StrategyDecision,
     StrategyContext,
     decision_to_orders,
+    compute_percentile_score,
     round_lot_shares,
     shares_from_cash,
 )
@@ -213,6 +214,49 @@ class TestBroker:
         expected_slippage = 100.0 * 0.003 * 500
         assert is_close(fill.slippage_cost, expected_slippage, rel=0.01)
 
+    def test_high_historical_volatility_increases_slippage(self):
+        low_vol_broker = Broker(BrokerConfig())
+        high_vol_broker = Broker(BrokerConfig())
+        bar = pd.Series({
+            "date": "2024-01-02", "open": 100.0, "high": 101.0,
+            "low": 99.0, "close": 100.0, "volume": 10000000,
+        })
+        order_low = Order(date="2024-01-01", action="buy", shares=100)
+        order_high = Order(date="2024-01-01", action="buy", shares=100)
+
+        low = low_vol_broker.execute_buy(
+            order_low, bar, Account(initial_capital=100000.0), 100.0,
+            recent_volatility=0.20,
+        )
+        high = high_vol_broker.execute_buy(
+            order_high, bar, Account(initial_capital=100000.0), 100.0,
+            recent_volatility=0.80,
+        )
+
+        assert low is not None and high is not None
+        assert high.price > low.price
+        assert high.slippage_cost > low.slippage_cost
+
+    def test_missing_volume_is_unknown_not_suspended(self):
+        bar = pd.Series({
+            "date": "2024-01-02", "open": 100.0, "high": 100.0,
+            "low": 100.0, "close": 100.0,
+        })
+        order = Order(date="2024-01-01", action="buy", shares=100)
+
+        fill = self.broker.execute_buy(order, bar, self.account, prev_close=100.0)
+
+        assert fill is not None
+
+    def test_explicit_zero_volume_is_suspended(self):
+        bar = pd.Series({
+            "date": "2024-01-02", "open": 100.0, "high": 100.0,
+            "low": 100.0, "close": 100.0, "volume": 0,
+        })
+        order = Order(date="2024-01-01", action="buy", shares=100)
+
+        assert self.broker.execute_buy(order, bar, self.account, 100.0) is None
+
     def test_zero_share_buy_rejected(self):
         """0 股买单不应被撮合成持仓。"""
         bar = pd.Series({
@@ -254,6 +298,21 @@ def test_share_helpers_do_not_create_orders_from_zero_inputs():
     assert shares_from_cash(100000, 0, "A", 0.5) == 0
     assert shares_from_cash(0, 100, "US", 0.5) == 0
     assert shares_from_cash(100000, 100, "US", 0) == 0
+
+
+def test_vectorized_percentile_matches_strict_less_reference():
+    scores = pd.Series([1.0, 2.0, 2.0, np.nan, 3.0, 1.0, 2.0])
+    df = pd.DataFrame({"Final_Score": scores})
+    actual = compute_percentile_score(df, window=4, min_periods=2)
+    expected = []
+    for i, value in enumerate(scores):
+        history = scores.iloc[max(0, i - 3):i + 1].dropna()
+        if pd.isna(value) or len(history) < 2:
+            expected.append(np.nan)
+        else:
+            expected.append(float((history < value).mean()))
+
+    np.testing.assert_allclose(actual.to_numpy(), expected, equal_nan=True)
 
 
 def test_legacy_order_strategy_round_trips_through_decision():

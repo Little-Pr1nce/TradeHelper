@@ -18,6 +18,7 @@ from alpha.scoring import (
     calc_final_score,
     INDICATOR_COLUMNS,
 )
+from alpha.validation import apply_factor_weights
 
 
 def assert_raises(exc_type, match=None):
@@ -118,11 +119,11 @@ class TestAlignFinbertScores:
         })
 
         result = align_finbert_scores(price_df, news_df)
-        expected = pd.Series([0.8, 0.0, -0.5, 0.0, 0.3], name="FinBERT_Score")
+        expected = pd.Series([0.8, 0.4, -0.5, -0.25, 0.3], name="FinBERT_Score")
         pd.testing.assert_series_equal(result.reset_index(drop=True), expected)
 
-    def test_no_forward_fill(self):
-        """验证缺失日期严格填 0，不向前/后填充。"""
+    def test_news_residue_decays_by_half_life(self):
+        """验证无新闻日按半衰期递减，不会无限保持原得分。"""
         price_df = pd.DataFrame({
             "date": pd.date_range("2024-01-01", periods=10, freq="B"),
             "close": range(100, 110),
@@ -133,9 +134,9 @@ class TestAlignFinbertScores:
         })
 
         result = align_finbert_scores(price_df, news_df)
-        # 只有第一天是 0.9，其余全是 0
         assert result.iloc[0] == 0.9
-        assert (result.iloc[1:] == 0.0).all()
+        assert result.iloc[1] == 0.45
+        assert result.iloc[-1] < 0.01
 
     def test_empty_news(self):
         price_df = pd.DataFrame({"date": pd.date_range("2024-01-01", periods=5, freq="B")})
@@ -189,11 +190,83 @@ class TestCalcFinalScore:
             "finbert_score": [0.5] * 10,
         })
         result = calc_final_score(df, news_df, w_tech=0.5, w_news=0.5)
-        # 有新闻的日期 Final_Score 应受新闻影响
+        # 有新闻的日期使用原得分，之后只保留衰减后的残留。
         news_dates = set(news_df["date"].dt.strftime("%Y-%m-%d"))
         df_dates = df["date"].dt.strftime("%Y-%m-%d")
         for i, d in enumerate(df_dates):
             if d in news_dates:
                 assert result["FinBERT_Score"].iloc[i] == 0.5
-            else:
-                assert result["FinBERT_Score"].iloc[i] == 0.0
+        assert ((result["FinBERT_Score"] >= 0) & (result["FinBERT_Score"] <= 0.5)).all()
+
+    def test_reliability_only_shrinks_latest_signal(self):
+        df = make_test_df(120)
+        full = calc_final_score(df, prediction_reliability=1.0)
+        reduced = calc_final_score(df, prediction_reliability=0.3)
+
+        pd.testing.assert_series_equal(
+            full["Final_Score"].iloc[:-1], reduced["Final_Score"].iloc[:-1]
+        )
+        assert np.isclose(
+            reduced["Final_Score"].iloc[-1], full["Final_Score"].iloc[-1] * 0.3
+        )
+
+
+def test_factor_reliability_does_not_cancel_during_normalization():
+    values = {
+        "rsi": pd.Series([0.2, 0.4]),
+        "dif": pd.Series([0.0, 0.6]),
+    }
+    validation = {
+        key: {"multiplier": 1.0, "direction_correct": True}
+        for key in values
+    }
+    full = apply_factor_weights(values, validation, prediction_reliability=1.0)
+    reduced = apply_factor_weights(values, validation, prediction_reliability=0.3)
+    pd.testing.assert_series_equal(reduced, full * 0.3)
+
+
+def test_future_prices_cannot_rewrite_past_factor_scores():
+    base = make_test_df(220)
+    changed = base.copy()
+    changed.loc[changed.index[160]:, "close"] = np.linspace(200, 80, 60)
+
+    original = compute_technical_normalized(base, validate=True)
+    mutated = compute_technical_normalized(changed, validate=True)
+
+    pd.testing.assert_series_equal(
+        original["Tech_Normalized_Score"].iloc[:160],
+        mutated["Tech_Normalized_Score"].iloc[:160],
+    )
+
+
+def _run_script_tests():
+    import inspect
+
+    current_module = sys.modules[__name__]
+    total = 0
+    failures = []
+    for name, obj in list(vars(current_module).items()):
+        if callable(obj) and name.startswith("test_"):
+            total += 1
+            try:
+                obj()
+            except Exception as exc:
+                failures.append((name, exc))
+        if inspect.isclass(obj) and name.startswith("Test"):
+            for method_name, _ in inspect.getmembers(obj, inspect.isfunction):
+                if not method_name.startswith("test_"):
+                    continue
+                total += 1
+                try:
+                    getattr(obj(), method_name)()
+                except Exception as exc:
+                    failures.append((f"{name}.{method_name}", exc))
+    if failures:
+        for test_name, exc in failures:
+            print(f"FAIL {test_name}: {exc}")
+        raise SystemExit(1)
+    print(f"{total}/{total} passed")
+
+
+if __name__ == "__main__":
+    _run_script_tests()

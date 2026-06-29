@@ -46,6 +46,10 @@ class MA120SupportReboundStrategy(BaseExecutionStrategy):
             "未站回时仅列为观察候选"
         )
 
+    def diagnose_no_signal(self, df, context) -> list[str]:
+        decision = self.generate_decision(df, context)
+        return list(decision.missing_conditions or [decision.reason])
+
     def generate_decision(
         self, df: pd.DataFrame, context: StrategyContext
     ) -> StrategyDecision:

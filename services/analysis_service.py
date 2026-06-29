@@ -502,16 +502,18 @@ class AnalysisService:
             fs = float(pipeline_result.df["Final_Score"].dropna().iloc[-1])
             pp = float(pipeline_result.df["close"].iloc[-1])
             last_date = str(pipeline_result.df["date"].iloc[-1])[:10]
-            plan_entry, plan_stop, plan_take_profit, plan_strategy = self._prediction_trade_levels(
-                pipeline_result
-            )
+            current_predictions = self._prediction_signals(pipeline_result)
+            primary = current_predictions[0] if current_predictions else {}
+            plan_entry = float(primary.get("entry_price", 0.0) or 0.0)
+            plan_stop = float(primary.get("stop_loss", 0.0) or 0.0)
+            plan_take_profit = float(primary.get("take_profit", 0.0) or 0.0)
 
             # 整体预测（兼容旧逻辑）
             self._save_prediction(
                 code=code, market=request.market, mode="eod",
                 report_id=report_id,
                 reference_date=last_date,
-                direction=_extract_direction(report_content, fs),
+                direction=str(primary.get("direction") or _extract_direction(report_content, fs)),
                 final_score=fs,
                 predicted_price=pp,
                 prediction_stats=prediction_stats,
@@ -519,33 +521,28 @@ class AnalysisService:
                 conservative_entry=plan_entry,
                 stop_loss=plan_stop,
                 take_profit=plan_take_profit,
-                strategy_name=plan_strategy,
+                strategy_name="",
                 market_regime=getattr(pipeline_result, "market_regime", ""),
             )
-            # 按策略写入预测（统计各策略信号准确率的基础）
-            for strat_key in pipeline_result.active_strategies:
+            # 按本次真实结构化信号写入，不再用回测最后一笔交易代替当前决策。
+            for signal in current_predictions:
                 try:
-                    bt = pipeline_result.backtest
-                    s = get_execution_strategy(strat_key)
-                    result = bt.get(s.name) if bt else None
-                    if result and result.trades:
-                        last_trade = result.trades[-1]
-                        if str(last_trade.get("entry_date", ""))[:10] == last_date:
-                            self._save_prediction(
-                                code=code, market=request.market, mode="eod",
-                                report_id=report_id,
-                                reference_date=last_date,
-                                direction="bullish",  # 入场 = 看多
-                                final_score=fs,
-                                predicted_price=pp,
-                                prediction_stats=prediction_stats,
-                                report_content=report_content,
-                                conservative_entry=plan_entry,
-                                stop_loss=plan_stop,
-                                take_profit=plan_take_profit,
-                                strategy_name=strat_key,
-                                market_regime=getattr(pipeline_result, "market_regime", ""),
-                            )
+                    self._save_prediction(
+                        code=code, market=request.market, mode="eod",
+                        report_id=report_id,
+                        reference_date=last_date,
+                        direction=str(signal["direction"]),
+                        final_score=fs,
+                        predicted_price=pp,
+                        prediction_stats=prediction_stats,
+                        report_content=report_content,
+                        conservative_entry=float(signal.get("entry_price", 0.0) or 0.0),
+                        stop_loss=float(signal.get("stop_loss", 0.0) or 0.0),
+                        take_profit=float(signal.get("take_profit", 0.0) or 0.0),
+                        strategy_name=str(signal.get("strategy_name") or ""),
+                        signal_action=str(signal.get("action") or ""),
+                        market_regime=getattr(pipeline_result, "market_regime", ""),
+                    )
                 except Exception:
                     pass  # 单策略预测失败不阻塞整体流程
         except Exception as e:
@@ -790,6 +787,7 @@ class AnalysisService:
                          stop_loss: float = 0.0,
                          take_profit: float = 0.0,
                          strategy_name: str = "",
+                         signal_action: str = "",
                          market_regime: str = "") -> int | None:
         """写入一条新的预测记录到 prediction_log。"""
         from data.models import PredictionLog
@@ -829,7 +827,9 @@ class AnalysisService:
             key_reason=f"Final_Score={final_score:+.3f}, status={prediction_stats.status if prediction_stats else 'N/A'}",
             confidence="high" if abs(final_score) > 0.5 else ("medium" if abs(final_score) > 0.2 else "low"),
             strategy_name=strategy_name,
+            signal_action=signal_action,
             market_regime=market_regime,
+            exit_review_status="pending" if signal_action == "sell" else "not_applicable",
         )
         try:
             return Database().insert_prediction(pred)
@@ -853,6 +853,33 @@ class AnalysisService:
                     str(item.get("key") or item.get("variant") or ""),
                 )
         return 0.0, 0.0, 0.0, ""
+
+    @staticmethod
+    def _prediction_signals(
+        pipeline_result: PipelineResult | None,
+    ) -> list[dict]:
+        """把当前结构化信号转成可验证预测，不从报告文本/回测交易猜测。"""
+        if not pipeline_result or not pipeline_result.signal_check:
+            return []
+        records = []
+        for item in pipeline_result.signal_check:
+            action = str(item.get("signal") or "").lower()
+            if action not in ("buy", "sell"):
+                continue
+            execution_level = str(item.get("execution_level") or "").upper()
+            if execution_level in ("C", "D"):
+                continue
+            # 当前系统不做裸空；sell 表示减仓/退出后对“避免后续下跌”的验证。
+            records.append({
+                "action": action,
+                "direction": "bullish" if action == "buy" else "bearish",
+                "strategy_name": str(item.get("key") or item.get("variant") or ""),
+                "entry_price": float(item.get("entry_price") or item.get("trigger_price") or 0.0),
+                "stop_loss": float(item.get("stop_loss") or 0.0) if action == "buy" else 0.0,
+                "take_profit": float(item.get("take_profit") or 0.0) if action == "buy" else 0.0,
+                "execution_level": execution_level,
+            })
+        return records
 
     # ── SWOT 数据构建 ──
 
@@ -1374,9 +1401,8 @@ class AnalysisService:
         try:
             fs = float(realtime_decision_df["Final_Score"].dropna().iloc[-1]) if realtime_decision_df is not None and "Final_Score" in realtime_decision_df.columns else 0.0
             pp = float(snapshot.latest_price or 0.0)
-            plan_entry, plan_stop, plan_take_profit, plan_strategy = self._prediction_trade_levels(
-                t1_pipeline_result
-            )
+            current_predictions = self._prediction_signals(t1_pipeline_result)
+            primary = current_predictions[0] if current_predictions else {}
             self._save_prediction(
                 code=code, market=request.market, mode="intraday",
                 reference_date=(
@@ -1384,17 +1410,36 @@ class AnalysisService:
                     if t1_pipeline_result is not None and "date" in t1_pipeline_result.df.columns
                     else ""
                 ),
-                direction=_extract_direction(report_content, fs),
+                direction=str(primary.get("direction") or _extract_direction(report_content, fs)),
                 final_score=fs,
                 predicted_price=pp,
                 prediction_stats=prediction_stats,
                 report_content=report_content,
-                conservative_entry=plan_entry,
-                stop_loss=plan_stop,
-                take_profit=plan_take_profit,
-                strategy_name=plan_strategy,
+                conservative_entry=float(primary.get("entry_price", 0.0) or 0.0),
+                stop_loss=float(primary.get("stop_loss", 0.0) or 0.0),
+                take_profit=float(primary.get("take_profit", 0.0) or 0.0),
+                strategy_name="",
                 market_regime=getattr(t1_pipeline_result, "market_regime", "") if t1_pipeline_result else "",
             )
+            for signal in current_predictions:
+                self._save_prediction(
+                    code=code, market=request.market, mode="intraday",
+                    reference_date=(
+                        str(t1_pipeline_result.df["date"].iloc[-1])[:10]
+                        if t1_pipeline_result is not None and "date" in t1_pipeline_result.df.columns
+                        else ""
+                    ),
+                    direction=str(signal["direction"]),
+                    final_score=fs,
+                    predicted_price=pp,
+                    prediction_stats=prediction_stats,
+                    conservative_entry=float(signal.get("entry_price", 0.0) or 0.0),
+                    stop_loss=float(signal.get("stop_loss", 0.0) or 0.0),
+                    take_profit=float(signal.get("take_profit", 0.0) or 0.0),
+                    strategy_name=str(signal.get("strategy_name") or ""),
+                    signal_action=str(signal.get("action") or ""),
+                    market_regime=getattr(t1_pipeline_result, "market_regime", "") if t1_pipeline_result else "",
+                )
         except Exception as e:
             logger.warning(f"盘中预测写入失败: {e}")
 
@@ -1776,9 +1821,8 @@ class AnalysisService:
         try:
             fs = float(t1_pipeline_result.df["Final_Score"].dropna().iloc[-1]) if t1_pipeline_result and "Final_Score" in t1_pipeline_result.df.columns else 0.0
             pp = float(t1_pipeline_result.df["close"].iloc[-1]) if t1_pipeline_result else 0.0
-            plan_entry, plan_stop, plan_take_profit, plan_strategy = self._prediction_trade_levels(
-                t1_pipeline_result
-            )
+            current_predictions = self._prediction_signals(t1_pipeline_result)
+            primary = current_predictions[0] if current_predictions else {}
             self._save_prediction(
                 code=code, market=request.market, mode="pre",
                 reference_date=(
@@ -1786,17 +1830,36 @@ class AnalysisService:
                     if t1_pipeline_result is not None and "date" in t1_pipeline_result.df.columns
                     else ""
                 ),
-                direction=_extract_direction(report_content, fs),
+                direction=str(primary.get("direction") or _extract_direction(report_content, fs)),
                 final_score=fs,
                 predicted_price=pp,
                 prediction_stats=prediction_stats,
                 report_content=report_content,
-                conservative_entry=plan_entry,
-                stop_loss=plan_stop,
-                take_profit=plan_take_profit,
-                strategy_name=plan_strategy,
+                conservative_entry=float(primary.get("entry_price", 0.0) or 0.0),
+                stop_loss=float(primary.get("stop_loss", 0.0) or 0.0),
+                take_profit=float(primary.get("take_profit", 0.0) or 0.0),
+                strategy_name="",
                 market_regime=getattr(t1_pipeline_result, "market_regime", "") if t1_pipeline_result else "",
             )
+            for signal in current_predictions:
+                self._save_prediction(
+                    code=code, market=request.market, mode="pre",
+                    reference_date=(
+                        str(t1_pipeline_result.df["date"].iloc[-1])[:10]
+                        if t1_pipeline_result is not None and "date" in t1_pipeline_result.df.columns
+                        else ""
+                    ),
+                    direction=str(signal["direction"]),
+                    final_score=fs,
+                    predicted_price=pp,
+                    prediction_stats=prediction_stats,
+                    conservative_entry=float(signal.get("entry_price", 0.0) or 0.0),
+                    stop_loss=float(signal.get("stop_loss", 0.0) or 0.0),
+                    take_profit=float(signal.get("take_profit", 0.0) or 0.0),
+                    strategy_name=str(signal.get("strategy_name") or ""),
+                    signal_action=str(signal.get("action") or ""),
+                    market_regime=getattr(t1_pipeline_result, "market_regime", "") if t1_pipeline_result else "",
+                )
         except Exception as e:
             logger.warning(f"盘前预测写入失败: {e}")
 

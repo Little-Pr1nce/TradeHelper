@@ -507,6 +507,24 @@ def build_prediction_footer(code: str, prediction_stats,
                         f"| {row.get('avg_return', 0):+.2%} "
                         f"| {_status_text(row.get('expectancy', 'insufficient'))} |"
                     )
+
+            exit_reviews = (evaluation_panel.get("exit_reviews") or [])[:5]
+            if exit_reviews:
+                lines.append("")
+                lines.append("#### 卖出后退出质量复盘")
+                lines.append("| 策略 | 样本 | 5日涨跌 | 10日涨跌 | 20日涨跌 | 避免损失 | 机会成本 | 有效退出率 |")
+                lines.append("|------|---:|---:|---:|---:|---:|---:|---:|")
+                for row in exit_reviews:
+                    lines.append(
+                        f"| {row.get('strategy_name', '')[:20]} "
+                        f"| {row.get('count', 0)} "
+                        f"| {row.get('avg_return_5d', 0):+.2%} "
+                        f"| {row.get('avg_return_10d', 0):+.2%} "
+                        f"| {row.get('avg_return_20d', 0):+.2%} "
+                        f"| {row.get('avg_avoided_loss', 0):.2%} "
+                        f"| {row.get('avg_opportunity_cost', 0):.2%} "
+                        f"| {row.get('effective_rate', 0):.0%} |"
+                    )
             lines.append("")
 
     lines.append("*以上为系统自动追踪数据，仅供参考。*\n")
@@ -562,12 +580,34 @@ def build_strategy_audit_section(audit_report) -> str:
         )
     lines.append("")
 
+    bootstrap_entries = [
+        e for e in entries if getattr(e, "bootstrap_status", "") == "ok"
+    ]
+    if bootstrap_entries:
+        lines.append("### 样本外分块 Bootstrap 风险")
+        lines.append("| 策略 | 模拟数 | 正期望概率 | 收益95%区间 | 夏普95%区间 | 回撤P95 | 30%回撤概率 |")
+        lines.append("|------|------:|------:|------:|------:|------:|------:|")
+        for e in bootstrap_entries:
+            lines.append(
+                f"| {e.strategy_key} "
+                f"| {e.bootstrap_samples} "
+                f"| {e.positive_expectancy_prob:.0%} "
+                f"| [{e.return_ci_low:+.1%}, {e.return_ci_high:+.1%}] "
+                f"| [{e.sharpe_ci_low:+.2f}, {e.sharpe_ci_high:+.2f}] "
+                f"| {e.drawdown_p95:.1%} "
+                f"| {e.ruin_probability:.1%} |"
+            )
+        lines.append("")
+    elif entries:
+        lines.append("> Bootstrap：样本外交易或日收益不足，暂不输出概率，强结论自动降级。\n")
+
     # ── 判定逻辑说明 ──
     lines.append("**判定标准**：")
     lines.append(f"- ✅ PASS：训练期 ≥5 笔 AND 验证期 ≥3 笔 AND 验证夏普 ≥1.0 AND 验证回撤 ≤30% AND 验证胜率 ≥45%")
     lines.append(f"- ⚠️ CONDITIONAL：训练期 ≥3 笔 AND 验证期 ≥1 笔 AND 验证夏普 ≥0.5 AND 验证回撤 ≤40%")
     lines.append(f"- ❌ FAIL：不满足以上条件")
     lines.append(f"- 🔴 过拟合：验证夏普 < 训练夏普的 30%")
+    lines.append("- Bootstrap：仅重采样样本外连续收益块；正期望概率不足或收益下界过低会降级")
     lines.append("")
 
     # ── 推荐建议 ──
@@ -598,8 +638,8 @@ def build_strategy_health_section(
     if health_report:
         lines.append("> 基于新版历史预测验证数据，按策略统计净盈利率、95%置信下界和扣除估算成本后的方向净收益。\n")
 
-        lines.append("| 策略 | 预测次数 | 净盈利率 | 95%下界 | 近期净盈利率 | 方向净收益 | 趋势 | 状态 | 建议 |")
-        lines.append("|------|:---:|:---:|:---:|:---:|:---:|:---:|------|------|")
+        lines.append("| 策略 | 信号 | 预测次数 | 净盈利率 | 95%下界 | 近期净盈利率 | 方向净收益 | 趋势 | 状态 | 建议 |")
+        lines.append("|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|------|------|")
 
     action_labels = {"keep": "✅ 保留", "watch": "⚠️ 观察", "demote": "🔻 降级"}
     status_labels = {"reliable": "可靠", "unstable": "不稳定", "unreliable": "不可靠"}
@@ -612,6 +652,7 @@ def build_strategy_health_section(
 
         lines.append(
             f"| {h['strategy_name'][:20]} "
+            f"| {'买入' if h.get('signal_action') == 'buy' else '卖出' if h.get('signal_action') == 'sell' else '未知'} "
             f"| {h['total']} "
             f"| {h['accuracy']:.0%} "
             f"| {float(h.get('confidence_lower_95', 0) or 0):.0%} "

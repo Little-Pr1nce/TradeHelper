@@ -40,6 +40,10 @@ class PullbackFailedExitStrategy(BaseExecutionStrategy):
     def description(self) -> str:
         return "跌破关键均线后反抽无法收回，降低持仓风险"
 
+    def diagnose_no_signal(self, df, context) -> list[str]:
+        decision = self.generate_decision(df, context)
+        return list(decision.missing_conditions or [decision.reason])
+
     def generate_decision(
         self, df: pd.DataFrame, context: StrategyContext
     ) -> StrategyDecision:

@@ -22,14 +22,14 @@ import numpy as np
 import pandas as pd
 
 from strategies.base import (
-    BaseExecutionStrategy, Order, Position, StrategyContext,
+    DecisionFirstStrategy, StrategyContext,
     compute_atr, compute_percentile_score, round_lot_shares,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class MA60TrendStrategy(BaseExecutionStrategy):
+class MA60TrendStrategy(DecisionFirstStrategy):
     """MA60 中长期趋势跟踪策略。
 
     适用行情：趋势市（trending / trending_steady / trending_volatile）
@@ -75,17 +75,43 @@ class MA60TrendStrategy(BaseExecutionStrategy):
             {"name": "risk_budget", "default": self.risk_budget, "values": [0.30, 0.45, 0.60]},
         ]
 
-    def generate_orders(
+    def diagnose_no_signal(self, df, context) -> list[str]:
+        if len(df) < 60 or "Final_Score" not in df.columns:
+            return ["至少需要60根K线和 Final_Score"]
+        close = df["close"].astype(float)
+        price = float(close.iloc[-1])
+        ma20 = float(close.rolling(20).mean().iloc[-1])
+        ma60 = float(close.rolling(60).mean().iloc[-1])
+        score = float(df["Final_Score"].iloc[-1])
+        pct = compute_percentile_score(df, window=252).iloc[-1]
+        atr = compute_atr(df, 14).iloc[-1]
+        if context.position.shares > 0:
+            trail = context.position.highest_close - self.atr_trail_mult * atr
+            return [
+                f"价格{price:.2f}尚未有效跌破MA60({ma60:.2f})",
+                f"MA20({ma20:.2f})尚未死叉MA60({ma60:.2f})",
+                f"价格尚未跌破移动止盈线{trail:.2f}",
+            ]
+        missing = []
+        if price <= ma60:
+            missing.append(f"价格{price:.2f}需站上MA60({ma60:.2f})")
+        if ma20 <= ma60:
+            missing.append(f"MA20({ma20:.2f})需上穿MA60({ma60:.2f})")
+        if score <= 0 or pd.isna(pct) or pct < 0.30:
+            pct_text = f"{pct:.0%}" if pd.notna(pct) else "样本不足"
+            missing.append(f"Final_Score需转正且百分位达到30%（当前{score:+.3f}/{pct_text}）")
+        return missing or ["ATR或可下单股数无效"]
+
+    def _evaluate_decision(
         self, df: pd.DataFrame, context: StrategyContext
-    ) -> list[Order]:
-        orders = []
+    ):
         if len(df) < 60:
-            return orders
+            return self._no_signal_decision(df, context)
 
         row = df.iloc[-1]
         score = row.get("Final_Score", 0.0)
         if pd.isna(score):
-            return orders
+            return self._no_signal_decision(df, context)
 
         close = df["close"].astype(float)
         ma20 = close.rolling(20).mean()
@@ -116,9 +142,8 @@ class MA60TrendStrategy(BaseExecutionStrategy):
                 shares = round_lot_shares(risk_amount / stop_distance, context.market)
                 stop_loss = latest_close - stop_distance
 
-                orders.append(Order(
-                    date=str(df["date"].iloc[-1])[:10],
-                    action="buy",
+                decision = self._execution_decision(
+                    df, context, action="buy",
                     shares=shares,
                     stop_loss=round(stop_loss, 2),
                     reason=(
@@ -128,12 +153,13 @@ class MA60TrendStrategy(BaseExecutionStrategy):
                     ),
                     time_stop_days=250,   # 中长期持有，不设短时间止损
                     hard_stop_pct=0.25,   # 放宽硬止损至 25%
-                ))
+                )
                 logger.info(
                     f"[策略H] {df['date'].iloc[-1]} 开仓 | "
                     f"价={latest_close:.2f}>MA60={latest_ma60:.2f} "
                     f"MA20>MA60 | Score={score:+.3f} | 股数={shares} 止损={stop_loss:.2f}"
                 )
+                return decision
 
         # —— 平仓信号（仅持仓时） ——
         elif context.position.shares > 0:
@@ -174,12 +200,12 @@ class MA60TrendStrategy(BaseExecutionStrategy):
                 sell_reason = f"持仓超期：{context.holding_days}天 ≥ {self.max_hold_days}天"
 
             if should_sell:
-                orders.append(Order(
-                    date=str(df["date"].iloc[-1])[:10],
-                    action="sell",
+                decision = self._execution_decision(
+                    df, context, action="sell",
                     shares=context.position.shares,
                     reason=sell_reason,
-                ))
+                )
                 logger.info(f"[策略H] {df['date'].iloc[-1]} 平仓 | {sell_reason}")
+                return decision
 
-        return orders
+        return self._no_signal_decision(df, context)

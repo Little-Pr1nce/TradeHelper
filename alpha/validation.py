@@ -170,8 +170,9 @@ def apply_factor_weights(
 
     weighted = []
     total_weight = 0.0
-    # 预测可靠性因子：当近期预测正确率低时，系统性地降低所有因子权重
-    reliability_mult = max(prediction_reliability, 0.3)
+    # 可靠性不能同时乘到所有权重后再归一化，否则会数学上完全抵消。
+    # 先按因子质量得到加权平均，再把最终信号向 0 收缩。
+    reliability_mult = float(np.clip(prediction_reliability, 0.0, 1.0))
     for col, series in indicator_values.items():
         v = validation.get(col, {})
         mult = v.get("multiplier", 1.0)
@@ -182,8 +183,6 @@ def apply_factor_weights(
         if not v.get("direction_correct", True):
             mult = max(mult / 2, 0.25)
             logger.debug(f"  因子 {col} 方向错误，降权至 {mult:.2f}")
-        # 预测可靠性全局降权
-        mult = mult * reliability_mult
         rw = regime_weights.get(col, 1.0 / len(indicator_values))
         combined_weight = mult * rw
         weighted.append(series * combined_weight)
@@ -195,7 +194,7 @@ def apply_factor_weights(
 
     # 加权平均
     result = pd.concat(weighted, axis=1).sum(axis=1) / total_weight
-    return result
+    return result * reliability_mult
 
 
 # ── 内部函数 ──

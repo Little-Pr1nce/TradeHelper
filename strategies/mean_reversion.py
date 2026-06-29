@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from strategies.base import (
-    BaseExecutionStrategy, Order, Position, StrategyContext,
+    DecisionFirstStrategy, StrategyContext,
     compute_atr, compute_percentile_score, round_lot_shares,
 )
 
@@ -30,7 +30,7 @@ def _rolling_volatility(df: pd.DataFrame, period: int = 20) -> pd.Series:
     return returns.rolling(window=period).std() * np.sqrt(252)
 
 
-class MeanReversionStrategy(BaseExecutionStrategy):
+class MeanReversionStrategy(DecisionFirstStrategy):
     """波动率自适应均值回归（百分位版）。
 
     参数说明：
@@ -82,9 +82,39 @@ class MeanReversionStrategy(BaseExecutionStrategy):
             f"{int(self.vol_percentile*100)}% 分位时开仓。反波动率加权，冷却期 {self.cooldown_bars} 根。"
         )
 
-    def generate_orders(self, df: pd.DataFrame, context: StrategyContext) -> list[Order]:
+    def diagnose_no_signal(self, df, context) -> list[str]:
         if df.empty or "Final_Score" not in df.columns:
-            return []
+            return ["缺少 Final_Score，无法检查均值回归"]
+        pct = compute_percentile_score(df, window=self.lookback).iloc[-1]
+        if pd.isna(pct):
+            return ["百分位样本不足，至少需要60根有效K线"]
+        close = float(df["close"].iloc[-1])
+        if context.position.shares > 0:
+            atr = compute_atr(df, self.atr_period).iloc[-1]
+            profit_atr = (
+                (close - context.position.entry_price) / atr
+                if pd.notna(atr) and atr > 0 else 0.0
+            )
+            return [
+                f"Score百分位{pct:.0%}尚未升破{self.exit_pct:.0%}",
+                f"浮盈{profit_atr:.1f}×ATR尚未达到{self.atr_mult_tp:.1f}×ATR",
+            ]
+        missing = []
+        if pct > self.entry_pct:
+            missing.append(f"Score百分位{pct:.0%}需降至{self.entry_pct:.0%}以下")
+        vol = _rolling_volatility(df, self.vol_window).iloc[-1]
+        history = _rolling_volatility(df, self.vol_window).iloc[-min(self.vol_lookback, len(df)):].dropna()
+        if pd.isna(vol) or vol <= 0 or len(history) < 20:
+            missing.append("波动率样本不足")
+        else:
+            vol_pct = float((history < vol).mean())
+            if vol_pct > self.vol_percentile:
+                missing.append(f"波动率分位{vol_pct:.0%}需降至{self.vol_percentile:.0%}以下")
+        return missing or ["ATR或可下单股数无效"]
+
+    def _evaluate_decision(self, df: pd.DataFrame, context: StrategyContext):
+        if df.empty or "Final_Score" not in df.columns:
+            return self._no_signal_decision(df, context)
 
         idx = len(df) - 1
         current_date = str(df.iloc[-1].get("date", ""))[:10]
@@ -95,7 +125,7 @@ class MeanReversionStrategy(BaseExecutionStrategy):
         pct_series = compute_percentile_score(df, window=self.lookback)
         current_pct = pct_series.iloc[-1]
         if pd.isna(current_pct):
-            return []
+            return self._no_signal_decision(df, context)
 
         # ── 平仓条件 ──
         if has_position:
@@ -109,41 +139,41 @@ class MeanReversionStrategy(BaseExecutionStrategy):
                     f"[策略B] {current_date} 平仓 | "
                     f"百分位={current_pct:.1%} > {self.exit_pct:.0%}（信号反转）"
                 )
-                return [Order(
-                    date=current_date, action="sell",
+                return self._execution_decision(
+                    df, context, action="sell",
                     shares=context.position.shares,
                     reason=f"百分位({current_pct:.1%}) > {self.exit_pct:.0%}",
-                )]
+                )
             # 止盈
             if profit_atr >= self.atr_mult_tp:
                 logger.info(
                     f"[策略B] {current_date} 止盈 | "
                     f"浮盈={profit_atr:.1f}×ATR >= {self.atr_mult_tp}×ATR"
                 )
-                return [Order(
-                    date=current_date, action="sell",
+                return self._execution_decision(
+                    df, context, action="sell",
                     shares=context.position.shares,
                     reason=f"浮盈({profit_atr:.1f}×ATR) >= {self.atr_mult_tp}×ATR",
-                )]
-            return []
+                )
+            return self._no_signal_decision(df, context)
 
         # ── 开仓条件 ──
         if current_pct > self.entry_pct:
-            return []
+            return self._no_signal_decision(df, context)
 
         if idx < context.cooldown_until:
-            return []
+            return self._no_signal_decision(df, context)
 
         # 低波条件
         vol = _rolling_volatility(df, self.vol_window).iloc[-1]
         if pd.isna(vol) or vol <= 0:
-            return []
+            return self._no_signal_decision(df, context)
 
         vol_history = _rolling_volatility(df, self.vol_window).iloc[
             -min(self.vol_lookback, len(df)):
         ].dropna()
         if len(vol_history) < 20:
-            return []
+            return self._no_signal_decision(df, context)
 
         vol_pct = (vol_history < vol).mean()
         if vol_pct > self.vol_percentile:
@@ -151,7 +181,7 @@ class MeanReversionStrategy(BaseExecutionStrategy):
                 f"[策略B] {current_date} 波动率分位={vol_pct:.1%} "
                 f"> {self.vol_percentile:.0%}，不满足低波条件"
             )
-            return []
+            return self._no_signal_decision(df, context)
 
         # ── 仓位计算 ──
         median_vol = vol_history.median()
@@ -163,7 +193,7 @@ class MeanReversionStrategy(BaseExecutionStrategy):
 
         atr = compute_atr(df, self.atr_period).iloc[-1]
         if pd.isna(atr) or atr <= 0:
-            return []
+            return self._no_signal_decision(df, context)
 
         risk_amount = context.equity * effective_risk
         stop_distance = 2 * atr
@@ -176,8 +206,8 @@ class MeanReversionStrategy(BaseExecutionStrategy):
             f"波动率分位={vol_pct:.1%} | "
             f"风险预算={effective_risk:.1%} | 股数={shares}"
         )
-        return [Order(
-            date=current_date, action="buy", shares=shares,
+        return self._execution_decision(
+            df, context, action="buy", shares=shares,
             stop_loss=stop_loss,
             reason=f"超卖+低波: 百分位={current_pct:.1%}, vol_pct={vol_pct:.1%}",
-        )]
+        )

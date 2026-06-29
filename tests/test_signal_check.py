@@ -8,12 +8,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
+import numpy as np
 
 from core.signal_check import (
     SignalResult,
     _apply_current_price_snapshot,
     check_signals,
     generate_operation_plan,
+    rank_signals,
     run_signal_check,
 )
 from core.data_quality import evaluate_data_quality
@@ -113,6 +115,51 @@ def test_check_signals_can_use_real_account_equity():
     assert signals[0].position_pct == 0.50
 
 
+def test_zero_real_account_equity_never_uses_reference_capital():
+    signals = check_signals(
+        _df(), [Variant()], "US",
+        initial_capital=100000.0,
+        account_equity=0.0,
+    )
+
+    assert len(signals) == 1
+    assert signals[0].signal == "no_signal"
+    assert signals[0].execution_level == "D"
+    assert signals[0].position_pct == 0.0
+    assert "真实账户权益为0" in signals[0].no_signal_reason
+
+    plan = generate_operation_plan(
+        signals, current_price=100.0, account_equity=0.0, df=_df()
+    )
+    assert plan.account_equity == 0.0
+    assert plan.equity_is_reference is False
+    assert "禁止新开仓" in plan.markdown
+
+
+def test_a_level_buy_requires_matching_positive_history():
+    signal = SignalResult(
+        variant_label="A", strategy_name="A", base_key="A",
+        signal="buy", execution_level="A", position_pct=0.4,
+        reason="条件已确认",
+    )
+    [without_history] = rank_signals([signal], health_data=[])
+    assert without_history.execution_level == "B"
+    assert without_history.position_pct == 0.2
+
+    supported = SignalResult(
+        variant_label="A", strategy_name="A", base_key="A",
+        signal="buy", execution_level="A", position_pct=0.4,
+        reason="条件已确认",
+    )
+    [with_history] = rank_signals([supported], health_data=[{
+        "strategy_name": "A", "action": "keep", "total": 12,
+        "accuracy": 0.67, "confidence_lower_95": 0.39,
+        "avg_return": 0.03, "sample_status": "ok",
+    }])
+    assert with_history.execution_level == "A"
+    assert with_history.position_pct == 0.4
+
+
 def test_check_signals_uses_current_price_for_sizing():
     signals = check_signals(
         _df(), [Variant()], "US",
@@ -136,6 +183,7 @@ def test_realtime_snapshot_appends_bar_and_recomputes_indicators():
     assert snapshot["close"].iloc[-2] == 100.0
     assert snapshot["close"].iloc[-1] == 120.0
     assert round(float(snapshot["ma_5"].iloc[-1]), 4) == 104.0
+    assert pd.isna(snapshot["volume"].iloc[-1])
     assert "rsi" in snapshot.columns
     assert snapshot.attrs["realtime_snapshot_only"] is True
 
@@ -157,6 +205,25 @@ def test_data_quality_blocks_new_buy_signals():
     assert signals[0].signal == "no_signal"
     assert signals[0].execution_level == "D"
     assert "数据质量阻断" in signals[0].no_signal_reason
+
+
+def test_missing_per_stock_intraday_quote_blocks_only_that_stock():
+    report = evaluate_data_quality(
+        _df(),
+        current_price=100.0,
+        market="US",
+        realtime_quote_quality={
+            "required": True,
+            "available": False,
+            "fresh": False,
+            "issues": ["当前时段实时报价缺失"],
+            "warnings": [],
+        },
+    )
+
+    assert report.status == "blocked"
+    assert report.block_new_entries is True
+    assert any("实时报价缺失" in issue for issue in report.issues)
 
 
 def test_data_quality_degrades_position_and_plan_markdown():
@@ -229,7 +296,8 @@ def test_strategy_health_watch_reduces_buy_position():
     assert ranked[0].execution_level == "B"
     assert ranked[0].position_pct == 0.125
     assert plan and plan.conservative
-    assert plan.conservative["position_pct"] == 0.125
+    assert plan.conservative["position_pct"] < ranked[0].position_pct
+    assert np.isclose(plan.conservative["max_loss_amount"], 1000.0)
 
 
 def test_strategy_health_insufficient_sample_reduces_more():
@@ -292,6 +360,7 @@ def test_operation_plan_reports_real_loss_pct_and_bearish_caps():
         signal="buy",
         entry_price=100.0,
         stop_loss=92.0,
+        take_profit=116.0,
         position_pct=0.80,
         reason="测试订单",
         audit_verdict="PASS",
@@ -301,8 +370,10 @@ def test_operation_plan_reports_real_loss_pct_and_bearish_caps():
 
     plan = generate_operation_plan([signal], current_price=100.0, market_bias="bearish", df=_df())
 
-    assert plan.conservative["position_pct"] == 0.25
-    assert plan.aggressive["position_pct"] == 0.30
+    assert plan.conservative["position_pct"] < 0.25
+    assert plan.aggressive["position_pct"] < 0.35
+    assert np.isclose(plan.conservative["max_loss_amount"], 1000.0)
+    assert np.isclose(plan.aggressive["max_loss_amount"], 2000.0)
     assert "单价风险 8.0%" in plan.markdown
     assert "账户风险" in plan.markdown
     assert "最大亏损" in plan.markdown
@@ -311,15 +382,64 @@ def test_operation_plan_reports_real_loss_pct_and_bearish_caps():
     assert "失效条件" in plan.markdown
     assert "信号强度" in plan.markdown
     assert "**2.00%** 净值" in plan.markdown
+    assert "| 风险收益比 | 1:2.00 | 1:2.00 |" in plan.markdown
     assert "92.0% 风控" not in plan.markdown
+
+
+def test_signal_rank_does_not_depend_on_reason_length():
+    short = SignalResult(
+        variant_label="O", strategy_name="趋势策略", base_key="O",
+        signal="buy", entry_price=100.0, stop_loss=92.0,
+        trigger_price=100.0, invalidation="跌破92", position_pct=0.2,
+        execution_level="B", reason="趋势满仓",
+    )
+    long = SignalResult(
+        variant_label="A", strategy_name="百分位策略", base_key="A",
+        signal="buy", entry_price=100.0, stop_loss=92.0,
+        trigger_price=100.0, invalidation="跌破92", position_pct=0.2,
+        execution_level="B", reason="这是一段明显更长但不应获得额外排序分数的策略解释文本",
+    )
+
+    ranked = rank_signals([short, long])
+
+    assert ranked[0].rank_score == ranked[1].rank_score
+
+
+def test_existing_concentration_can_block_additional_position():
+    signal = SignalResult(
+        variant_label="T", strategy_name="测试", base_key="T",
+        signal="buy", entry_price=100.0, stop_loss=92.0,
+        position_pct=0.2, execution_level="B", reason="测试",
+    )
+    plan = generate_operation_plan(
+        [signal], current_price=100.0, account_equity=100000.0, df=_df(),
+        current_position=Position(shares=200, avg_cost=90.0, entry_price=90.0),
+    )
+
+    assert plan.conservative["position_pct"] == 0.0
+    assert "已有仓位20.0%" in plan.conservative["position_cap_reason"]
+
+
+def test_missing_take_profit_is_reported_as_unquantifiable():
+    signal = SignalResult(
+        variant_label="T", strategy_name="测试", base_key="T",
+        signal="buy", entry_price=100.0, stop_loss=92.0,
+        position_pct=0.1, execution_level="B", reason="测试",
+    )
+    plan = generate_operation_plan([signal], current_price=100.0, df=_df())
+
+    assert "不可量化（未设止盈）" in plan.markdown
 
 
 if __name__ == "__main__":
     test_check_signals_position_pct_comes_from_order_shares()
     test_check_signals_can_use_real_account_equity()
+    test_zero_real_account_equity_never_uses_reference_capital()
+    test_a_level_buy_requires_matching_positive_history()
     test_check_signals_uses_current_price_for_sizing()
     test_realtime_snapshot_appends_bar_and_recomputes_indicators()
     test_data_quality_blocks_new_buy_signals()
+    test_missing_per_stock_intraday_quote_blocks_only_that_stock()
     test_data_quality_degrades_position_and_plan_markdown()
     test_strategy_health_demote_blocks_buy_execution()
     test_strategy_health_watch_reduces_buy_position()
@@ -327,4 +447,7 @@ if __name__ == "__main__":
     test_evaluate_data_quality_detects_invalid_ohlc()
     test_check_signals_uses_current_position_for_sell_signal()
     test_operation_plan_reports_real_loss_pct_and_bearish_caps()
-    print("12/12 passed")
+    test_signal_rank_does_not_depend_on_reason_length()
+    test_existing_concentration_can_block_additional_position()
+    test_missing_take_profit_is_reported_as_unquantifiable()
+    print("18/18 passed")

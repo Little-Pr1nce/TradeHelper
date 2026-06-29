@@ -226,6 +226,9 @@ def compute_technical_normalized(
         result[f"{col}_norm"] = normalized
         normalized_cols.append(f"{col}_norm")
 
+    # 历史分数必须保持因果性。完整样本的 IC/IR 可以用来评估“今天”应使用
+    # 哪些因子，但不能用它回写过去每一天的权重。
+    result["Tech_Normalized_Score"] = result[normalized_cols].mean(axis=1)
     if validate and "close" in result.columns and len(result) >= 100:
         logger.info("  [Alpha] 因子有效性检验 (IC/IR)...")
         from alpha.validation import validate_factors, apply_factor_weights
@@ -238,12 +241,12 @@ def compute_technical_normalized(
         if d_count:
             logger.info(f"  [Alpha] {d_count} 个因子 D 级剔除")
         indicator_values = {col: result[f"{col}_norm"] for col in available}
-        result["Tech_Normalized_Score"] = apply_factor_weights(
+        adjusted = apply_factor_weights(
             indicator_values, validation, regime_weights,
             prediction_reliability=prediction_reliability,
         )
-    else:
-        result["Tech_Normalized_Score"] = result[normalized_cols].mean(axis=1)
+        if len(result) > 0 and pd.notna(adjusted.iloc[-1]):
+            result.loc[result.index[-1], "Tech_Normalized_Score"] = float(adjusted.iloc[-1])
 
     logger.info(f"  [Alpha] 技术面得分有效值: {result['Tech_Normalized_Score'].notna().sum()}/{len(result)}")
     return result
@@ -254,9 +257,9 @@ def align_finbert_scores(price_df, news_df, date_col="date", score_col="finbert_
     """将新闻情感得分按日期对齐到价格 DataFrame，含时间衰减加权。
 
     策略：
-      1. 按日期聚合：同一天多条新闻取加权平均，权重 = exp(-ln(2) * days_ago / half_life)
-      2. 当天有新闻 → 用当天加权得分；当天无新闻 → 向前填充最近一天的得分。
-      3. 半衰期默认 1 天，即 1 天前的新闻权重为今天的 50%。
+      1. 按日期聚合同日新闻。
+      2. 每个交易日只能使用当日或之前已发布的最近新闻。
+      3. 无新闻日不做无限前向填充，而是按日历日距离持续半衰。
 
     这确保每个交易日都有 FinBERT_Score，同时近期新闻比旧新闻更有影响力。
     """
@@ -268,41 +271,53 @@ def align_finbert_scores(price_df, news_df, date_col="date", score_col="finbert_
         return pd.Series(0.0, index=price_df.index, name="FinBERT_Score")
 
     news_scores = news_df[[date_col, score_col]].copy()
-    news_scores[date_col] = pd.to_datetime(news_scores[date_col])
+    news_scores[date_col] = pd.to_datetime(news_scores[date_col], errors="coerce")
+    news_scores[score_col] = pd.to_numeric(news_scores[score_col], errors="coerce")
+    news_scores = news_scores.dropna(subset=[date_col, score_col])
+    if news_scores.empty:
+        return pd.Series(0.0, index=price_df.index, name="FinBERT_Score")
 
-    # 确定参考日期（最新价格日期）
     if date_col in price_df.columns:
-        price_dates_ts = pd.to_datetime(price_df[date_col])
+        price_dates_ts = pd.to_datetime(price_df[date_col], errors="coerce")
     else:
-        price_dates_ts = pd.to_datetime(pd.Series(price_df.index))
-    ref_date = price_dates_ts.max()
+        price_dates_ts = pd.to_datetime(pd.Series(price_df.index), errors="coerce")
+    if half_life_days <= 0:
+        raise ValueError("half_life_days 必须大于 0")
 
-    # 计算每条新闻的 days_ago 和衰减权重
-    news_scores["days_ago"] = (ref_date - news_scores[date_col]).dt.days
+    news_scores["news_day"] = news_scores[date_col].dt.normalize()
+    grouped = (
+        news_scores.groupby("news_day", as_index=False)[score_col]
+        .mean()
+        .sort_values("news_day")
+    )
+    price_points = pd.DataFrame({
+        "price_day": price_dates_ts.dt.normalize(),
+        "_row_order": np.arange(len(price_df)),
+    }).dropna(subset=["price_day"]).sort_values("price_day")
+    if price_points.empty:
+        return pd.Series(0.0, index=price_df.index, name="FinBERT_Score")
+    aligned = pd.merge_asof(
+        price_points,
+        grouped.rename(columns={"news_day": "matched_news_day"}),
+        left_on="price_day",
+        right_on="matched_news_day",
+        direction="backward",
+    )
+    days_since = (aligned["price_day"] - aligned["matched_news_day"]).dt.days
     decay_factor = np.log(2) / half_life_days
-    news_scores["weight"] = np.exp(-decay_factor * news_scores["days_ago"].clip(lower=0))
-
-    # 按日期加权聚合
-    news_scores["date_str"] = news_scores[date_col].dt.strftime("%Y-%m-%d")
-    news_scores["weighted_score"] = news_scores[score_col] * news_scores["weight"]
-    grouped = news_scores.groupby("date_str").agg(
-        {"weighted_score": "sum", "weight": "sum"}
-    ).reset_index()
-    grouped[score_col] = grouped["weighted_score"] / grouped["weight"]
-
-    price_dates = price_dates_ts.dt.strftime("%Y-%m-%d")
-
-    # 构建日期 → 得分映射，然后对价格日期做前向填充
-    score_map = dict(zip(grouped["date_str"], grouped[score_col]))
-    raw = [score_map.get(d, np.nan) for d in price_dates]
-    # 前向填充：NaN 用最近一个非 NaN 值填充；开头无数据则填 0
-    filled = pd.Series(raw, index=price_df.index, name="FinBERT_Score").ffill().fillna(0.0)
+    aligned[score_col] = (
+        pd.to_numeric(aligned[score_col], errors="coerce").fillna(0.0)
+        * np.exp(-decay_factor * days_since.fillna(0).clip(lower=0))
+    )
+    aligned = aligned.sort_values("_row_order")
+    values = np.zeros(len(price_df), dtype=float)
+    values[aligned["_row_order"].astype(int).to_numpy()] = aligned[score_col].to_numpy()
+    filled = pd.Series(values, index=price_df.index, name="FinBERT_Score")
 
     non_zero = (filled != 0.0).sum()
-    avg_weight = news_scores["weight"].mean() if len(news_scores) > 0 else 1.0
     logger.info(
-        f"  [Alpha] 新闻对齐（时间衰减 half_life={half_life_days}d, "
-        f"平均权重={avg_weight:.3f}）：{non_zero}/{len(filled)} 天有新闻数据"
+        f"  [Alpha] 新闻对齐（时间衰减 half_life={half_life_days}d）："
+        f"{non_zero}/{len(filled)} 天有可用情绪残留"
     )
     return filled
 
@@ -325,7 +340,7 @@ def calc_final_score(
     if "Tech_Normalized_Score" not in result.columns:
         result = compute_technical_normalized(result, validate=validate,
                                                validation_mode=validation_mode,
-                                               prediction_reliability=prediction_reliability)
+                                               prediction_reliability=1.0)
 
     finbert_series = align_finbert_scores(result, news_df)
     tech_score = result["Tech_Normalized_Score"].fillna(0.0)
@@ -388,6 +403,15 @@ def calc_final_score(
         if depth_available and len(result) > 0:
             latest_base = (1.0 - W_DEPTH) * float(base.iloc[-1]) + depth_adj
             result.loc[result.index[-1], "Final_Score"] = float(np.clip(latest_base, -1.0, 1.0))
+
+    # 预测可靠性是“当前已知”的状态，只能收缩最新一个交易信号，
+    # 不能回写整段历史因子并影响回测。
+    if len(result) > 0:
+        reliability = float(np.clip(prediction_reliability, 0.0, 1.0))
+        latest_idx = result.index[-1]
+        result.loc[latest_idx, "Final_Score"] = float(
+            np.clip(float(result.loc[latest_idx, "Final_Score"]) * reliability, -1.0, 1.0)
+        )
 
     result["FinBERT_Score"] = finbert_score.values
     final_valid = result["Final_Score"].dropna()

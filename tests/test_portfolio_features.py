@@ -30,6 +30,8 @@ from services.portfolio_service import (
     PortfolioService,
     _build_portfolio_operation_summary,
     _compute_portfolio_risk_snapshot,
+    _evaluate_realtime_quote_quality,
+    _quote_payload,
 )
 from services.research_observations import (
     apply_history_feedback,
@@ -73,6 +75,36 @@ def test_signal_stabilizer_reuses_small_move():
     decision = SignalStabilizer(tolerance_pct=0.003, min_interval_minutes=10).should_emit("AAPL", 100.1)
     assert decision.should_emit is False
     assert decision.previous_report is not None
+
+
+def test_realtime_quote_keeps_ohlcv_and_checks_each_stock_freshness():
+    now = 1_800_000_000.0
+    payload = _quote_payload(
+        price=207.14,
+        source="TickFlow实时报价",
+        session="intraday",
+        timestamp=int((now - 60) * 1000),
+        bar={
+            "open": 194.74, "high": 217.09, "low": 190.93,
+            "volume": 2_000_000, "prev_close": 195.0,
+        },
+    )
+    quality = _evaluate_realtime_quote_quality(payload, "intraday", now_epoch=now)
+
+    assert payload["high"] == 217.09
+    assert payload["low"] == 190.93
+    assert payload["volume"] == 2_000_000
+    assert quality["fresh"] is True
+    assert quality["ohlc_complete"] is True
+    assert quality["issues"] == []
+
+    stale = dict(payload, timestamp=int((now - 3600) * 1000))
+    stale_quality = _evaluate_realtime_quote_quality(stale, "intraday", now_epoch=now)
+    assert stale_quality["fresh"] is False
+    assert any("过期" in issue for issue in stale_quality["issues"])
+
+    missing_quality = _evaluate_realtime_quote_quality(None, "intraday", now_epoch=now)
+    assert missing_quality["issues"]
 
 
 def test_holdings_watchlist_balance_crud():
@@ -335,7 +367,7 @@ def test_research_observations_parse_and_confirm_llm_candidates():
 
     assert "研究员观察 vs 系统确认" in section
     assert "Corning（GLW）" in section
-    assert "已确认 | A" in section
+    assert "已确认 | B" in section
     assert "Freeport（FCX）" in section
     assert "待验证 | C" in section
     assert "SanDisk（SNDK）" in section
@@ -359,6 +391,9 @@ def test_research_observation_log_verifies_future_returns():
         stop_loss=96.0,
         expected_direction="bullish",
         llm_proposed=1,
+        trigger_operator="immediate",
+        entry_triggered=1,
+        validation_status="triggered",
     ))
     assert obs_id > 0
 
@@ -424,6 +459,8 @@ def test_research_history_feedback_demotes_negative_expectancy():
             return_5d=-0.04,
             return_10d=-0.06,
             max_adverse_return=-0.08,
+            entry_triggered=1,
+            validation_status="verified",
         ))
 
     obs = ResearchObservation(
@@ -479,6 +516,8 @@ def test_historical_evaluation_panel_summarizes_predictions_and_patterns():
             return_5d=0.03,
             return_10d=0.05,
             max_adverse_return=-0.015,
+            entry_triggered=1,
+            validation_status="verified",
         ))
 
     md = PortfolioService().build_historical_evaluation_panel("US")
@@ -530,10 +569,61 @@ def test_single_stock_research_item_feeds_observation_confirmation():
     assert "MA120" in section
 
 
+def test_research_observation_same_event_is_deduplicated():
+    db = fresh_db()
+    first = ResearchObservationLog(
+        code="FCX", pattern_type="ma120_support",
+        observed_at="2026-06-01T10:00:00", trigger_price=100.0,
+        expected_direction="bullish", trigger_operator="cross_above",
+    )
+    second = ResearchObservationLog(
+        code="FCX", pattern_type="ma120_support",
+        observed_at="2026-06-01T14:00:00", trigger_price=101.0,
+        expected_direction="bullish", trigger_operator="cross_above",
+    )
+
+    first_id = db.insert_research_observation(first)
+    second_id = db.insert_research_observation(second)
+
+    assert second_id == first_id
+    count = db.execute(
+        "SELECT COUNT(*) AS cnt FROM research_observation_log WHERE code='FCX'"
+    ).fetchone()["cnt"]
+    assert count == 1
+
+
+def test_untriggered_observation_does_not_enter_learning_stats():
+    db = fresh_db()
+    obs_id = db.insert_research_observation(ResearchObservationLog(
+        code="FCX", pattern_type="ma120_support",
+        observed_at="2026-06-01T10:00:00", trigger_price=120.0,
+        stop_loss=115.0, expected_direction="bullish",
+        trigger_operator="cross_above", validation_status="pending",
+    ))
+    db.insert_prices([
+        PriceData(
+            code="FCX", date=f"2026-06-{day:02d}", open=100.0,
+            high=102.0, low=98.0, close=100.0, volume=1000000,
+        )
+        for day in range(2, 12)
+    ])
+
+    assert db.batch_verify_research_observations() == 0
+    row = db.execute(
+        "SELECT validation_status, entry_triggered FROM research_observation_log WHERE id=?",
+        (obs_id,),
+    ).fetchone()
+    assert row["validation_status"] == "not_triggered"
+    assert row["entry_triggered"] == 0
+    stats = db.get_research_observation_stats(code="FCX", pattern_type="ma120_support")
+    assert stats["count"] == 0
+
+
 if __name__ == "__main__":
     tests = [
         test_filter_reports_by_market_mode_period_rating,
         test_signal_stabilizer_reuses_small_move,
+        test_realtime_quote_keeps_ohlcv_and_checks_each_stock_freshness,
         test_holdings_watchlist_balance_crud,
         test_portfolio_summary_adds_risk_overlay_and_compacts_no_signal,
         test_portfolio_summary_shows_data_quality_gate,
@@ -544,6 +634,8 @@ if __name__ == "__main__":
         test_research_history_feedback_demotes_negative_expectancy,
         test_historical_evaluation_panel_summarizes_predictions_and_patterns,
         test_single_stock_research_item_feeds_observation_confirmation,
+        test_research_observation_same_event_is_deduplicated,
+        test_untriggered_observation_does_not_enter_learning_stats,
     ]
     for test in tests:
         test()

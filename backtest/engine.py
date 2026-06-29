@@ -127,6 +127,10 @@ class BacktestEngine:
 
         n = len(df)
         bar_count = 0  # 已处理 K 线计数（用于每 50 根打印进度）
+        trailing_volatility = (
+            df["close"].astype(float).pct_change()
+            .rolling(20, min_periods=10).std() * np.sqrt(252)
+        )
 
         # ---- 逐日回测主循环 ----
         for i in range(n - 1):  # -1 因为每次需要 T+1 的 bar
@@ -160,7 +164,14 @@ class BacktestEngine:
 
             # ── T+1 日开盘：撮合订单 ──
             for order in orders:
-                fill = self.broker.execute_order(order, t1_bar, account, prev_close)
+                known_volatility = trailing_volatility.iloc[i]
+                fill = self.broker.execute_order(
+                    order,
+                    t1_bar,
+                    account,
+                    prev_close,
+                    float(known_volatility) if pd.notna(known_volatility) else 0.0,
+                )
                 if fill is None:
                     continue  # 订单被拒绝（涨跌停/停牌/资金不足）
 

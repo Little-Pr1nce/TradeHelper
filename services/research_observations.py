@@ -27,6 +27,7 @@ class ResearchObservation:
     stop_loss: float = 0.0
     expected_direction: str = "neutral"
     llm_proposed: int = 0
+    trigger_operator: str = ""  # immediate / cross_above / cross_below
 
 
 def parse_llm_observations(llm_report: str) -> list[ResearchObservation]:
@@ -241,6 +242,15 @@ def observations_to_logs(
             stop_loss=obs.stop_loss,
             expected_direction=obs.expected_direction,
             llm_proposed=obs.llm_proposed,
+            trigger_operator=obs.trigger_operator,
+            entry_triggered=(
+                1 if obs.trigger_operator == "immediate"
+                and obs.execution_level in ("A", "B") else 0
+            ),
+            validation_status=(
+                "triggered" if obs.trigger_operator == "immediate"
+                and obs.execution_level in ("A", "B") else "pending"
+            ),
         ))
     return logs
 
@@ -336,6 +346,7 @@ def _validate_observation(
         obs.trigger_price = float(executable.get("entry_price") or executable.get("trigger_price") or price or 0)
         obs.stop_loss = float(executable.get("stop_loss") or 0)
         obs.expected_direction = "bearish" if executable.get("signal") == "sell" else "bullish"
+        obs.trigger_operator = "immediate"
     else:
         obs.system_status = "待验证"
         obs.execution_level = "C"
@@ -344,6 +355,7 @@ def _validate_observation(
         obs.pattern_type = obs.pattern_type or "general"
         obs.trigger_price = price
         obs.expected_direction = "neutral"
+        obs.trigger_operator = ""
     return obs
 
 
@@ -370,22 +382,25 @@ def _validate_profit_lock(
     if profit_pct >= 0.10 and pullback <= -0.035 and near_high:
         lock_line = high * 0.965
         obs.system_status = "已确认"
-        obs.execution_level = "A"
+        # 事实与风险条件成立，但在历史正期望尚未确认前最高为 B。
+        obs.execution_level = "B"
         obs.next_step = f"跌破锁利线 {lock_line:.2f} 后部分止盈或上移止损"
         obs.reason = f"浮盈{profit_pct:.1%}，当日高点{high:.2f}接近120日高点，回落{pullback:.1%}"
         obs.pattern_type = "profit_lock"
         obs.trigger_price = close
         obs.stop_loss = lock_line
         obs.expected_direction = "bearish"
+        obs.trigger_operator = "immediate"
     else:
         obs.system_status = "待验证"
         obs.execution_level = "C"
         obs.next_step = "继续观察是否接近阶段高点且从高点回落≥3.5%"
         obs.reason = f"浮盈{profit_pct:.1%}，高点回落{pullback:.1%}，尚未满足锁利规则"
         obs.pattern_type = "profit_lock"
-        obs.trigger_price = close
-        obs.stop_loss = high * 0.965 if high > 0 else 0.0
+        obs.trigger_price = high * 0.965 if high > 0 else close
+        obs.stop_loss = 0.0
         obs.expected_direction = "bearish"
+        obs.trigger_operator = "cross_below"
     return obs
 
 
@@ -417,6 +432,7 @@ def _validate_ma120(
         obs.trigger_price = price or close
         obs.stop_loss = ma120 * 0.98
         obs.expected_direction = "bullish"
+        obs.trigger_operator = "immediate"
     elif touched:
         obs.system_status = "待验证"
         obs.execution_level = "C"
@@ -426,6 +442,7 @@ def _validate_ma120(
         obs.trigger_price = ma120
         obs.stop_loss = ma120 * 0.98
         obs.expected_direction = "bullish"
+        obs.trigger_operator = "cross_above"
     else:
         obs.system_status = "系统反驳"
         obs.execution_level = "D"
@@ -435,6 +452,7 @@ def _validate_ma120(
         obs.trigger_price = ma120
         obs.stop_loss = ma120 * 0.98
         obs.expected_direction = "bullish"
+        obs.trigger_operator = ""
     return obs
 
 
@@ -459,6 +477,7 @@ def _validate_momentum(
         obs.pattern_type = "momentum"
         obs.trigger_price = price
         obs.expected_direction = "bullish"
+        obs.trigger_operator = ""
         return obs
     if _has_positive_momentum(marker, price):
         obs.system_status = "待验证"
@@ -468,6 +487,7 @@ def _validate_momentum(
         obs.pattern_type = "momentum"
         obs.trigger_price = price
         obs.expected_direction = "bullish"
+        obs.trigger_operator = ""
         return obs
     obs.system_status = "系统反驳"
     obs.execution_level = "D"
@@ -476,6 +496,7 @@ def _validate_momentum(
     obs.pattern_type = "momentum"
     obs.trigger_price = price
     obs.expected_direction = "bullish"
+    obs.trigger_operator = ""
     return obs
 
 

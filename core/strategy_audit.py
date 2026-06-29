@@ -42,6 +42,9 @@ CONDITIONAL_MAX_DRAWDOWN = 0.40
 CONDITIONAL_MIN_TEST_RETURN = 0.0
 
 OVERFIT_SHARPE_DEGRADATION = 0.30  # 验证期夏普 < 训练期的 30% → 过拟合
+BOOTSTRAP_SIMULATIONS = 400
+BOOTSTRAP_MIN_DAILY_RETURNS = 20
+BOOTSTRAP_MIN_TRADES = 3
 
 
 @dataclass
@@ -65,6 +68,16 @@ class StrategyAuditEntry:
     # 衰减指标
     sharpe_degradation: float = 0.0  # test_sharpe / train_sharpe
     return_degradation: float = 0.0  # test_return / train_return
+    # 样本外分块 Bootstrap 不确定性审计
+    bootstrap_status: str = "insufficient"
+    bootstrap_samples: int = 0
+    positive_expectancy_prob: float = 0.0
+    return_ci_low: float = 0.0
+    return_ci_high: float = 0.0
+    sharpe_ci_low: float = 0.0
+    sharpe_ci_high: float = 0.0
+    drawdown_p95: float = 0.0
+    ruin_probability: float = 0.0
     # 判定
     verdict: str = ""                # "PASS" | "CONDITIONAL" | "FAIL"
     overfit: bool = False            # 过拟合标记
@@ -87,6 +100,15 @@ class StrategyAuditEntry:
             "test_win_rate": round(self.test_win_rate, 4),
             "sharpe_degradation": round(self.sharpe_degradation, 4),
             "return_degradation": round(self.return_degradation, 4),
+            "bootstrap_status": self.bootstrap_status,
+            "bootstrap_samples": self.bootstrap_samples,
+            "positive_expectancy_prob": round(self.positive_expectancy_prob, 4),
+            "return_ci_low": round(self.return_ci_low, 4),
+            "return_ci_high": round(self.return_ci_high, 4),
+            "sharpe_ci_low": round(self.sharpe_ci_low, 4),
+            "sharpe_ci_high": round(self.sharpe_ci_high, 4),
+            "drawdown_p95": round(self.drawdown_p95, 4),
+            "ruin_probability": round(self.ruin_probability, 4),
             "verdict": self.verdict,
             "overfit": self.overfit,
             "verdict_reason": self.verdict_reason,
@@ -294,6 +316,27 @@ def _audit_one_strategy(
         sharpe_degradation=sharpe_degradation,
         return_degradation=return_degradation,
     )
+    bootstrap = _block_bootstrap_metrics(
+        test_equities,
+        test_metrics["trades"],
+        seed=7919 + sum(ord(char) for char in key),
+    )
+    if bootstrap["status"] == "ok":
+        positive_prob = bootstrap["positive_expectancy_prob"]
+        if positive_prob < 0.40:
+            verdict = "FAIL"
+            reason += f"; Bootstrap正期望概率仅{positive_prob:.0%}"
+        elif verdict == "PASS" and (
+            positive_prob < 0.60 or bootstrap["return_ci_low"] < -0.05
+        ):
+            verdict = "CONDITIONAL"
+            reason += (
+                f"; Bootstrap不确定性较高（正期望概率{positive_prob:.0%}，"
+                f"收益95%下界{bootstrap['return_ci_low']:+.1%}）"
+            )
+    elif verdict == "PASS":
+        verdict = "CONDITIONAL"
+        reason += "; Bootstrap样本不足，不能维持强通过结论"
 
     return StrategyAuditEntry(
         strategy_key=key,
@@ -311,6 +354,15 @@ def _audit_one_strategy(
         test_win_rate=test_metrics["win_rate"],
         sharpe_degradation=sharpe_degradation,
         return_degradation=return_degradation,
+        bootstrap_status=bootstrap["status"],
+        bootstrap_samples=bootstrap["samples"],
+        positive_expectancy_prob=bootstrap["positive_expectancy_prob"],
+        return_ci_low=bootstrap["return_ci_low"],
+        return_ci_high=bootstrap["return_ci_high"],
+        sharpe_ci_low=bootstrap["sharpe_ci_low"],
+        sharpe_ci_high=bootstrap["sharpe_ci_high"],
+        drawdown_p95=bootstrap["drawdown_p95"],
+        ruin_probability=bootstrap["ruin_probability"],
         verdict=verdict,
         overfit=overfit,
         verdict_reason=reason,
@@ -350,6 +402,63 @@ def _compute_segment_metrics(
         "win_rate": win_rate,
         "profit_loss_ratio": profit_loss_ratio,
         "avg_holding_days": avg_holding,
+    }
+
+
+def _block_bootstrap_metrics(
+    equities: list[float],
+    trade_count: int,
+    simulations: int = BOOTSTRAP_SIMULATIONS,
+    seed: int = 42,
+) -> dict:
+    """对样本外日收益做循环分块 Bootstrap，保留短期相关性。"""
+    defaults = {
+        "status": "insufficient", "samples": 0,
+        "positive_expectancy_prob": 0.0,
+        "return_ci_low": 0.0, "return_ci_high": 0.0,
+        "sharpe_ci_low": 0.0, "sharpe_ci_high": 0.0,
+        "drawdown_p95": 0.0, "ruin_probability": 0.0,
+    }
+    if len(equities) < 2 or trade_count < BOOTSTRAP_MIN_TRADES:
+        return defaults
+    values = np.asarray(equities, dtype=float)
+    valid = (values[:-1] > 0) & np.isfinite(values[:-1]) & np.isfinite(values[1:])
+    returns = values[1:][valid] / values[:-1][valid] - 1.0
+    returns = returns[np.isfinite(returns) & (returns > -0.99)]
+    if len(returns) < BOOTSTRAP_MIN_DAILY_RETURNS:
+        return defaults
+
+    n = len(returns)
+    block = max(2, min(10, int(np.sqrt(n))))
+    rng = np.random.default_rng(seed)
+    total_returns = np.empty(simulations)
+    sharpes = np.empty(simulations)
+    drawdowns = np.empty(simulations)
+    for sim in range(simulations):
+        sampled = []
+        while len(sampled) < n:
+            start = int(rng.integers(0, n))
+            sampled.extend(returns[(start + offset) % n] for offset in range(block))
+        path_returns = np.asarray(sampled[:n], dtype=float)
+        path = np.concatenate(([1.0], np.cumprod(1.0 + path_returns)))
+        total_returns[sim] = path[-1] - 1.0
+        std = float(path_returns.std(ddof=1)) if n > 1 else 0.0
+        sharpes[sim] = (
+            float(path_returns.mean() / std * np.sqrt(TRADING_DAYS_PER_YEAR))
+            if std > 0 else 0.0
+        )
+        drawdowns[sim] = _calc_max_drawdown(path.tolist())
+
+    return {
+        "status": "ok",
+        "samples": int(simulations),
+        "positive_expectancy_prob": float(np.mean(total_returns > 0)),
+        "return_ci_low": float(np.percentile(total_returns, 2.5)),
+        "return_ci_high": float(np.percentile(total_returns, 97.5)),
+        "sharpe_ci_low": float(np.percentile(sharpes, 2.5)),
+        "sharpe_ci_high": float(np.percentile(sharpes, 97.5)),
+        "drawdown_p95": float(np.percentile(drawdowns, 95)),
+        "ruin_probability": float(np.mean(drawdowns >= 0.30)),
     }
 
 

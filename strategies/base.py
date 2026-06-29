@@ -160,6 +160,15 @@ class BaseExecutionStrategy(ABC):
         """返回可调参数列表，每个元素 = {name, default, values: [候选值...]}。"""
         return []
 
+    def diagnose_no_signal(
+        self, df: pd.DataFrame, context: StrategyContext
+    ) -> list[str]:
+        """返回本策略未触发时的原生条件诊断。"""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} 必须实现 diagnose_no_signal()，"
+            "系统不会猜测该策略的触发条件"
+        )
+
     def generate_decision(
         self, df: pd.DataFrame, context: StrategyContext
     ) -> StrategyDecision:
@@ -168,7 +177,15 @@ class BaseExecutionStrategy(ABC):
             raise NotImplementedError(
                 f"{self.__class__.__name__} 必须实现 generate_decision() 或覆盖 generate_orders()"
             )
-        orders = self.generate_orders(df, context)
+        return self._decision_from_orders(self.generate_orders(df, context), df, context)
+
+    def _decision_from_orders(
+        self,
+        orders: list[Order],
+        df: pd.DataFrame,
+        context: StrategyContext,
+    ) -> StrategyDecision:
+        """把内部条件计算结果提升为完整 StrategyDecision。"""
         order = next((o for o in orders if o.shares > 0), None)
         if order:
             price = _latest_close(df)
@@ -201,10 +218,86 @@ class BaseExecutionStrategy(ABC):
             execution_level="C",
             trigger_price=_latest_close(df),
             invalidation="条件未触发，等待下一次分析",
-            missing_conditions=["策略入场/退出条件未满足"],
+            missing_conditions=self.diagnose_no_signal(df, context),
             reason=f"{self.name} 当前未触发交易指令",
             source=self.name,
         )
+
+    def _execution_decision(
+        self,
+        df: pd.DataFrame,
+        context: StrategyContext,
+        *,
+        action: str,
+        shares: int,
+        stop_loss: float = 0.0,
+        take_profit: float = 0.0,
+        reason: str = "",
+        execution_level: str = "A",
+        time_stop_days: int = 0,
+        hard_stop_pct: float = 0.0,
+    ) -> StrategyDecision:
+        """构造策略原生执行决策，不经过 Order 中间对象。"""
+        price = _latest_close(df)
+        position_value = shares * price if price > 0 else 0.0
+        position_pct = position_value / context.equity if context.equity > 0 else 0.0
+        max_loss = 0.0
+        if action == "buy" and price > 0 and stop_loss > 0:
+            max_loss = max(price - stop_loss, 0.0) * shares
+        return StrategyDecision(
+            action=action,
+            execution_level=execution_level,
+            shares=shares,
+            trigger_price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit if np.isfinite(take_profit) else 0.0,
+            max_loss_amount=max_loss,
+            position_pct=position_pct,
+            invalidation=(
+                f"跌破止损 {stop_loss:.2f}"
+                if action == "buy" and stop_loss > 0
+                else "策略执行条件消失"
+            ),
+            reason=reason or f"{self.name} 条件满足",
+            source=self.name,
+            time_stop_days=time_stop_days,
+            hard_stop_pct=hard_stop_pct,
+        )
+
+    def _no_signal_decision(
+        self, df: pd.DataFrame, context: StrategyContext
+    ) -> StrategyDecision:
+        return StrategyDecision(
+            action="hold" if context.position.shares > 0 else "watch",
+            execution_level="C",
+            trigger_price=_latest_close(df),
+            invalidation="条件未触发，等待下一次分析",
+            missing_conditions=self.diagnose_no_signal(df, context),
+            reason=f"{self.name} 当前未触发交易指令",
+            source=self.name,
+        )
+
+
+class DecisionFirstStrategy(BaseExecutionStrategy):
+    """原生 Decision 策略基类：唯一输出是 StrategyDecision。"""
+
+    @abstractmethod
+    def _evaluate_decision(
+        self, df: pd.DataFrame, context: StrategyContext
+    ) -> StrategyDecision:
+        ...
+
+    @abstractmethod
+    def diagnose_no_signal(
+        self, df: pd.DataFrame, context: StrategyContext
+    ) -> list[str]:
+        """Decision-first 迁移策略必须提供真实缺失条件。"""
+        ...
+
+    def generate_decision(
+        self, df: pd.DataFrame, context: StrategyContext
+    ) -> StrategyDecision:
+        return self._evaluate_decision(df, context)
 
 
 def decision_to_orders(decision: StrategyDecision, context: StrategyContext) -> list[Order]:
@@ -261,15 +354,13 @@ def compute_percentile_score(
         百分位 Series（0~1），长度与 df 相同
     """
     scores = df["Final_Score"].astype(float)
-    result = pd.Series(np.nan, index=scores.index, dtype=float)
-    for i in range(len(scores)):
-        start = max(0, i - window + 1)
-        hist = scores.iloc[start:i + 1].dropna()
-        if len(hist) < min_periods:
-            result.iloc[i] = np.nan
-        else:
-            result.iloc[i] = (hist < scores.iloc[i]).mean()
-    return result
+    rolling = scores.rolling(window=window, min_periods=min_periods)
+    counts = rolling.count()
+    # method="min" 的名次减 1，恰好等于窗口内严格小于当前值的数量；
+    # 与旧实现 (hist < current).mean() 在重复值场景下也保持一致。
+    strict_lower_count = rolling.rank(method="min") - 1.0
+    result = strict_lower_count / counts.replace(0, np.nan)
+    return result.where(counts >= min_periods)
 
 
 def market_lot_size(market: str) -> int:

@@ -120,7 +120,9 @@ def check_signals(
 
     # 计算市场波动率中位数
     med_vol = _compute_market_volatility(df)
-    sizing_equity = account_equity if account_equity and account_equity > 0 else initial_capital
+    # None 表示 Tab1 没有真实账户，可使用参考资金；显式传入 0 表示
+    # Tab3 真实账户无可用权益，不得悄然替换为 10 万元。
+    sizing_equity = initial_capital if account_equity is None else max(float(account_equity), 0.0)
 
     results: list[SignalResult] = []
     for v in variants:
@@ -139,6 +141,8 @@ def check_signals(
             orders = decision_to_orders(decision, context)
             buy_orders = [o for o in orders if o.action == "buy" and o.shares > 0]
             sell_orders = [o for o in orders if o.action == "sell" and o.shares > 0]
+            if account_equity is not None and sizing_equity <= 0 and buy_orders:
+                buy_orders = []
             signal = "buy" if buy_orders else ("sell" if sell_orders else "no_signal")
 
             sr = SignalResult(
@@ -156,7 +160,11 @@ def check_signals(
                 o = buy_orders[0]
                 sr.entry_price = signal_price
                 sr.stop_loss = o.stop_loss if o.stop_loss > 0 else signal_price * 0.92
-                sr.take_profit = o.take_profit
+                sr.take_profit = (
+                    float(o.take_profit)
+                    if np.isfinite(o.take_profit) and o.take_profit > signal_price
+                    else 0.0
+                )
                 sr.position_pct = _derive_order_position_pct(o, signal_price, sizing_equity)
                 sr.reason = o.reason or (getattr(decision, "reason", "") if decision else "") or "策略入场条件满足"
             elif sell_orders:
@@ -173,7 +181,14 @@ def check_signals(
                     sr.stop_loss = float(getattr(decision, "stop_loss", 0) or 0)
                     sr.reason = getattr(decision, "reason", "") or ""
                 else:
-                    sr.no_signal_reason = _diagnose_no_signal(df, v)
+                    native_missing = v.strategy.diagnose_no_signal(df, context)
+                    sr.no_signal_reason = "；".join(native_missing[:3])
+
+            if account_equity is not None and sizing_equity <= 0 and not sell_orders:
+                sr.signal = "no_signal"
+                sr.position_pct = 0.0
+                sr.execution_level = "D"
+                sr.no_signal_reason = "真实账户权益为0，禁止新开仓；请先录入可用现金或有效持仓"
 
             _apply_data_quality_to_signal(sr, data_quality)
             results.append(sr)
@@ -247,7 +262,12 @@ def _apply_current_price_snapshot(
     synthetic["low"] = min(bar_low, price, bar_open)
     synthetic["close"] = price
     if "volume" in synthetic.index:
-        synthetic["volume"] = float(quote.get("volume", 0.0) or 0.0)
+        raw_volume = quote.get("volume")
+        try:
+            parsed_volume = float(raw_volume) if raw_volume is not None else np.nan
+        except (TypeError, ValueError):
+            parsed_volume = np.nan
+        synthetic["volume"] = parsed_volume if parsed_volume >= 0 else np.nan
     snap = pd.concat([snap, synthetic.to_frame().T], ignore_index=True)
     for column in ("open", "high", "low", "close", "volume"):
         if column in snap.columns:
@@ -267,7 +287,9 @@ def _apply_current_price_snapshot(
         previous_final = float(previous.get("Final_Score", 0.0) or 0.0)
         previous_tech = float(previous.get("Tech_Normalized_Score", 0.0) or 0.0)
         snap = calc_all_indicators(snap)
-        snap = compute_technical_normalized(snap, validate=False)
+        # IC/IR 权重只应用到最新一行，使用历史证据筛选当前因子，
+        # 不会回写历史分数造成未来函数。
+        snap = compute_technical_normalized(snap, validate=True)
 
         if "Final_Score" in snap.columns:
             has_fundamental = all(
@@ -360,77 +382,38 @@ def _derive_order_position_pct(order: Order, reference_price: float, equity: flo
     return float(np.clip(order.shares * reference_price / equity, 0.0, 1.0))
 
 
-def _diagnose_no_signal(df: pd.DataFrame, variant) -> str:
-    """诊断策略为什么不发买入信号，给出可执行的触发条件。"""
-    if len(df) < 20:
-        return "数据不足（<20条K线）"
+def _structured_signal_confidence_score(signal: SignalResult) -> float:
+    """按可验证的结构化交易字段计分，不使用理由文本长度。"""
+    score = 0.0
+    if signal.execution_level in ("A", "B", "C", "D"):
+        score += 1.0
+    if signal.trigger_price > 0:
+        score += 1.0
+    if signal.invalidation:
+        score += 1.0
 
-    from strategies.base import compute_percentile_score
-    last = df.iloc[-1]
-    score_col = "Final_Score"
-    if score_col not in df.columns:
-        return "缺少 Final_Score 列"
-
-    try:
-        pct_series = compute_percentile_score(df)
-        current_pct = float(pct_series.iloc[-1]) if not pct_series.empty and pd.notna(pct_series.iloc[-1]) else 0
-        current_score = float(df[score_col].iloc[-1]) if pd.notna(df[score_col].iloc[-1]) else 0
-        close = float(last.get("close", 0))
-        # 估计触发所需 Score（基于滚动252日分位分布）
-        scores = df[score_col].dropna()
-        if len(scores) >= 60:
-            target_score = float(scores.quantile(0.65)) if current_pct < 0.65 else None
-        else:
-            target_score = None
-    except Exception:
-        return "计算百分位失败"
-
-    # 从变体参数取，如果没有则从策略实例取（默认策略 params={}）
-    params = getattr(variant, "params", {}) or {}
-    strategy = getattr(variant, "strategy", None)
-    entry_pct = params.get("entry_pct") or (getattr(strategy, "entry_pct", None) if strategy else None)
-    exit_pct = params.get("exit_pct") or (getattr(strategy, "exit_pct", None) if strategy else None)
-    key = variant.base_key if hasattr(variant, "base_key") else ""
-    parts = []
-
-    # ── 百分位阈值型（A/D/E/F/C/G）──
-    if entry_pct is not None and current_pct < entry_pct:
-        gap = entry_pct - current_pct
-        target_info = f"（需Score≈{target_score:+.3f}以上）" if target_score else ""
-        parts.append(f"Score百分位{current_pct:.0%}→需≥{entry_pct:.0%}{target_info}，还差约{gap:.0%}")
-
-    # ── 均值回归型（B）──
-    if key == "B":
-        if current_pct > (entry_pct or 0.20):
-            parts.append(f"Score百分位{current_pct:.0%}>超卖阈值{entry_pct or 0.20:.0%}，需等Score继续走弱进入超卖区")
-
-    # ── MA60 趋势型（H/O）──
-    if key in ("H", "O"):
-        ma60 = last.get("ma_60")
-        ma20 = last.get("ma_20")
-        if ma60 and pd.notna(ma60) and close <= float(ma60):
-            gap_price = float(ma60) - close
-            parts.append(f"收盘价{close:.2f}<MA60({float(ma60):.2f})，需涨{gap_price:+.2f}站上MA60")
-        if ma20 and ma60 and pd.notna(ma20) and pd.notna(ma60) and float(ma20) <= float(ma60):
-            gap_ma = float(ma60) - float(ma20)
-            parts.append(f"MA20({float(ma20):.2f})≤MA60({float(ma60):.2f})，需MA20上行{gap_ma:+.2f}形成金叉")
-
-    # ── MA 交叉型（G）──
-    if key == "G":
-        ma5 = last.get("ma_5")
-        ma20 = last.get("ma_20")
-        if ma5 and ma20 and pd.notna(ma5) and pd.notna(ma20) and float(ma5) <= float(ma20):
-            gap = float(ma20) - float(ma5)
-            parts.append(f"MA5({float(ma5):.2f})≤MA20({float(ma20):.2f})，需MA5上行{gap:+.2f}金叉")
-
-    # ── Final_Score 方向 ──
-    if current_score < -0.05 and (not parts or entry_pct):
-        parts.append(f"Final_Score={current_score:+.3f}偏空，关注Score转正信号")
-
-    if not parts:
-        parts.append(f"Score百分位={current_pct:.0%}, Final_Score={current_score:+.3f}")
-
-    return "；".join(parts[:3])
+    if signal.signal == "buy":
+        if signal.entry_price > 0:
+            score += 2.0
+        if 0 < signal.stop_loss < signal.entry_price:
+            score += 3.0
+        if signal.take_profit > signal.entry_price:
+            score += 2.0
+    elif signal.signal == "sell":
+        if signal.entry_price > 0:
+            score += 3.0
+        if signal.position_pct > 0:
+            score += 3.0
+        # 卖出是已有持仓的风险处置，不强制要求多头止盈目标。
+        score += 1.0
+    else:
+        if signal.no_signal_reason:
+            score += 3.0
+        if signal.entry_price > 0:
+            score += 2.0
+        if signal.stop_loss > 0:
+            score += 1.0
+    return min(score, 10.0)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -469,6 +452,7 @@ def rank_signals(
 
     for s in signals:
         score = 0.0
+        health_matched = False
 
         # 1. 审计判定 (40%)
         e = audit_map.get(s.variant_label) or audit_map.get(s.strategy_name)
@@ -510,16 +494,16 @@ def rank_signals(
         elif s.execution_level == "D":
             score -= 20.0
 
-        # 4. 信号置信度 (10%) — 根据入场理由中的信息量
-        if s.reason and len(s.reason) > 20:
-            score += 10.0
-        elif s.reason:
-            score += 5.0
+        # 4. 计划完整度 (10%)：只看可验证的价格、止损、止盈、失效条件。
+        score += _structured_signal_confidence_score(s)
 
         # 5. 健康度惩罚（持续优化闭环）— 基于 prediction_log 实际表现
         if health_data:
             for h in health_data:
-                if h["strategy_name"] in (s.strategy_name, s.base_key, s.variant_label):
+                action_matches = (h.get("signal_action") or s.signal) == s.signal
+                if (action_matches
+                        and h["strategy_name"] in (s.strategy_name, s.base_key, s.variant_label)):
+                    health_matched = True
                     risk_note = h.get("risk_note") or ""
                     sample_status = h.get("sample_status") or ""
                     lower = h.get("confidence_lower_95")
@@ -567,6 +551,14 @@ def rank_signals(
                                 s.execution_level = "B"
                     break
 
+        # A 级买入必须有当前股票+策略的真实历史正期望证据。
+        # 无样本不是“已验证”，最高只能小仓验证；风险退出信号不受此限制。
+        if s.signal == "buy" and s.execution_level == "A" and not health_matched:
+            s.execution_level = "B"
+            s.reason = f"[历史样本不足，A级降为B级小仓验证] {s.reason}"
+            s.position_pct *= 0.5
+            score -= 5.0
+
         s.rank_score = round(score, 1)
 
     # 排序
@@ -577,6 +569,75 @@ def rank_signals(
 # ⑥ 操作方案生成层
 # ══════════════════════════════════════════════════════════════════
 
+def _dynamic_plan_position(
+    proposed_pct: float,
+    profile: str,
+    market_bias: str,
+    df: pd.DataFrame | None,
+    account_equity: float,
+    current_position: Position | None,
+    entry: float,
+    stop_loss: float,
+    market: str,
+) -> tuple[float, str]:
+    """用风险预算、波动率、集中度和流动性共同限制新增仓位。"""
+    if proposed_pct <= 0 or account_equity <= 0 or entry <= 0:
+        return 0.0, "无有效资金或策略建议仓位"
+
+    conservative = profile == "conservative"
+    if conservative:
+        base_cap = 0.25 if market_bias == "bearish" else 0.35
+        account_risk_budget = 0.01
+        adv_participation = 0.01
+    else:
+        base_cap = 0.35 if market_bias == "bearish" else 0.50
+        account_risk_budget = 0.02
+        adv_participation = 0.02
+
+    annualized_vol = 0.0
+    liquidity_cap = 1.0
+    if df is not None and not df.empty and "close" in df.columns:
+        close = pd.to_numeric(df["close"], errors="coerce")
+        returns = close.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+        if len(returns) >= 10:
+            annualized_vol = float(returns.iloc[-20:].std() * np.sqrt(252))
+        if "volume" in df.columns:
+            volume = pd.to_numeric(df["volume"], errors="coerce")
+            dollar_volume = (close * volume).where(volume > 0).dropna()
+            if not dollar_volume.empty:
+                median_adv = float(dollar_volume.iloc[-20:].median())
+                if median_adv > 0:
+                    liquidity_cap = median_adv * adv_participation / account_equity
+
+    volatility_scale = 1.0
+    if annualized_vol > 0.30:
+        volatility_scale = float(np.clip(0.30 / annualized_vol, 0.35, 1.0))
+    volatility_cap = base_cap * volatility_scale
+
+    rules = get_market_rules(market)
+    stop_risk_pct = max(entry - stop_loss, 0.0) / entry if stop_loss > 0 else 0.0
+    unit_risk_pct = stop_risk_pct + rules.round_trip_cost_pct
+    risk_cap = account_risk_budget / unit_risk_pct if unit_risk_pct > 0 else base_cap
+
+    existing_pct = 0.0
+    if current_position and current_position.shares > 0:
+        existing_pct = current_position.shares * entry / account_equity
+
+    total_cap = max(min(volatility_cap, risk_cap, liquidity_cap, 1.0), 0.0)
+    remaining_cap = max(total_cap - existing_pct, 0.0)
+    final_pct = float(np.clip(min(proposed_pct, remaining_cap), 0.0, 1.0))
+    details = [
+        f"单笔净值风险≤{account_risk_budget:.0%}",
+        f"总仓位上限{total_cap:.1%}",
+    ]
+    if annualized_vol > 0:
+        details.append(f"近20日年化波动{annualized_vol:.0%}")
+    if existing_pct > 0:
+        details.append(f"已有仓位{existing_pct:.1%}")
+    if liquidity_cap < 1.0:
+        details.append(f"成交额约束{liquidity_cap:.1%}")
+    return final_pct, "；".join(details)
+
 def generate_operation_plan(
     ranked_signals: list[SignalResult],
     current_price: float,
@@ -585,19 +646,21 @@ def generate_operation_plan(
     account_equity: float | None = None,
     data_quality: dict | None = None,
     market: str = "US",
+    current_position: Position | None = None,
 ) -> OperationPlan:
     """
     从排序后的信号中选 Top 2-3 策略，生成保守 + 激进双方案。
 
-    保守方案 (🛡️):
+    保守方案:
       - 选 audit=PASS 中排名最高的策略
-      - 止损给足（策略默认止损 × 1.0）
-      - 仓位 30-40%
+      - 使用策略原始止损
+      - 单笔账户风险预算不超过 1%
 
-    激进方案 (🚀):
+    激进方案:
       - 选 rank_score 最高的策略（即使 audit=CONDITIONAL）
-      - 止损可适度放宽
-      - 仓位 50-70%
+      - 单笔账户风险预算不超过 2%
+
+    两套方案还会同时受到近期波动率、已有持仓集中度和日均成交额约束。
 
     Args:
         ranked_signals: rank_signals() 排序后的信号列表
@@ -607,8 +670,8 @@ def generate_operation_plan(
     Returns:
         OperationPlan 含两套方案
     """
-    sizing_equity = account_equity if account_equity and account_equity > 0 else 100000.0
-    equity_is_reference = not (account_equity and account_equity > 0)
+    equity_is_reference = account_equity is None
+    sizing_equity = 100000.0 if equity_is_reference else max(float(account_equity), 0.0)
 
     if not ranked_signals:
         return OperationPlan(market_bias=market_bias, account_equity=sizing_equity,
@@ -628,6 +691,11 @@ def generate_operation_plan(
         plan = OperationPlan(market_bias=market_bias, account_equity=sizing_equity,
                              equity_is_reference=equity_is_reference)
         plan.markdown = _build_no_signal_markdown(ranked_signals, market_bias, df)
+        if not equity_is_reference and sizing_equity <= 0:
+            plan.markdown = (
+                "> **账户资金硬约束：真实账户权益为0，本次禁止新开仓或加仓。**\n\n"
+                + plan.markdown
+            )
         plan.markdown = _prepend_data_quality(plan.markdown, data_quality)
         return plan
 
@@ -640,13 +708,18 @@ def generate_operation_plan(
     if cons_signal:
         entry = cons_signal.entry_price or current_price
         stop = cons_signal.stop_loss or entry * 0.92
-        position_cap = 0.25 if market_bias == "bearish" else 0.40
+        position_pct, cap_reason = _dynamic_plan_position(
+            cons_signal.position_pct, "conservative", market_bias, df,
+            sizing_equity, current_position, entry, stop, market,
+        )
         conservative = {
             "entry": entry,
             "stop_loss": stop,
-            "position_pct": min(cons_signal.position_pct, position_cap),
+            "take_profit": cons_signal.take_profit,
+            "position_pct": position_pct,
+            "position_cap_reason": cap_reason,
             "signal_strength": _signal_strength(cons_signal),
-            "max_loss_amount": _max_loss_amount(sizing_equity, min(cons_signal.position_pct, position_cap), entry, stop, market),
+            "max_loss_amount": _max_loss_amount(sizing_equity, position_pct, entry, stop, market),
             "invalidation": _invalidation_conditions(entry, stop, market_bias),
             "reason": cons_signal.reason or "策略入场条件满足",
             "source_strategies": [cons_signal.strategy_name],
@@ -660,13 +733,18 @@ def generate_operation_plan(
     if agg_signal and agg_signal != cons_signal:
         entry = agg_signal.entry_price or current_price
         stop = agg_signal.stop_loss or entry * 0.90
-        position_cap = 0.35 if market_bias == "bearish" else 0.70
+        position_pct, cap_reason = _dynamic_plan_position(
+            agg_signal.position_pct * 1.25, "aggressive", market_bias, df,
+            sizing_equity, current_position, entry, stop, market,
+        )
         aggressive = {
             "entry": entry,
             "stop_loss": stop,
-            "position_pct": min(agg_signal.position_pct * 1.25, position_cap),
+            "take_profit": agg_signal.take_profit,
+            "position_pct": position_pct,
+            "position_cap_reason": cap_reason,
             "signal_strength": _signal_strength(agg_signal),
-            "max_loss_amount": _max_loss_amount(sizing_equity, min(agg_signal.position_pct * 1.25, position_cap), entry, stop, market),
+            "max_loss_amount": _max_loss_amount(sizing_equity, position_pct, entry, stop, market),
             "invalidation": _invalidation_conditions(entry, stop, market_bias),
             "reason": agg_signal.reason or "策略入场条件满足",
             "source_strategies": [agg_signal.strategy_name],
@@ -675,13 +753,18 @@ def generate_operation_plan(
         # 只有一个信号 → 激进方案 = 同一策略但适度放大仓位，不改写策略止损
         entry = agg_signal.entry_price or current_price
         stop = agg_signal.stop_loss or entry * 0.92
-        position_cap = 0.30 if market_bias == "bearish" else 0.60
+        position_pct, cap_reason = _dynamic_plan_position(
+            agg_signal.position_pct * 1.25, "aggressive", market_bias, df,
+            sizing_equity, current_position, entry, stop, market,
+        )
         aggressive = {
             "entry": entry,
             "stop_loss": stop,
-            "position_pct": min(agg_signal.position_pct * 1.25, position_cap),
+            "take_profit": agg_signal.take_profit,
+            "position_pct": position_pct,
+            "position_cap_reason": cap_reason,
             "signal_strength": _signal_strength(agg_signal),
-            "max_loss_amount": _max_loss_amount(sizing_equity, min(agg_signal.position_pct * 1.25, position_cap), entry, stop, market),
+            "max_loss_amount": _max_loss_amount(sizing_equity, position_pct, entry, stop, market),
             "invalidation": _invalidation_conditions(entry, stop, market_bias),
             "reason": (agg_signal.reason or "策略入场条件满足") + "（同一信号，仓位略高）",
             "source_strategies": [agg_signal.strategy_name],
@@ -881,10 +964,14 @@ def _build_plan_markdown(
         lines.append("|------|------|------|")
         lines.append(f"| 入场价 | **${c['entry']:.2f}** | 当前收盘价附近，等回调/确认后入场 |")
         c_loss = _loss_pct(c["entry"], c["stop_loss"])
-        c_account_risk = _account_risk_pct(c["position_pct"], c_loss)
+        c_account_risk = (
+            c["max_loss_amount"] / plan.account_equity * 100
+            if plan.account_equity > 0 else 0.0
+        )
         lines.append(f"| 止损价 | **${c['stop_loss']:.2f}** | 策略止损，单价风险 {c_loss:.1f}% |")
+        lines.append(f"| 止盈目标 | **{_take_profit_text(c['take_profit'])}** | 仅展示策略明确给出的目标，不推测止盈价 |")
         lines.append(f"| 信号强度 | **{c['signal_strength']}** | 基于审计结论、验证夏普和综合排名 |")
-        lines.append(f"| 仓位 | **{c['position_pct']*100:.0f}%** 账户权益 | 来自策略订单股数，按保守上限裁剪 |")
+        lines.append(f"| 仓位 | **{c['position_pct']*100:.1f}%** 账户权益 | {c['position_cap_reason']} |")
         lines.append(f"| 账户风险 | **{c_account_risk:.2f}%** 净值 | 若触发止损，按仓位估算的组合层面亏损 |")
         lines.append(f"| 最大亏损 | **${c['max_loss_amount']:,.0f}** | 仓位金额 × 单价风险 + 估算滑点/佣金/税费，不含跳空 |")
         lines.append(f"| 失效条件 | {c['invalidation']} | 任一条件触发即放弃/重算方案 |")
@@ -900,10 +987,14 @@ def _build_plan_markdown(
         lines.append("|------|------|------|")
         lines.append(f"| 入场价 | **${a['entry']:.2f}** | 当前收盘价，不等回调直接入场 |")
         a_loss = _loss_pct(a["entry"], a["stop_loss"])
-        a_account_risk = _account_risk_pct(a["position_pct"], a_loss)
+        a_account_risk = (
+            a["max_loss_amount"] / plan.account_equity * 100
+            if plan.account_equity > 0 else 0.0
+        )
         lines.append(f"| 止损价 | **${a['stop_loss']:.2f}** | 策略止损，单价风险 {a_loss:.1f}% |")
+        lines.append(f"| 止盈目标 | **{_take_profit_text(a['take_profit'])}** | 仅展示策略明确给出的目标，不推测止盈价 |")
         lines.append(f"| 信号强度 | **{a['signal_strength']}** | 基于审计结论、验证夏普和综合排名 |")
-        lines.append(f"| 仓位 | **{a['position_pct']*100:.0f}%** 账户权益 | 来自策略订单股数，激进上限裁剪 |")
+        lines.append(f"| 仓位 | **{a['position_pct']*100:.1f}%** 账户权益 | {a['position_cap_reason']} |")
         lines.append(f"| 账户风险 | **{a_account_risk:.2f}%** 净值 | 若触发止损，按仓位估算的组合层面亏损 |")
         lines.append(f"| 最大亏损 | **${a['max_loss_amount']:,.0f}** | 仓位金额 × 单价风险 + 估算滑点/佣金/税费，不含跳空 |")
         lines.append(f"| 失效条件 | {a['invalidation']} | 任一条件触发即放弃/重算方案 |")
@@ -919,10 +1010,16 @@ def _build_plan_markdown(
         lines.append("|------|:------:|:------:|")
         lines.append(f"| 入场价 | ${c['entry']:.2f} | ${a['entry']:.2f} |")
         lines.append(f"| 止损 | ${c['stop_loss']:.2f} (风险{_loss_pct(c['entry'], c['stop_loss']):.1f}%) | ${a['stop_loss']:.2f} (风险{_loss_pct(a['entry'], a['stop_loss']):.1f}%) |")
-        lines.append(f"| 仓位 | {c['position_pct']*100:.0f}% | {a['position_pct']*100:.0f}% |")
-        lines.append(f"| 账户风险 | {_account_risk_pct(c['position_pct'], _loss_pct(c['entry'], c['stop_loss'])):.2f}% | {_account_risk_pct(a['position_pct'], _loss_pct(a['entry'], a['stop_loss'])):.2f}% |")
+        lines.append(f"| 止盈目标 | {_take_profit_text(c['take_profit'])} | {_take_profit_text(a['take_profit'])} |")
+        lines.append(f"| 仓位 | {c['position_pct']*100:.1f}% | {a['position_pct']*100:.1f}% |")
+        c_total_risk = c["max_loss_amount"] / plan.account_equity * 100 if plan.account_equity > 0 else 0.0
+        a_total_risk = a["max_loss_amount"] / plan.account_equity * 100 if plan.account_equity > 0 else 0.0
+        lines.append(f"| 账户风险 | {c_total_risk:.2f}% | {a_total_risk:.2f}% |")
         lines.append(f"| 最大亏损 | ${c['max_loss_amount']:,.0f} | ${a['max_loss_amount']:,.0f} |")
-        lines.append(f"| 风险收益比 | 保守 | 激进 |")
+        lines.append(
+            f"| 风险收益比 | {_risk_reward_text(c['entry'], c['stop_loss'], c['take_profit'])} | "
+            f"{_risk_reward_text(a['entry'], a['stop_loss'], a['take_profit'])} |"
+        )
         lines.append("")
 
     # ── 信号详情表 ──
@@ -959,6 +1056,20 @@ def _loss_pct(entry: float, stop_loss: float) -> float:
     if entry <= 0 or stop_loss <= 0:
         return 0.0
     return max((entry - stop_loss) / entry * 100, 0.0)
+
+
+def _take_profit_text(take_profit: float) -> str:
+    if take_profit and np.isfinite(take_profit) and take_profit > 0:
+        return f"${take_profit:.2f}"
+    return "未设定"
+
+
+def _risk_reward_text(entry: float, stop_loss: float, take_profit: float) -> str:
+    risk = entry - stop_loss
+    reward = take_profit - entry
+    if entry <= 0 or risk <= 0 or not np.isfinite(take_profit) or reward <= 0:
+        return "不可量化（未设止盈）"
+    return f"1:{reward / risk:.2f}"
 
 
 def _signal_strength(signal: SignalResult) -> str:
@@ -1055,6 +1166,7 @@ def run_signal_check(
         account_equity=account_equity,
         data_quality=data_quality,
         market=market,
+        current_position=current_position,
     )
 
     return ranked, plan
@@ -1153,4 +1265,5 @@ def refresh_realtime_signal_plan(
     )
     pipeline_result.signal_check = [item.to_dict() for item in ranked]
     pipeline_result.operation_plan = plan.markdown if plan else None
+    pipeline_result.decision_df = analysis_df
     return analysis_df

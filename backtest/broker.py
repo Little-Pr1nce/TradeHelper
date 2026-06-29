@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 class BrokerConfig:
     """撮合器配置。"""
     slippage: float = 0.003          # 千分之三基础滑点
+    volatility_slippage_threshold: float = 0.30  # 年化波动超过30%后上调滑点
+    volatility_slippage_factor: float = 0.01     # 每100%超额年化波动增加1%滑点
+    max_dynamic_slippage: float = 0.007           # 波动附加滑点最高0.7%
     max_volume_ratio: float = 0.05   # 单笔不超过日成交量 5%
     extra_slippage: float = 0.005    # 超量额外惩罚滑点
     commission: float = 0.0003       # 万三佣金
@@ -71,8 +74,29 @@ class Broker:
             return 0.0
         return max(value * self.config.commission, self.config.min_commission)
 
+    def _effective_slippage(
+        self,
+        shares: int,
+        volume: float,
+        recent_volatility: float,
+    ) -> float:
+        """根据下单时已知的历史波动和成交量计算滑点。"""
+        cfg = self.config
+        excess_vol = max(float(recent_volatility or 0.0) - cfg.volatility_slippage_threshold, 0.0)
+        volatility_extra = min(
+            excess_vol * cfg.volatility_slippage_factor,
+            cfg.max_dynamic_slippage,
+        )
+        liquidity_extra = (
+            cfg.extra_slippage
+            if volume > 0 and shares > volume * cfg.max_volume_ratio
+            else 0.0
+        )
+        return cfg.slippage + volatility_extra + liquidity_extra
+
     def execute_buy(self, order: Order, bar_t1: pd.Series,
-                    account: Account, prev_close: float) -> Fill | None:
+                    account: Account, prev_close: float,
+                    recent_volatility: float = 0.0) -> Fill | None:
         """
         以 T+1 日开盘价执行买入订单。
 
@@ -97,9 +121,10 @@ class Broker:
             return None
 
         # 3. 流动性约束
-        effective_slippage = cfg.slippage
+        effective_slippage = self._effective_slippage(
+            order.shares, volume_t1, recent_volatility
+        )
         if volume_t1 > 0 and order.shares > volume_t1 * cfg.max_volume_ratio:
-            effective_slippage += cfg.extra_slippage
             logger.debug(
                 f"{order.date}: 成交量超标 shares={order.shares} > "
                 f"5%×vol={volume_t1*0.05:.0f}，应用额外滑点"
@@ -174,7 +199,8 @@ class Broker:
         return fill
 
     def execute_sell(self, order: Order, bar_t1: pd.Series,
-                     account: Account, prev_close: float) -> Fill | None:
+                     account: Account, prev_close: float,
+                     recent_volatility: float = 0.0) -> Fill | None:
         """以 T+1 日开盘价执行卖出订单。"""
         cfg = self.config
         open_price = float(bar_t1["open"])
@@ -198,7 +224,11 @@ class Broker:
             logger.debug(f"{order.date}: 卖出订单作废 — 停牌")
             return None
 
-        fill_price = open_price * (1 - cfg.slippage)
+        volume_t1 = float(bar_t1.get("volume", 0) or 0)
+        effective_slippage = self._effective_slippage(
+            shares_to_sell, volume_t1, recent_volatility
+        )
+        fill_price = open_price * (1 - effective_slippage)
         fill_value = fill_price * shares_to_sell
         commission = self._commission(fill_value)
         sell_tax = fill_value * cfg.sell_tax
@@ -231,12 +261,17 @@ class Broker:
         return fill
 
     def execute_order(self, order: Order, bar_t1: pd.Series,
-                      account: Account, prev_close: float) -> Fill | None:
+                      account: Account, prev_close: float,
+                      recent_volatility: float = 0.0) -> Fill | None:
         """统一订单执行入口。"""
         if order.action == "buy":
-            return self.execute_buy(order, bar_t1, account, prev_close)
+            return self.execute_buy(
+                order, bar_t1, account, prev_close, recent_volatility
+            )
         elif order.action == "sell":
-            return self.execute_sell(order, bar_t1, account, prev_close)
+            return self.execute_sell(
+                order, bar_t1, account, prev_close, recent_volatility
+            )
         return None
 
     def check_intraday_stops(self, bar_t1: pd.Series, account: Account,
@@ -347,10 +382,10 @@ class Broker:
         return open_price <= prev_close * (1 - self.config.limit_down_pct + 1e-8)
 
     def _is_suspended(self, bar: pd.Series) -> bool:
-        """停牌判断：成交量为 0 且价格不变视为停牌。"""
-        volume = float(bar.get("volume", 0))
-        if volume <= 0:
+        """仅在数据明确声明停牌或明确给出零成交量时判定停牌。"""
+        if bool(bar.get("is_suspended", False)):
             return True
-        if bar.get("high") == bar.get("low") and bar.get("open") == bar.get("close"):
-            return True
-        return False
+        raw_volume = bar.get("volume", np.nan)
+        if raw_volume is None or pd.isna(raw_volume):
+            return False
+        return float(raw_volume) <= 0

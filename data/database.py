@@ -183,8 +183,21 @@ CREATE TABLE IF NOT EXISTS prediction_log (
     validation_status TEXT DEFAULT 'pending',
     validation_version INTEGER DEFAULT 2,
     strategy_name TEXT DEFAULT '',
+    signal_action TEXT DEFAULT '',
     market_regime TEXT DEFAULT '',
-    portfolio_snapshot TEXT DEFAULT ''
+    portfolio_snapshot TEXT DEFAULT '',
+    event_key TEXT DEFAULT '',
+    exit_review_status TEXT DEFAULT 'not_applicable',
+    exit_return_1d REAL DEFAULT 0.0,
+    exit_return_3d REAL DEFAULT 0.0,
+    exit_return_5d REAL DEFAULT 0.0,
+    exit_return_10d REAL DEFAULT 0.0,
+    exit_return_20d REAL DEFAULT 0.0,
+    exit_max_decline REAL DEFAULT 0.0,
+    exit_max_rally REAL DEFAULT 0.0,
+    exit_avoided_loss REAL DEFAULT 0.0,
+    exit_opportunity_cost REAL DEFAULT 0.0,
+    exit_quality TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_prediction_code ON prediction_log(code);
 CREATE INDEX IF NOT EXISTS idx_prediction_validated ON prediction_log(validated, predict_time);
@@ -274,6 +287,11 @@ CREATE TABLE IF NOT EXISTS research_observation_log (
     expected_direction TEXT DEFAULT '',
     llm_proposed INTEGER DEFAULT 0,
     market_regime TEXT DEFAULT '',
+    event_key TEXT DEFAULT '',
+    trigger_operator TEXT DEFAULT '',
+    entry_triggered INTEGER DEFAULT 0,
+    triggered_at TEXT DEFAULT '',
+    validation_status TEXT DEFAULT 'pending',
     validated INTEGER DEFAULT 0,
     return_1d REAL DEFAULT 0.0,
     return_3d REAL DEFAULT 0.0,
@@ -317,6 +335,69 @@ def _ensure_unique_news_index(conn: sqlite3.Connection):
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_news_unique "
         "ON news_sentiment(code, date, title)"
+    )
+
+
+def _prepare_research_observation_events(conn: sqlite3.Connection):
+    """为旧观察记录生成稳定事件键并去重。
+
+    同一股票、同一形态、同一天重复生成报告，不能被当成多个独立样本。
+    """
+    conn.execute(
+        """UPDATE research_observation_log
+           SET event_key = UPPER(code) || '|' ||
+                           COALESCE(NULLIF(pattern_type, ''), 'general') || '|' ||
+                           SUBSTR(observed_at, 1, 10)
+           WHERE event_key IS NULL OR event_key = ''"""
+    )
+    conn.execute(
+        """DELETE FROM research_observation_log
+           WHERE id IN (
+               SELECT id FROM (
+                   SELECT id,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY event_key
+                              ORDER BY validated DESC, id ASC
+                          ) AS rn
+                   FROM research_observation_log
+                   WHERE event_key != ''
+               ) WHERE rn > 1
+           )"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_research_obs_event
+           ON research_observation_log(event_key) WHERE event_key != ''"""
+    )
+
+
+def _prepare_prediction_events(conn: sqlite3.Connection):
+    """同一参考日、策略、模式和动作的重复报告只保留一个样本。"""
+    conn.execute(
+        """UPDATE prediction_log
+           SET event_key = UPPER(code) || '|' ||
+                           COALESCE(NULLIF(strategy_name, ''), 'overall') || '|' ||
+                           COALESCE(NULLIF(mode, ''), 'eod') || '|' ||
+                           COALESCE(NULLIF(signal_action, ''), 'overall') || '|' ||
+                           COALESCE(NULLIF(reference_date, ''), SUBSTR(predict_time, 1, 10))
+        """
+    )
+    conn.execute(
+        """DELETE FROM prediction_log
+           WHERE id IN (
+               SELECT id FROM (
+                   SELECT id,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY event_key
+                              ORDER BY validated DESC, id ASC
+                          ) AS rn
+                   FROM prediction_log
+                   WHERE event_key != ''
+               ) WHERE rn > 1
+           )"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_prediction_event
+           ON prediction_log(event_key) WHERE event_key != ''"""
     )
 
 
@@ -380,6 +461,7 @@ class Database:
         _ensure_column(conn, "news_sentiment", "content", "TEXT", "''")
         _ensure_column(conn, "news_sentiment", "is_macro", "INTEGER", "0")
         _ensure_column(conn, "prediction_log", "strategy_name", "TEXT", "''")
+        _ensure_column(conn, "prediction_log", "signal_action", "TEXT", "''")
         _ensure_column(conn, "prediction_log", "market_regime", "TEXT", "''")
         _ensure_column(conn, "prediction_log", "take_profit", "REAL", "0.0")
         _ensure_column(conn, "prediction_log", "entry_mode", "TEXT", "'reference'")
@@ -393,6 +475,39 @@ class Database:
         # 迁移时旧记录必须保留 v1，防止错误验证结果继续训练风控官。
         _ensure_column(conn, "prediction_log", "validation_version", "INTEGER", "1")
         _ensure_column(conn, "prediction_log", "portfolio_snapshot", "TEXT", "''")
+        _ensure_column(conn, "prediction_log", "event_key", "TEXT", "''")
+        _ensure_column(conn, "prediction_log", "exit_review_status", "TEXT", "'not_applicable'")
+        _ensure_column(conn, "prediction_log", "exit_return_1d", "REAL", "0.0")
+        _ensure_column(conn, "prediction_log", "exit_return_3d", "REAL", "0.0")
+        _ensure_column(conn, "prediction_log", "exit_return_5d", "REAL", "0.0")
+        _ensure_column(conn, "prediction_log", "exit_return_10d", "REAL", "0.0")
+        _ensure_column(conn, "prediction_log", "exit_return_20d", "REAL", "0.0")
+        _ensure_column(conn, "prediction_log", "exit_max_decline", "REAL", "0.0")
+        _ensure_column(conn, "prediction_log", "exit_max_rally", "REAL", "0.0")
+        _ensure_column(conn, "prediction_log", "exit_avoided_loss", "REAL", "0.0")
+        _ensure_column(conn, "prediction_log", "exit_opportunity_cost", "REAL", "0.0")
+        _ensure_column(conn, "prediction_log", "exit_quality", "TEXT", "''")
+        conn.execute(
+            """UPDATE prediction_log
+               SET signal_action = CASE
+                   WHEN direction='bullish' THEN 'buy'
+                   WHEN direction='bearish' THEN 'sell'
+                   ELSE '' END
+               WHERE strategy_name != '' AND (signal_action IS NULL OR signal_action='')"""
+        )
+        conn.execute(
+            """UPDATE prediction_log SET exit_review_status='pending'
+               WHERE signal_action='sell'
+                 AND (exit_review_status IS NULL OR exit_review_status='not_applicable')"""
+        )
+        _prepare_prediction_events(conn)
+        _ensure_column(conn, "research_observation_log", "event_key", "TEXT", "''")
+        _ensure_column(conn, "research_observation_log", "trigger_operator", "TEXT", "''")
+        _ensure_column(conn, "research_observation_log", "entry_triggered", "INTEGER", "0")
+        _ensure_column(conn, "research_observation_log", "triggered_at", "TEXT", "''")
+        # 旧记录没有触发语义，必须隔离，不能自动参与新版学习。
+        _ensure_column(conn, "research_observation_log", "validation_status", "TEXT", "'unsupported'")
+        _prepare_research_observation_events(conn)
         # 索引必须在列迁移完成后创建（旧库没有 strategy_name 列，不能放在 DDL 里）
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_prediction_strategy "
@@ -787,6 +902,15 @@ class Database:
         d.pop("id", None)
         if d.get("validated") == 1 and d.get("validation_status") == "pending":
             d["validation_status"] = "verified"
+        reference_day = str(
+            d.get("reference_date") or d.get("predict_time") or ""
+        )[:10]
+        d["event_key"] = d.get("event_key") or (
+            f"{str(d.get('code') or '').upper()}|"
+            f"{d.get('strategy_name') or 'overall'}|{d.get('mode') or 'eod'}|"
+            f"{d.get('signal_action') or 'overall'}|"
+            f"{reference_day}"
+        )
         # 防护：旧数据库还没有 strategy_name 列时，移除该字段
         cols = {r[1] for r in self.execute("PRAGMA table_info(prediction_log)").fetchall()}
         if "strategy_name" not in cols:
@@ -794,10 +918,15 @@ class Database:
         columns = ", ".join(d.keys())
         placeholders = ", ".join(["?"] * len(d))
         cursor = self._execute_write(
-            f"INSERT INTO prediction_log ({columns}) VALUES ({placeholders})",
+            f"INSERT OR IGNORE INTO prediction_log ({columns}) VALUES ({placeholders})",
             tuple(d.values()),
         )
-        return cursor.lastrowid or 0
+        if cursor.rowcount:
+            return cursor.lastrowid or 0
+        row = self.execute(
+            "SELECT id FROM prediction_log WHERE event_key=?", (d["event_key"],)
+        ).fetchone()
+        return int(row["id"] or 0) if row else 0
 
     def delete_prediction(self, pred_id: int):
         """删除一条预测记录。"""
@@ -1011,16 +1140,85 @@ class Database:
             ),
         )
 
+    def _verify_exit_review(self, pred: PredictionLog) -> bool:
+        """对真实 sell/减仓信号做 1/3/5/10/20 日退出质量复盘。"""
+        if pred.signal_action != "sell":
+            return False
+        bars = self._future_price_bars(
+            pred.code, pred.reference_date or pred.predict_time[:10], 20
+        )
+        if len(bars) < 20:
+            return False
+
+        reference = float(pred.predicted_price or 0.0)
+        if reference <= 0:
+            pred.exit_review_status = "unsupported"
+            self._save_exit_review(pred)
+            return True
+        execution_price = (
+            float(bars[0].get("open", reference) or reference)
+            if pred.entry_mode == "next_open" else reference
+        )
+        if execution_price <= 0:
+            pred.exit_review_status = "unsupported"
+            self._save_exit_review(pred)
+            return True
+
+        def _forward_return(days: int) -> float:
+            close = float(bars[days - 1].get("close", execution_price) or execution_price)
+            return (close - execution_price) / execution_price
+
+        pred.exit_return_1d = _forward_return(1)
+        pred.exit_return_3d = _forward_return(3)
+        pred.exit_return_5d = _forward_return(5)
+        pred.exit_return_10d = _forward_return(10)
+        pred.exit_return_20d = _forward_return(20)
+        lows = [float(b.get("low", execution_price) or execution_price) for b in bars]
+        highs = [float(b.get("high", execution_price) or execution_price) for b in bars]
+        pred.exit_max_decline = min((value - execution_price) / execution_price for value in lows)
+        pred.exit_max_rally = max((value - execution_price) / execution_price for value in highs)
+
+        from utils.market_rules import get_market_rules
+        rules = get_market_rules(pred.market)
+        one_way_exit_cost = rules.slippage + rules.commission + rules.sell_tax
+        pred.exit_avoided_loss = max(-pred.exit_return_20d - one_way_exit_cost, 0.0)
+        pred.exit_opportunity_cost = max(pred.exit_return_20d + one_way_exit_cost, 0.0)
+        if pred.exit_avoided_loss >= 0.02 or pred.exit_max_decline <= -0.05:
+            pred.exit_quality = "effective"
+        elif pred.exit_opportunity_cost >= 0.03 or pred.exit_max_rally >= 0.05:
+            pred.exit_quality = "premature"
+        else:
+            pred.exit_quality = "neutral"
+        pred.exit_review_status = "verified"
+        self._save_exit_review(pred)
+        return True
+
+    def _save_exit_review(self, pred: PredictionLog):
+        self._execute_write(
+            """UPDATE prediction_log SET exit_review_status=?, exit_return_1d=?,
+               exit_return_3d=?, exit_return_5d=?, exit_return_10d=?, exit_return_20d=?,
+               exit_max_decline=?, exit_max_rally=?, exit_avoided_loss=?,
+               exit_opportunity_cost=?, exit_quality=? WHERE id=?""",
+            (
+                pred.exit_review_status, pred.exit_return_1d, pred.exit_return_3d,
+                pred.exit_return_5d, pred.exit_return_10d, pred.exit_return_20d,
+                pred.exit_max_decline, pred.exit_max_rally, pred.exit_avoided_loss,
+                pred.exit_opportunity_cost, pred.exit_quality, pred.id,
+            ),
+        )
+
     def batch_verify_expired(self) -> int:
         rows = self.execute(
             """SELECT * FROM prediction_log
-               WHERE validated = 0 OR validation_version < 2"""
+               WHERE validated = 0 OR validation_version < 2
+                  OR (signal_action='sell' AND exit_review_status='pending')"""
         ).fetchall()
         if not rows:
             return 0
         verified_count = 0
         for row in rows:
             pred = PredictionLog.from_dict(dict(row))
+            updated = False
             if pred.validation_version < 2 and not pred.reference_date:
                 pred.reference_date = self._recover_legacy_reference_date(pred)
                 if not pred.reference_date:
@@ -1031,14 +1229,19 @@ class Database:
                     self._save_prediction_validation(pred)
                     verified_count += 1
                     continue
-            is_portfolio = pred.code.startswith("PORTFOLIO_")
-            completed = (
-                self._verify_portfolio_prediction(pred)
-                if is_portfolio else self._verify_stock_prediction(pred)
-            )
-            if completed:
-                pred.verified_at = datetime.now().isoformat()
-                self._save_prediction_validation(pred)
+            if pred.validated == 0 or pred.validation_version < 2:
+                is_portfolio = pred.code.startswith("PORTFOLIO_")
+                completed = (
+                    self._verify_portfolio_prediction(pred)
+                    if is_portfolio else self._verify_stock_prediction(pred)
+                )
+                if completed:
+                    pred.verified_at = datetime.now().isoformat()
+                    self._save_prediction_validation(pred)
+                    updated = True
+            if pred.exit_review_status == "pending" and not pred.code.startswith("PORTFOLIO_"):
+                updated = self._verify_exit_review(pred) or updated
+            if updated:
                 verified_count += 1
         if verified_count > 0:
             logger.info(f"prediction_log 批量验证：{verified_count} 条")
@@ -1190,6 +1393,7 @@ class Database:
         cols = {r[1] for r in self.execute("PRAGMA table_info(prediction_log)").fetchall()}
         has_regime = "market_regime" in cols
         has_strategy = "strategy_name" in cols
+        has_action = "signal_action" in cols
 
         rows = self.execute(
             """SELECT * FROM prediction_log
@@ -1234,7 +1438,49 @@ class Database:
             "overall": _summarize(dict_rows, code),
             "by_strategy": _group("strategy_name", "整体预测") if has_strategy else [],
             "by_regime": _group("market_regime", "unknown") if has_regime else [],
+            "by_action": _group("signal_action", "unknown") if has_action else [],
+            "exit_reviews": self.get_exit_review_report(code),
         }
+
+    def get_exit_review_report(self, code: str) -> list[dict]:
+        """按策略汇总卖出后 20 日的退出质量。"""
+        rows = self.execute(
+            """SELECT strategy_name, COUNT(*) AS cnt,
+                      AVG(exit_return_1d) AS avg_1d,
+                      AVG(exit_return_5d) AS avg_5d,
+                      AVG(exit_return_10d) AS avg_10d,
+                      AVG(exit_return_20d) AS avg_20d,
+                      AVG(exit_avoided_loss) AS avoided_loss,
+                      AVG(exit_opportunity_cost) AS opportunity_cost,
+                      AVG(exit_max_decline) AS max_decline,
+                      AVG(exit_max_rally) AS max_rally,
+                      SUM(CASE WHEN exit_quality='effective' THEN 1 ELSE 0 END) AS effective_cnt,
+                      SUM(CASE WHEN exit_quality='premature' THEN 1 ELSE 0 END) AS premature_cnt
+               FROM prediction_log
+               WHERE code=? AND signal_action='sell'
+                 AND exit_review_status='verified' AND strategy_name!=''
+               GROUP BY strategy_name ORDER BY cnt DESC""",
+            (code,),
+        ).fetchall()
+        result = []
+        for row in rows:
+            total = int(row["cnt"] or 0)
+            result.append({
+                "strategy_name": row["strategy_name"],
+                "count": total,
+                "avg_return_1d": float(row["avg_1d"] or 0.0),
+                "avg_return_5d": float(row["avg_5d"] or 0.0),
+                "avg_return_10d": float(row["avg_10d"] or 0.0),
+                "avg_return_20d": float(row["avg_20d"] or 0.0),
+                "avg_avoided_loss": float(row["avoided_loss"] or 0.0),
+                "avg_opportunity_cost": float(row["opportunity_cost"] or 0.0),
+                "avg_max_decline": float(row["max_decline"] or 0.0),
+                "avg_max_rally": float(row["max_rally"] or 0.0),
+                "effective_rate": float(row["effective_cnt"] or 0) / total if total else 0.0,
+                "premature_rate": float(row["premature_cnt"] or 0) / total if total else 0.0,
+                "sample_status": "ok" if total >= 8 else "thin" if total >= 3 else "insufficient",
+            })
+        return result
 
     def get_strategy_health_report(self, code: str) -> list[dict]:
         """持续优化：按策略统计预测准确率，返回健康报告。"""
@@ -1244,14 +1490,21 @@ class Database:
             return []
 
         rows = self.execute(
-            """SELECT strategy_name, COUNT(*) as cnt,
-                      SUM(CASE WHEN actual_return > 0 THEN 1 ELSE 0 END) as correct_cnt,
-                      AVG(COALESCE(actual_return, 0.0)) as avg_return
+            """SELECT strategy_name, signal_action, COUNT(*) as cnt,
+                      SUM(CASE
+                          WHEN signal_action='sell'
+                               AND exit_avoided_loss > exit_opportunity_cost THEN 1
+                          WHEN signal_action!='sell' AND actual_return > 0 THEN 1
+                          ELSE 0 END) as correct_cnt,
+                      AVG(CASE WHEN signal_action='sell'
+                          THEN COALESCE(exit_avoided_loss, 0.0) - COALESCE(exit_opportunity_cost, 0.0)
+                          ELSE COALESCE(actual_return, 0.0) END) as avg_return
                FROM prediction_log
                WHERE code = ? AND validated = 1 AND strategy_name != ''
                  AND validation_version >= 2 AND validation_status = 'verified'
                  AND direction IN ('bullish', 'bearish')
-               GROUP BY strategy_name
+                 AND (signal_action!='sell' OR exit_review_status='verified')
+               GROUP BY strategy_name, signal_action
                HAVING cnt >= 3
                ORDER BY cnt DESC""",
             (code,),
@@ -1260,6 +1513,7 @@ class Database:
         result = []
         for row in rows:
             sname = row["strategy_name"]
+            signal_action = str(row["signal_action"] or "unknown")
             total = row["cnt"]
             correct = row["correct_cnt"] or 0
             accuracy = correct / total if total > 0 else 0
@@ -1268,12 +1522,17 @@ class Database:
 
             # 判断趋势：对比最近 5 条 vs 全部
             recent = self.execute(
-                """SELECT direction, actual_direction, actual_return FROM prediction_log
-                   WHERE code=? AND strategy_name=? AND validated=1
+                """SELECT direction, actual_direction,
+                          CASE WHEN signal_action='sell'
+                              THEN COALESCE(exit_avoided_loss, 0.0) - COALESCE(exit_opportunity_cost, 0.0)
+                              ELSE actual_return END AS actual_return
+                   FROM prediction_log
+                   WHERE code=? AND strategy_name=? AND signal_action=? AND validated=1
                      AND validation_version >= 2 AND validation_status='verified'
                      AND direction IN ('bullish', 'bearish')
+                     AND (signal_action!='sell' OR exit_review_status='verified')
                    ORDER BY predict_time DESC LIMIT 5""",
-                (code, sname),
+                (code, sname, signal_action),
             ).fetchall()
             recent_correct = sum(
                 1 for r in recent if float(r["actual_return"] or 0.0) > 0
@@ -1312,6 +1571,7 @@ class Database:
 
             result.append({
                 "strategy_name": sname,
+                "signal_action": signal_action,
                 "total": total,
                 "accuracy": round(accuracy, 3),
                 "recent_accuracy": round(recent_acc, 3),
@@ -1337,19 +1597,30 @@ class Database:
         """写入一条研究员/系统观察形态记录。"""
         d = obs.to_dict()
         d.pop("id", None)
+        observed_day = str(d.get("observed_at") or "")[:10]
+        d["event_key"] = d.get("event_key") or (
+            f"{str(d.get('code') or '').upper()}|{d.get('pattern_type') or 'general'}|{observed_day}"
+        )
         columns = ", ".join(d.keys())
         placeholders = ", ".join(["?"] * len(d))
         cursor = self._execute_write(
-            f"INSERT INTO research_observation_log ({columns}) VALUES ({placeholders})",
+            f"INSERT OR IGNORE INTO research_observation_log ({columns}) VALUES ({placeholders})",
             tuple(d.values()),
         )
-        return cursor.lastrowid or 0
+        if cursor.rowcount:
+            return cursor.lastrowid or 0
+        row = self.execute(
+            "SELECT id FROM research_observation_log WHERE event_key=?",
+            (d["event_key"],),
+        ).fetchone()
+        return int(row["id"] or 0) if row else 0
 
     def batch_verify_research_observations(self) -> int:
-        """验证已积累足够后续 K 线的观察记录。"""
+        """只验证真正触发且已积累足够后续 K 线的观察记录。"""
         rows = self.execute(
             """SELECT * FROM research_observation_log
-               WHERE validated = 0 AND trigger_price > 0"""
+               WHERE validated = 0 AND trigger_price > 0
+                 AND validation_status IN ('pending', 'triggered')"""
         ).fetchall()
         verified = 0
         for row in rows:
@@ -1358,18 +1629,56 @@ class Database:
                 """SELECT date, high, low, close
                    FROM price_history
                    WHERE code = ? AND date > ?
-                   ORDER BY date ASC LIMIT 10""",
+                   ORDER BY date ASC LIMIT 20""",
                 (obs.code, obs.observed_at[:10]),
             ).fetchall()
-            if len(future) < 10:
-                continue
-
-            closes = [float(r["close"] or 0) for r in future]
-            highs = [float(r["high"] or 0) for r in future]
-            lows = [float(r["low"] or 0) for r in future]
             trigger = float(obs.trigger_price or 0)
             if trigger <= 0:
                 continue
+
+            operator = obs.trigger_operator or ""
+            trigger_idx = -1 if obs.entry_triggered else None
+            if trigger_idx is None and operator in ("cross_above", "cross_below"):
+                # 条件计划默认 5 个交易日有效，过期未触发不计收益样本。
+                for idx, bar in enumerate(future[:5]):
+                    high = float(bar["high"] or 0)
+                    low = float(bar["low"] or 0)
+                    if operator == "cross_above" and high >= trigger:
+                        trigger_idx = idx
+                        break
+                    if operator == "cross_below" and low <= trigger:
+                        trigger_idx = idx
+                        break
+                if trigger_idx is None:
+                    if len(future) >= 5:
+                        self._execute_write(
+                            """UPDATE research_observation_log
+                               SET validated=1, validation_status='not_triggered', verified_at=?
+                               WHERE id=?""",
+                            (datetime.now().isoformat(), obs.id),
+                        )
+                    continue
+            elif trigger_idx is None:
+                # 旧版/中性/被反驳的观察没有可执行触发语义，隔离不学习。
+                self._execute_write(
+                    """UPDATE research_observation_log
+                       SET validated=1, validation_status='unsupported', verified_at=?
+                       WHERE id=?""",
+                    (datetime.now().isoformat(), obs.id),
+                )
+                continue
+
+            evaluation = future if trigger_idx == -1 else future[trigger_idx + 1:]
+            if len(evaluation) < 10:
+                continue
+            evaluation = evaluation[:10]
+            closes = [float(r["close"] or 0) for r in evaluation]
+            highs = [float(r["high"] or 0) for r in evaluation]
+            lows = [float(r["low"] or 0) for r in evaluation]
+            triggered_at = (
+                obs.observed_at[:10] if trigger_idx == -1
+                else str(future[trigger_idx]["date"] or "")[:10]
+            )
 
             def ret(day: int) -> float:
                 idx = max(0, min(day - 1, len(closes) - 1))
@@ -1381,25 +1690,29 @@ class Database:
             obs.return_10d = ret(10)
 
             if obs.expected_direction == "bearish":
-                obs.max_adverse_return = (max(highs) - trigger) / trigger if highs else 0.0
-                obs.hit_stop_loss = 1 if obs.stop_loss > 0 and max(highs) >= obs.stop_loss else 0
-                obs.hit_take_profit = 1 if min(lows) < trigger else 0
+                obs.max_adverse_return = (trigger - max(highs)) / trigger if highs else 0.0
+                obs.hit_stop_loss = (
+                    1 if obs.stop_loss > trigger and max(highs) >= obs.stop_loss else 0
+                )
             else:
                 obs.max_adverse_return = (min(lows) - trigger) / trigger if lows else 0.0
                 obs.hit_stop_loss = 1 if obs.stop_loss > 0 and min(lows) <= obs.stop_loss else 0
-                obs.hit_take_profit = 1 if max(highs) > trigger else 0
 
             obs.validated = 1
+            obs.entry_triggered = 1
+            obs.triggered_at = triggered_at
+            obs.validation_status = "verified"
             obs.verified_at = datetime.now().isoformat()
             self._execute_write(
                 """UPDATE research_observation_log
                    SET validated=1, return_1d=?, return_3d=?, return_5d=?, return_10d=?,
-                       max_adverse_return=?, hit_take_profit=?, hit_stop_loss=?, verified_at=?
+                       max_adverse_return=?, hit_take_profit=?, hit_stop_loss=?, verified_at=?,
+                       entry_triggered=1, triggered_at=?, validation_status='verified'
                    WHERE id=?""",
                 (
                     obs.return_1d, obs.return_3d, obs.return_5d, obs.return_10d,
                     obs.max_adverse_return, obs.hit_take_profit, obs.hit_stop_loss,
-                    obs.verified_at, obs.id,
+                    obs.verified_at, obs.triggered_at, obs.id,
                 ),
             )
             verified += 1
@@ -1414,7 +1727,10 @@ class Database:
         execution_level: str = "",
     ) -> dict:
         """聚合观察形态表现，供风控官/报告显示历史正期望状态。"""
-        conditions = ["validated = 1"]
+        conditions = [
+            "validated = 1", "entry_triggered = 1",
+            "validation_status = 'verified'",
+        ]
         params: list = []
         if code:
             conditions.append("code = ?")
@@ -1454,9 +1770,12 @@ class Database:
         avg_5d = sum(float(r.get("return_5d") or 0) for r in items) / total
         avg_10d = sum(float(r.get("return_10d") or 0) for r in items) / total
         avg_adverse = sum(float(r.get("max_adverse_return") or 0) for r in items) / total
-        directional_avg = avg_5d
-        if items and items[0].get("expected_direction") == "bearish":
-            directional_avg = -avg_5d
+        directional_avg = sum(
+            -float(r.get("return_5d") or 0)
+            if r.get("expected_direction") == "bearish"
+            else float(r.get("return_5d") or 0)
+            for r in items
+        ) / total
         expectancy = "positive" if total >= 3 and win_rate >= 0.5 and directional_avg > 0 else (
             "negative" if total >= 3 and (win_rate < 0.45 or directional_avg < 0) else "insufficient"
         )
@@ -1471,7 +1790,10 @@ class Database:
 
     def get_research_observation_overview(self, market: str = "", limit: int = 20) -> list[dict]:
         """按股票+形态+执行等级聚合观察形态历史表现。"""
-        conditions = ["validated = 1"]
+        conditions = [
+            "validated = 1", "entry_triggered = 1",
+            "validation_status = 'verified'",
+        ]
         params: list = []
         if market:
             conditions.append("market = ?")
@@ -1758,6 +2080,12 @@ class Database:
         for h in health_report:
             strategy_key = str(h.get("strategy_name") or "").strip()
             if not strategy_key:
+                continue
+            # 参数冠军主要控制入场。退出样本单独约束 sell 信号排序，
+            # 不能因卖出时机不佳而误删同策略仍有效的买入参数。
+            if h.get("signal_action") == "sell":
+                if h.get("action") == "watch":
+                    watched += 1
                 continue
             action = h.get("action")
             if action == "demote":

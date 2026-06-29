@@ -8,7 +8,7 @@
 
 import pandas as pd
 
-from strategies.base import BaseExecutionStrategy, Order, StrategyContext, StrategyDecision
+from strategies.base import BaseExecutionStrategy, StrategyContext, StrategyDecision
 
 
 class ConditionalTriggerStrategy(BaseExecutionStrategy):
@@ -24,8 +24,9 @@ class ConditionalTriggerStrategy(BaseExecutionStrategy):
     def description(self) -> str:
         return "统一输出买入/加仓、卖出/减仓、持有和失效条件"
 
-    def generate_orders(self, df: pd.DataFrame, context: StrategyContext) -> list[Order]:
-        return []
+    def diagnose_no_signal(self, df, context) -> list[str]:
+        decision = self.generate_decision(df, context)
+        return list(decision.missing_conditions or [decision.reason])
 
     def generate_decision(
         self, df: pd.DataFrame, context: StrategyContext

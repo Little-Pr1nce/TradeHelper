@@ -17,14 +17,14 @@ import numpy as np
 import pandas as pd
 
 from strategies.base import (
-    BaseExecutionStrategy, Order, StrategyContext,
+    DecisionFirstStrategy, StrategyContext,
     compute_atr, compute_percentile_score, round_lot_shares,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class MomentumNewsStrategy(BaseExecutionStrategy):
+class MomentumNewsStrategy(DecisionFirstStrategy):
     """动量突破+新闻共振确认。"""
 
     suitable_regimes = []  # 全行情通用
@@ -84,9 +84,23 @@ class MomentumNewsStrategy(BaseExecutionStrategy):
 
         return True, ""
 
-    def generate_orders(self, df: pd.DataFrame, context: StrategyContext) -> list[Order]:
+    def diagnose_no_signal(self, df, context) -> list[str]:
         if df.empty or "Final_Score" not in df.columns:
-            return []
+            return ["缺少 Final_Score，无法检查动量新闻共振"]
+        pct = compute_percentile_score(df, window=self.lookback).iloc[-1]
+        if pd.isna(pct):
+            return ["百分位样本不足，至少需要60根有效K线"]
+        if context.position.shares > 0:
+            return [f"Score百分位{pct:.0%}尚未跌破退出阈值{self.exit_pct:.0%}，移动止盈也未触发"]
+        can_enter, reason = self._check_entry(df, float(pct))
+        missing = [] if can_enter else [reason]
+        if len(df) - 1 < context.cooldown_until:
+            missing.append("策略仍处于冷却期")
+        return missing or ["ATR或可下单股数无效"]
+
+    def _evaluate_decision(self, df: pd.DataFrame, context: StrategyContext):
+        if df.empty or "Final_Score" not in df.columns:
+            return self._no_signal_decision(df, context)
 
         idx = len(df) - 1
         current_date = str(df.iloc[-1].get("date", ""))[:10]
@@ -97,7 +111,7 @@ class MomentumNewsStrategy(BaseExecutionStrategy):
         pct_series = compute_percentile_score(df, window=self.lookback)
         current_pct = pct_series.iloc[-1]
         if pd.isna(current_pct):
-            return []
+            return self._no_signal_decision(df, context)
 
         # 平仓
         if has_position:
@@ -116,18 +130,20 @@ class MomentumNewsStrategy(BaseExecutionStrategy):
                     else f"移动止盈: close({close:.2f}) < trail({trailing_stop:.2f})"
                 )
                 logger.info(f"[策略C] {current_date} 平仓 | {reason}")
-                return [Order(date=current_date, action="sell",
-                             shares=context.position.shares, reason=reason)]
-            return []
+                return self._execution_decision(
+                    df, context, action="sell",
+                    shares=context.position.shares, reason=reason,
+                )
+            return self._no_signal_decision(df, context)
 
         # 开仓
         can_enter, reject_reason = self._check_entry(df, current_pct)
         if not can_enter:
-            return []
+            return self._no_signal_decision(df, context)
         if idx < context.cooldown_until:
-            return []
+            return self._no_signal_decision(df, context)
         if pd.isna(atr) or atr <= 0:
-            return []
+            return self._no_signal_decision(df, context)
 
         stop_distance = self.trailing_atr_mult * atr
         risk_amount = context.equity * self.risk_budget
@@ -137,8 +153,8 @@ class MomentumNewsStrategy(BaseExecutionStrategy):
         logger.info(
             f"[策略C] {current_date} 三重确认开仓 | 百分位={current_pct:.1%} | 股数={shares}"
         )
-        return [Order(
-            date=current_date, action="buy", shares=shares,
+        return self._execution_decision(
+            df, context, action="buy", shares=shares,
             stop_loss=stop_loss,
             reason=f"三重确认: 百分位={current_pct:.1%}",
-        )]
+        )

@@ -61,6 +61,43 @@ def make_context(equity=100000.0, cash=100000.0, shares=0, cooldown=-1,
     )
 
 
+def test_bollinger_strategy_owns_its_no_signal_diagnosis():
+    strategy = get_execution_strategy("D")
+    df = make_test_df(80, final_scores=list(np.linspace(-0.2, 0.2, 80)))
+    df["bb_upper"] = df["close"] + 5.0
+    df["bb_mid"] = df["close"]
+    df["bb_lower"] = df["close"] - 5.0
+
+    decision = strategy.generate_decision(df, make_context())
+    diagnosis = "；".join(decision.missing_conditions)
+
+    assert "布林上轨" in diagnosis
+    assert "需突破" in diagnosis
+
+
+def test_trend_pullback_exit_compares_with_prior_ten_day_low():
+    strategy = get_execution_strategy("L")
+    rising = list(np.linspace(50.0, 100.0, 69))
+    close = rising + [110.0] * 10 + [105.0]
+    df = pd.DataFrame({
+        "date": pd.date_range("2025-01-01", periods=80, freq="B"),
+        "open": close,
+        "high": np.asarray(close) + 1.0,
+        "low": np.asarray(close) - 1.0,
+        "close": close,
+        "volume": [1000000] * 80,
+        "Final_Score": [0.0] * 80,
+    })
+    context = make_context(
+        shares=100, entry_price=100.0, highest_close=110.0,
+    )
+
+    orders = strategy.generate_orders(df, context)
+
+    assert orders and orders[0].action == "sell"
+    assert "跌破10日低点" in orders[0].reason
+
+
 class TestThresholdTrendStrategy:
     """策略A 测试。"""
 

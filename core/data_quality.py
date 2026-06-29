@@ -43,6 +43,7 @@ def evaluate_data_quality(
     fundamental_data: dict | None = None,
     depth_available: bool = False,
     market: str = "",
+    realtime_quote_quality: dict | None = None,
 ) -> DataQualityReport:
     """评估交易建议可依赖的数据质量。"""
     report = DataQualityReport()
@@ -127,6 +128,11 @@ def evaluate_data_quality(
         report.missing.append("基本面数据缺失")
     if market == "US" and not depth_available:
         report.missing.append("盘口/深度数据缺失")
+
+    quote_quality = realtime_quote_quality or {}
+    if quote_quality.get("required"):
+        report.issues.extend(str(x) for x in (quote_quality.get("issues") or []))
+        report.warnings.extend(str(x) for x in (quote_quality.get("warnings") or []))
 
     return _finalize(report)
 

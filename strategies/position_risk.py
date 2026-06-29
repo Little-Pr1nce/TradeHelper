@@ -44,6 +44,10 @@ class PositionRiskManagementStrategy(BaseExecutionStrategy):
     def description(self) -> str:
         return "基于真实成本、浮盈亏、仓位集中度和Alpha分数管理已有持仓"
 
+    def diagnose_no_signal(self, df, context) -> list[str]:
+        decision = self.generate_decision(df, context)
+        return list(decision.missing_conditions or [decision.reason])
+
     def generate_decision(
         self, df: pd.DataFrame, context: StrategyContext
     ) -> StrategyDecision:

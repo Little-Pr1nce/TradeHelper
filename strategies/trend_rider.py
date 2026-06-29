@@ -24,14 +24,14 @@ import numpy as np
 import pandas as pd
 
 from strategies.base import (
-    BaseExecutionStrategy, Order, Position, StrategyContext,
+    DecisionFirstStrategy, StrategyContext,
     compute_atr, shares_from_cash,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class TrendRiderStrategy(BaseExecutionStrategy):
+class TrendRiderStrategy(DecisionFirstStrategy):
     """趋势满仓持有 — 专为对标买入持有基准而设计。
 
     设计哲学：承认在强趋势中"不动"才是最好的策略，
@@ -70,12 +70,38 @@ class TrendRiderStrategy(BaseExecutionStrategy):
             {"name": "hard_stop_pct", "default": self.hard_stop_pct, "values": [0.15, 0.20, 0.25]},
         ]
 
-    def generate_orders(
-        self, df: pd.DataFrame, context: StrategyContext
-    ) -> list[Order]:
-        orders = []
+    def diagnose_no_signal(self, df, context) -> list[str]:
         if len(df) < 80:
-            return orders
+            return ["趋势基准策略至少需要80根K线"]
+        close = df["close"].astype(float)
+        price = float(close.iloc[-1])
+        ma20 = float(close.rolling(20).mean().iloc[-1])
+        ma60 = float(close.rolling(60).mean().iloc[-1])
+        score = float(df.iloc[-1].get("Final_Score", 0.0) or 0.0)
+        if context.position.shares > 0:
+            drawdown = (
+                (context.position.highest_close - price) / context.position.highest_close
+                if context.position.highest_close > 0 else 0.0
+            )
+            return [
+                f"价格{price:.2f}尚未跌破MA60缓冲线{ma60 * self.ma60_buffer:.2f}",
+                f"MA20({ma20:.2f})尚未死叉MA60({ma60:.2f})",
+                f"高点回撤{drawdown:.1%}尚未达到{self.hard_stop_pct:.0%}",
+            ]
+        missing = []
+        if ma20 <= ma60:
+            missing.append(f"MA20({ma20:.2f})需上穿MA60({ma60:.2f})")
+        if price <= ma60:
+            missing.append(f"价格{price:.2f}需站上MA60({ma60:.2f})")
+        if score <= -0.2:
+            missing.append(f"Final_Score={score:+.3f}需高于-0.200")
+        return missing or ["可用现金不足以形成最小交易单位"]
+
+    def _evaluate_decision(
+        self, df: pd.DataFrame, context: StrategyContext
+    ):
+        if len(df) < 80:
+            return self._no_signal_decision(df, context)
 
         row = df.iloc[-1]
         score = row.get("Final_Score", 0.0)
@@ -102,9 +128,8 @@ class TrendRiderStrategy(BaseExecutionStrategy):
                 shares = shares_from_cash(context.cash, latest_close, context.market, self.invest_pct)
                 stop_loss = round(latest_close * (1 - self.hard_stop_pct), 2)
 
-                orders.append(Order(
-                    date=str(df["date"].iloc[-1])[:10],
-                    action="buy",
+                decision = self._execution_decision(
+                    df, context, action="buy",
                     shares=shares,
                     stop_loss=stop_loss,
                     reason=(
@@ -114,12 +139,13 @@ class TrendRiderStrategy(BaseExecutionStrategy):
                     ),
                     time_stop_days=250,        # 一年不时间止损
                     hard_stop_pct=self.hard_stop_pct,
-                ))
+                )
                 logger.info(
                     f"[策略O] {df['date'].iloc[-1]} 满仓入场 | "
                     f"价={latest_close:.2f} MA20>MA60 | "
                     f"股数={shares} ({self.invest_pct:.0%}仓位) 止损={stop_loss}"
                 )
+                return decision
 
         # —— 平仓信号（仅持仓时） ——
         elif context.position.shares > 0:
@@ -154,12 +180,12 @@ class TrendRiderStrategy(BaseExecutionStrategy):
                     )
 
             if should_sell:
-                orders.append(Order(
-                    date=str(df["date"].iloc[-1])[:10],
-                    action="sell",
+                decision = self._execution_decision(
+                    df, context, action="sell",
                     shares=context.position.shares,
                     reason=sell_reason,
-                ))
+                )
                 logger.info(f"[策略O] {df['date'].iloc[-1]} 退出 | {sell_reason}")
+                return decision
 
-        return orders
+        return self._no_signal_decision(df, context)

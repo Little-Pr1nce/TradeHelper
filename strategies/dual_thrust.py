@@ -18,14 +18,14 @@ import numpy as np
 import pandas as pd
 
 from strategies.base import (
-    BaseExecutionStrategy, Order, Position, StrategyContext,
+    DecisionFirstStrategy, StrategyContext,
     compute_atr, compute_percentile_score, round_lot_shares,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class DualThrustStrategy(BaseExecutionStrategy):
+class DualThrustStrategy(DecisionFirstStrategy):
     """Dual Thrust 日线适配版。
 
     参数说明：
@@ -82,9 +82,36 @@ class DualThrustStrategy(BaseExecutionStrategy):
         ll = float(window["low"].min())
         return max(hh - lc, hc - ll)
 
-    def generate_orders(self, df: pd.DataFrame, context: StrategyContext) -> list[Order]:
+    def diagnose_no_signal(self, df, context) -> list[str]:
         if df.empty or "Final_Score" not in df.columns:
-            return []
+            return ["缺少 Final_Score，无法检查 Dual Thrust"]
+        pct = compute_percentile_score(df, window=self.score_lookback).iloc[-1]
+        if pd.isna(pct):
+            return ["百分位样本不足，至少需要60根有效K线"]
+        close = float(df["close"].iloc[-1])
+        previous_open = float(df["open"].iloc[-2]) if len(df) >= 2 else float(df["open"].iloc[-1])
+        range_value = self._calc_range(df)
+        if range_value <= 0:
+            return ["Dual Thrust 历史振幅无效"]
+        upper = previous_open + self.k1 * range_value
+        lower = previous_open - self.k2 * range_value
+        if context.position.shares > 0:
+            return [
+                f"价格{close:.2f}尚未跌破DT下轨{lower:.2f}",
+                f"Score百分位{pct:.0%}尚未跌破{self.exit_pct:.0%}",
+            ]
+        missing = []
+        if close <= upper:
+            missing.append(f"价格{close:.2f}需突破DT上轨{upper:.2f}")
+        if pct < self.entry_pct:
+            missing.append(f"Score百分位{pct:.0%}需达到{self.entry_pct:.0%}")
+        if len(df) - 1 < context.cooldown_until:
+            missing.append("策略仍处于冷却期")
+        return missing or ["ATR或可下单股数无效"]
+
+    def _evaluate_decision(self, df: pd.DataFrame, context: StrategyContext):
+        if df.empty or "Final_Score" not in df.columns:
+            return self._no_signal_decision(df, context)
 
         idx = len(df) - 1
         current_date = str(df.iloc[-1].get("date", ""))[:10]
@@ -94,7 +121,7 @@ class DualThrustStrategy(BaseExecutionStrategy):
         pct_series = compute_percentile_score(df, window=self.score_lookback)
         current_pct = pct_series.iloc[-1]
         if pd.isna(current_pct):
-            return []
+            return self._no_signal_decision(df, context)
 
         # 用上一根 bar 的 open 作为基准（T 日收盘时可拿到 T 日 open，但同时可用 T-1 open）
         if idx >= 1:
@@ -104,7 +131,7 @@ class DualThrustStrategy(BaseExecutionStrategy):
 
         range_val = self._calc_range(df)
         if range_val <= 0:
-            return []
+            return self._no_signal_decision(df, context)
         upper_band = prev_open + self.k1 * range_val
         lower_band = prev_open - self.k2 * range_val
 
@@ -112,27 +139,29 @@ class DualThrustStrategy(BaseExecutionStrategy):
         if has_position:
             if close < lower_band:
                 logger.info(f"[策略E] {current_date} 平仓 | close({close:.2f}) < DT下轨({lower_band:.2f})")
-                return [Order(date=current_date, action="sell",
-                             shares=context.position.shares,
-                             reason=f"跌破DT下轨: {close:.2f} < {lower_band:.2f}")]
+                return self._execution_decision(
+                    df, context, action="sell", shares=context.position.shares,
+                    reason=f"跌破DT下轨: {close:.2f} < {lower_band:.2f}",
+                )
             if current_pct < self.exit_pct:
                 logger.info(f"[策略E] 平仓 | 百分位={current_pct:.1%} < {self.exit_pct:.0%}")
-                return [Order(date=current_date, action="sell",
-                             shares=context.position.shares,
-                             reason=f"百分位({current_pct:.1%}) < {self.exit_pct:.0%}")]
-            return []
+                return self._execution_decision(
+                    df, context, action="sell", shares=context.position.shares,
+                    reason=f"百分位({current_pct:.1%}) < {self.exit_pct:.0%}",
+                )
+            return self._no_signal_decision(df, context)
 
         # ── 开仓 ──
         if close <= upper_band:
-            return []
+            return self._no_signal_decision(df, context)
         if current_pct < self.entry_pct:
-            return []
+            return self._no_signal_decision(df, context)
         if idx < context.cooldown_until:
-            return []
+            return self._no_signal_decision(df, context)
 
         atr = compute_atr(df, self.atr_period).iloc[-1]
         if pd.isna(atr) or atr <= 0:
-            return []
+            return self._no_signal_decision(df, context)
 
         stop_distance = 2 * atr
         risk_amount = context.equity * self.risk_budget
@@ -142,8 +171,8 @@ class DualThrustStrategy(BaseExecutionStrategy):
         logger.info(
             f"[策略E] {current_date} DT突破开仓 | close={close:.2f} > 上轨={upper_band:.2f}"
         )
-        return [Order(
-            date=current_date, action="buy", shares=shares,
+        return self._execution_decision(
+            df, context, action="buy", shares=shares,
             stop_loss=stop_loss,
             reason=f"DT突破: {close:.2f}>{upper_band:.2f}, 百分位={current_pct:.1%}",
-        )]
+        )

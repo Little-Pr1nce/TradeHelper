@@ -22,14 +22,14 @@ import numpy as np
 import pandas as pd
 
 from strategies.base import (
-    BaseExecutionStrategy, Order, Position, StrategyContext,
+    DecisionFirstStrategy, StrategyContext,
     compute_atr, compute_percentile_score, round_lot_shares,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class ThresholdTrendStrategy(BaseExecutionStrategy):
+class ThresholdTrendStrategy(DecisionFirstStrategy):
     """百分位趋势跟踪（基准策略）。
 
     参数说明：
@@ -72,9 +72,24 @@ class ThresholdTrendStrategy(BaseExecutionStrategy):
             f"冷却期 {self.cooldown_bars} 根 K 线，风险预算 {self.risk_budget:.0%}（高仓位）。"
         )
 
-    def generate_orders(self, df: pd.DataFrame, context: StrategyContext) -> list[Order]:
+    def diagnose_no_signal(self, df, context) -> list[str]:
         if df.empty or "Final_Score" not in df.columns:
-            return []
+            return ["缺少 Final_Score，无法检查百分位趋势"]
+        pct = compute_percentile_score(df, window=self.lookback).iloc[-1]
+        if pd.isna(pct):
+            return ["百分位样本不足，至少需要60根有效K线"]
+        if context.position.shares > 0:
+            return [f"Score百分位{pct:.0%}尚未跌破退出阈值{self.exit_pct:.0%}"]
+        missing = []
+        if pct < self.entry_pct:
+            missing.append(f"Score百分位{pct:.0%}需达到{self.entry_pct:.0%}")
+        if len(df) - 1 < context.cooldown_until:
+            missing.append("策略仍处于冷却期")
+        return missing or ["ATR或可下单股数无效"]
+
+    def _evaluate_decision(self, df: pd.DataFrame, context: StrategyContext):
+        if df.empty or "Final_Score" not in df.columns:
+            return self._no_signal_decision(df, context)
 
         idx = len(df) - 1
         current_date = str(df.iloc[-1].get("date", ""))[:10]
@@ -84,7 +99,7 @@ class ThresholdTrendStrategy(BaseExecutionStrategy):
         pct_series = compute_percentile_score(df, window=self.lookback)
         current_pct = pct_series.iloc[-1]
         if pd.isna(current_pct):
-            return []
+            return self._no_signal_decision(df, context)
 
         # ── 平仓条件 ──
         if has_position:
@@ -93,21 +108,21 @@ class ThresholdTrendStrategy(BaseExecutionStrategy):
                     f"[策略A] {current_date} 平仓 | "
                     f"百分位={current_pct:.1%} < {self.exit_pct:.0%}"
                 )
-                return [Order(
-                    date=current_date, action="sell",
+                return self._execution_decision(
+                    df, context, action="sell",
                     shares=context.position.shares,
                     reason=f"百分位({current_pct:.1%}) < exit({self.exit_pct:.0%})",
-                )]
-            return []
+                )
+            return self._no_signal_decision(df, context)
 
         # ── 开仓条件 ──
         if current_pct >= self.entry_pct:
             if idx < context.cooldown_until:
-                return []
+                return self._no_signal_decision(df, context)
 
             atr = compute_atr(df, self.atr_period).iloc[-1]
             if pd.isna(atr) or atr <= 0:
-                return []
+                return self._no_signal_decision(df, context)
 
             close = float(df["close"].iloc[-1])
             stop_distance = 2 * atr
@@ -120,12 +135,12 @@ class ThresholdTrendStrategy(BaseExecutionStrategy):
                 f"百分位={current_pct:.1%} >= {self.entry_pct:.0%} | "
                 f"股数={shares}, 止损价={stop_loss:.2f}"
             )
-            return [Order(
-                date=current_date, action="buy", shares=shares,
+            return self._execution_decision(
+                df, context, action="buy", shares=shares,
                 stop_loss=stop_loss,
                 reason=f"百分位({current_pct:.1%}) >= entry({self.entry_pct:.0%})",
                 time_stop_days=120,    # 趋势策略不设短时间止损
                 hard_stop_pct=0.20,    # 放宽硬止损至 20%
-            )]
+            )
 
-        return []
+        return self._no_signal_decision(df, context)

@@ -46,6 +46,10 @@ class ProfitLockAfterHighStrategy(BaseExecutionStrategy):
     def description(self) -> str:
         return "接近阶段新高后回落且仍有浮盈时，部分止盈或上移止损"
 
+    def diagnose_no_signal(self, df, context) -> list[str]:
+        decision = self.generate_decision(df, context)
+        return list(decision.missing_conditions or [decision.reason])
+
     def generate_decision(
         self, df: pd.DataFrame, context: StrategyContext
     ) -> StrategyDecision:
@@ -75,7 +79,8 @@ class ProfitLockAfterHighStrategy(BaseExecutionStrategy):
             max_loss = max(close - lock_line, 0.0) * max(context.position.shares - sell_shares, 0)
             return StrategyDecision(
                 action="sell",
-                execution_level="A",
+                # 事实和风险条件成立，但历史正期望需由统一风控层确认。
+                execution_level="B",
                 shares=sell_shares,
                 trigger_price=close,
                 stop_loss=lock_line,

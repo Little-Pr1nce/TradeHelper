@@ -10,7 +10,8 @@
 import logging
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
@@ -41,10 +42,90 @@ def _format_quote_time(timestamp: int | float) -> str:
     if timestamp and timestamp > 0:
         try:
             from datetime import datetime as dt
-            return dt.fromtimestamp(float(timestamp) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            return dt.fromtimestamp(_normalize_epoch_seconds(timestamp)).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             pass
     return "实时"
+
+
+def _normalize_epoch_seconds(timestamp: int | float) -> float:
+    try:
+        value = float(timestamp or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return value / 1000.0 if value > 10_000_000_000 else value
+
+
+def _evaluate_realtime_quote_quality(
+    quote: dict | None,
+    mode: str,
+    *,
+    now_epoch: float | None = None,
+) -> dict:
+    """逐股实时报价闸门，避免组合中部分成功掩盖单股失败。"""
+    required = mode in ("intraday", "pre")
+    price = float((quote or {}).get("price", 0.0) or 0.0)
+    timestamp = _normalize_epoch_seconds((quote or {}).get("timestamp", 0))
+    max_age = 15 * 60 if mode == "intraday" else 45 * 60
+    now_value = float(now_epoch if now_epoch is not None else datetime.now(timezone.utc).timestamp())
+    age_seconds = now_value - timestamp if timestamp > 0 else None
+    fresh = bool(
+        timestamp > 0
+        and age_seconds is not None
+        and -300 <= age_seconds <= max_age
+    )
+    open_p = float((quote or {}).get("open", 0.0) or 0.0)
+    high_p = float((quote or {}).get("high", 0.0) or 0.0)
+    low_p = float((quote or {}).get("low", 0.0) or 0.0)
+    ohlc_complete = bool(
+        min(open_p, high_p, low_p, price) > 0
+        and high_p >= max(open_p, low_p, price)
+        and low_p <= min(open_p, high_p, price)
+    )
+    issues = []
+    warnings = []
+    if required and price <= 0:
+        issues.append("当前时段实时报价缺失")
+    elif required and not fresh:
+        if timestamp <= 0:
+            issues.append("实时报价缺少可验证时间戳")
+        else:
+            issues.append(f"实时报价已过期（约{max(age_seconds or 0, 0)/60:.0f}分钟）")
+    if required and price > 0 and fresh and not ohlc_complete:
+        warnings.append("实时价可用，但盘中OHLC不完整，不确认冲高回落/日内触线形态")
+    return {
+        "required": required,
+        "available": price > 0,
+        "fresh": fresh,
+        "ohlc_complete": ohlc_complete,
+        "age_seconds": age_seconds,
+        "issues": issues,
+        "warnings": warnings,
+    }
+
+
+def _quote_payload(
+    *,
+    price: float,
+    source: str,
+    session: str,
+    timestamp: int | float,
+    bar: dict | None,
+) -> dict:
+    """保留报价中已取得的 OHLCV，缺失字段不伪造。"""
+    source_bar = bar or {}
+    return {
+        "price": float(price),
+        "latest": float(price),
+        "open": float(source_bar.get("open", 0.0) or 0.0),
+        "high": float(source_bar.get("high", 0.0) or 0.0),
+        "low": float(source_bar.get("low", 0.0) or 0.0),
+        "volume": float(source_bar.get("volume", 0.0) or 0.0),
+        "prev_close": float(source_bar.get("prev_close", 0.0) or 0.0),
+        "timestamp": timestamp or source_bar.get("timestamp", 0),
+        "source": source,
+        "session": session,
+    }
 
 
 def _top_candidate_signal(signals: list[dict]) -> dict:
@@ -575,6 +656,7 @@ def _build_historical_evaluation_markdown(
     prediction_rows: list[dict],
     observation_rows: list[dict],
     market: str,
+    exit_rows: list[dict] | None = None,
 ) -> str:
     """构建历史预测评估面板 Markdown，用于 Tab3 UI 和报告复用。"""
     market_label = "美股" if market == "US" else "A股"
@@ -599,6 +681,25 @@ def _build_historical_evaluation_markdown(
         lines.append("")
     else:
         lines.append("- 暂无已验证预测记录。继续生成报告后，系统会自动积累并验证。\n")
+
+    if exit_rows:
+        lines.extend([
+            "#### 卖出后退出质量\n",
+            "| 股票/策略 | 样本 | 5日涨跌 | 10日涨跌 | 20日涨跌 | 避免损失 | 机会成本 | 有效率 |",
+            "|------|------:|------:|------:|------:|------:|------:|------:|",
+        ])
+        for row in exit_rows[:15]:
+            lines.append(
+                f"| {row.get('label', '')} / {row.get('strategy_name', '')} "
+                f"| {int(row.get('count', 0))} "
+                f"| {float(row.get('avg_return_5d', 0)):+.2%} "
+                f"| {float(row.get('avg_return_10d', 0)):+.2%} "
+                f"| {float(row.get('avg_return_20d', 0)):+.2%} "
+                f"| {float(row.get('avg_avoided_loss', 0)):.2%} "
+                f"| {float(row.get('avg_opportunity_cost', 0)):.2%} "
+                f"| {float(row.get('effective_rate', 0)):.0%} |"
+            )
+        lines.append("")
 
     if observation_rows:
         lines.extend([
@@ -647,37 +748,41 @@ def _fetch_portfolio_realtime_quote(code: str, market: str, fetcher) -> dict | N
         if market == "US" and session != "intraday":
             ext_data = fetch_us_extended_quote(code)
             if ext_data and ext_data.get("price", 0) > 0:
-                return {
-                    "price": float(ext_data["price"]),
-                    "timestamp": ext_data.get("timestamp", 0),
-                    "source": "Nasdaq.com延伸时段",
-                    "session": session,
-                }
+                return _quote_payload(
+                    price=float(ext_data["price"]),
+                    timestamp=ext_data.get("timestamp", 0),
+                    source="Nasdaq.com延伸时段",
+                    session=session,
+                    bar=ext_data,
+                )
 
         if tick and tick.get("latest", 0) > 0:
-            return {
-                "price": float(tick["latest"]),
-                "timestamp": tick.get("timestamp", 0),
-                "source": "TickFlow实时报价",
-                "session": session,
-            }
+            return _quote_payload(
+                price=float(tick["latest"]),
+                timestamp=tick.get("timestamp", 0),
+                source="TickFlow实时报价",
+                session=session,
+                bar=quote or tick,
+            )
         if quote and quote.get("latest", 0) > 0:
-            return {
-                "price": float(quote["latest"]),
-                "timestamp": quote.get("timestamp", 0),
-                "source": "实时报价",
-                "session": session,
-            }
+            return _quote_payload(
+                price=float(quote["latest"]),
+                timestamp=quote.get("timestamp", 0),
+                source="实时报价",
+                session=session,
+                bar=quote,
+            )
 
         if market == "US":
             ext_data = fetch_us_extended_quote(code)
             if ext_data and ext_data.get("price", 0) > 0:
-                return {
-                    "price": float(ext_data["price"]),
-                    "timestamp": ext_data.get("timestamp", 0),
-                    "source": "Nasdaq.com报价",
-                    "session": session,
-                }
+                return _quote_payload(
+                    price=float(ext_data["price"]),
+                    timestamp=ext_data.get("timestamp", 0),
+                    source="Nasdaq.com报价",
+                    session=session,
+                    bar=ext_data,
+                )
     except Exception as e:
         logger.warning(f"获取 {code} 当前价失败: {e}")
     return None
@@ -1093,6 +1198,7 @@ class PortfolioService:
                 seen.add(item.code)
 
         prediction_rows: list[dict] = []
+        exit_rows: list[dict] = []
         for code, label in codes:
             panel = self.db.get_prediction_evaluation_panel(code)
             overall = panel.get("overall") or {}
@@ -1106,9 +1212,13 @@ class PortfolioService:
                 "avg_return": float(overall.get("avg_return", 0.0) or 0.0),
                 "expectancy": overall.get("expectancy", "insufficient"),
             })
+            for exit_row in panel.get("exit_reviews") or []:
+                exit_rows.append({"label": label, **exit_row})
 
         observation_rows = self.db.get_research_observation_overview(market=market, limit=12)
-        return _build_historical_evaluation_markdown(prediction_rows, observation_rows, market)
+        return _build_historical_evaluation_markdown(
+            prediction_rows, observation_rows, market, exit_rows=exit_rows
+        )
 
     # ======================== 核心：持仓综合分析 ========================
 
@@ -1159,6 +1269,7 @@ class PortfolioService:
         price_frames: dict[str, pd.DataFrame] = {}
         fundamental_map: dict[str, dict | None] = {}
         quote_map: dict[str, dict] = {}
+        quote_quality_map: dict[str, dict] = {}
         optimization_jobs: list[dict] = []
 
         should_fetch_quote = _should_fetch_realtime_quote(market, mode)
@@ -1188,6 +1299,10 @@ class PortfolioService:
                             quote_map[code] = quote_data
                     except Exception as e:
                         logger.warning(f"{code} 报价并发任务失败: {e}")
+            quote_quality_map = {
+                code: _evaluate_realtime_quote_quality(quote_map.get(code), mode)
+                for code in all_codes
+            }
             sessions = {str(q.get("session", "")) for q in quote_map.values() if q.get("session")}
             if mode == "intraday" and "intraday" not in sessions:
                 raise RuntimeError(
@@ -1248,19 +1363,28 @@ class PortfolioService:
         for h in holdings:
             try:
                 df_h = price_frames.get(h.code)
+                holding_quote = quote_map.get(h.code) or {}
+                holding_quote_quality = quote_quality_map.get(h.code) or {}
+                holding_quote_usable = bool(
+                    holding_quote.get("price", 0) > 0
+                    and (
+                        not holding_quote_quality.get("required")
+                        or holding_quote_quality.get("fresh")
+                    )
+                )
                 if df_h is not None:
                     price_frames[h.code] = df_h
                     latest_close = float(df_h["close"].iloc[-1])
                     mark_price = (
-                        float(quote_map[h.code]["price"])
-                        if h.code in quote_map and quote_map[h.code].get("price", 0) > 0
+                        float(holding_quote["price"])
+                        if holding_quote_usable
                         else latest_close if latest_close > 0
                         else float(h.cost_price or 0)
                     )
                 else:
                     mark_price = (
-                        float(quote_map[h.code]["price"])
-                        if h.code in quote_map and quote_map[h.code].get("price", 0) > 0
+                        float(holding_quote["price"])
+                        if holding_quote_usable
                         else float(h.cost_price or 0)
                     )
                 account_equity += float(h.shares or 0) * mark_price
@@ -1268,8 +1392,10 @@ class PortfolioService:
                 logger.warning(f"{h.code} 组合权益估算失败，使用成本价: {e}")
                 account_equity += float(h.shares or 0) * float(h.cost_price or 0)
 
-        if account_equity <= 0:
-            account_equity = 100000.0
+        # 0 是真实账户状态，不得替换为仿真的 10 万元。回测可以使用
+        # 独立参考本金，但当前下单信号必须看到真实的 0 权益。
+        account_equity = max(account_equity, 0.0)
+        backtest_capital = account_equity if account_equity > 0 else 100000.0
 
         for i, code in enumerate(all_codes):
             is_holding = i < len(holdings)
@@ -1294,14 +1420,25 @@ class PortfolioService:
                 latest_date = str(df["date"].iloc[-1].strftime("%Y-%m-%d"))
                 latest_close = float(df["close"].iloc[-1])
                 quote_data = quote_map.get(code)
-                if quote_data and quote_data.get("price", 0) > 0:
+                quote_quality = quote_quality_map.get(code) or {
+                    "required": False, "issues": [], "warnings": []
+                }
+                quote_usable = bool(
+                    quote_data and quote_data.get("price", 0) > 0
+                    and (not quote_quality.get("required") or quote_quality.get("fresh"))
+                )
+                if quote_usable:
                     current_price = float(quote_data["price"])
                     price_date = _format_quote_time(quote_data.get("timestamp", 0))
                     price_source = f"{quote_data.get('source', '实时报价')}（{price_date}）"
                 else:
                     current_price = latest_close if latest_close > 0 else None
                     price_date = latest_date
-                    price_source = f"K线收盘价（{latest_date}）"
+                    price_source = (
+                        f"K线收盘价（{latest_date}）；当前时段报价未通过逐股新鲜度检查"
+                        if quote_quality.get("required")
+                        else f"K线收盘价（{latest_date}）"
+                    )
                 position_value = 0.0
                 if is_holding and i < len(holdings) and current_price:
                     position_value = float(holdings[i].shares or 0) * float(current_price)
@@ -1337,7 +1474,9 @@ class PortfolioService:
                     shares = int(holding.shares or 0)
                     cost_price = float(holding.cost_price or 0)
                     if shares > 0:
-                        highest_close = float(df["close"].max()) if "close" in df.columns else cost_price
+                        # 持仓没有建仓日期时，无法证明历史高点发生在持仓之后。
+                        # 只使用当前已确认价格和成本，避免买入前的高点误触发移动止盈。
+                        highest_close = max(float(current_price or 0.0), cost_price)
                         current_position = Position(
                             shares=shares,
                             avg_cost=cost_price,
@@ -1352,34 +1491,36 @@ class PortfolioService:
                     on_progress(f"正在分析 {code}（{i+1}/{len(all_codes)}）：策略回测与信号检查...")
                 result = run_pipeline(
                     df, news_df=news_df, market=market,
-                    initial_capital=account_equity,
+                    initial_capital=backtest_capital,
                     account_equity=account_equity,
                     current_position=current_position,
                     current_price=current_price,
-                    current_bar=quote_data,
+                    current_bar=quote_data if quote_usable else None,
                     w_tech=w_tech, w_news=w_news,
                     fundamental_data=fundamental_data,
                     skip_param_tuning=True,
                     stock_code=code,
                     expand_pool=False,
+                    realtime_quote_quality=quote_quality,
                 )
                 optimization_jobs.append({
                     "stock_code": code,
                     "market": market,
                     "df": result.df,
                     "strategy_keys": result.active_strategies,
-                    "initial_capital": account_equity,
+                    "initial_capital": backtest_capital,
                     "news_df": news_df,
                 })
 
                 # 提取 Alpha 最新得分
+                decision_df = result.decision_df if result.decision_df is not None else result.df
                 latest_score = None
-                if "Final_Score" in result.df.columns and not result.df["Final_Score"].dropna().empty:
-                    latest_score = float(result.df["Final_Score"].dropna().iloc[-1])
+                if "Final_Score" in decision_df.columns and not decision_df["Final_Score"].dropna().empty:
+                    latest_score = float(decision_df["Final_Score"].dropna().iloc[-1])
 
                 # 提取技术面摘要
-                tech_summary = summarize_technical(result.df, name=code)
-                technical_marker = _latest_technical_marker(result.df)
+                tech_summary = summarize_technical(decision_df, name=code)
+                technical_marker = _latest_technical_marker(decision_df)
 
                 # 提取新闻摘要
                 news_summary = ""
@@ -1441,6 +1582,7 @@ class PortfolioService:
                     "current_price": current_price,
                     "position_value": position_value,
                     "price_date": price_date,
+                    "reference_date": latest_date,
                     "price_source": price_source,
                     "technical": tech_summary,
                     "technical_marker": technical_marker,
@@ -1448,6 +1590,7 @@ class PortfolioService:
                     "alpha_score": latest_score,
                     "news_summary": news_summary,
                     "market_regime": regime_label,
+                    "market_regime_key": market_regime,
                     "rank_ic_info": rank_ic_info,
                     "fund_info": fund_info,
                     "benchmark_return": benchmark_return,
@@ -1640,6 +1783,37 @@ class PortfolioService:
             mode=mode,
         )
         report_id = self.db.insert_report(report)
+
+        # Tab3 也要按单股+策略记录本次真实信号，否则策略健康度
+        # 只会学到 Tab1，且无法评估组合报告中的减仓/退出建议。
+        try:
+            from services.analysis_service import AnalysisService
+            for item in holdings_data + watchlist_data:
+                obj = item.get("holding") or item.get("watch_item")
+                if not obj:
+                    continue
+                signals = AnalysisService._prediction_signals(
+                    SimpleNamespace(signal_check=item.get("signal_check") or [])
+                )
+                for signal in signals:
+                    AnalysisService._save_prediction(
+                        code=obj.code,
+                        market=market,
+                        mode=mode,
+                        report_id=report_id,
+                        reference_date=str(item.get("reference_date") or "")[:10],
+                        direction=str(signal["direction"]),
+                        final_score=float(item.get("alpha_score") or 0.0),
+                        predicted_price=float(item.get("current_price") or 0.0),
+                        conservative_entry=float(signal.get("entry_price", 0.0) or 0.0),
+                        stop_loss=float(signal.get("stop_loss", 0.0) or 0.0),
+                        take_profit=float(signal.get("take_profit", 0.0) or 0.0),
+                        strategy_name=str(signal.get("strategy_name") or ""),
+                        signal_action=str(signal.get("action") or ""),
+                        market_regime=str(item.get("market_regime_key") or ""),
+                    )
+        except Exception as e:
+            logger.warning(f"Tab3 逐策略预测写入失败: {e}")
 
         # 形态/观察记录入库：用于后续 1/3/5/10 日表现验证和风控官自我升级
         try:

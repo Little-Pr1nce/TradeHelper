@@ -13,8 +13,8 @@ from core.signal_check import run_signal_check
 from core.pipeline import run_pipeline
 from core.strategy_pool import StrategyVariant
 from indicators.technical import calc_all_indicators
-from strategies import get_execution_strategy
-from strategies.base import Position, StrategyContext
+from strategies import get_available_strategies, get_execution_strategy
+from strategies.base import BaseExecutionStrategy, Position, StrategyContext
 
 
 def _df_for_support() -> pd.DataFrame:
@@ -112,7 +112,7 @@ def test_profit_lock_generates_partial_sell_decision():
     orders = strategy.generate_orders(df, ctx)
 
     assert decision.action == "sell"
-    assert decision.execution_level == "A"
+    assert decision.execution_level == "B"
     assert "回落" in decision.reason
     assert orders and orders[0].shares == 5
 
@@ -222,7 +222,7 @@ def test_signal_check_carries_decision_level_and_conditions():
 
     assert ranked
     assert ranked[0].signal == "sell"
-    assert ranked[0].execution_level == "A"
+    assert ranked[0].execution_level == "B"
     assert "冲高回落锁利" in plan.markdown
 
 
@@ -256,10 +256,15 @@ def test_pipeline_injects_current_position_overlay_strategies():
 
     assert {"P", "Q", "R", "S", "T"}.issubset(keys)
     assert sell
-    assert sell[0]["execution_level"] == "A"
+    assert sell[0]["execution_level"] == "B"
     assert "冲高回落锁利" in (result.operation_plan or "")
     assert "持仓退出/减仓信号" in (result.operation_plan or "")
     assert len(result.df) == len(df)
+    assert result.decision_df is not None
+    assert len(result.decision_df) == len(df) + 1
+    assert float(result.decision_df.iloc[-1]["high"]) == 217.09
+    assert float(result.decision_df.iloc[-1]["low"]) == 190.93
+    assert float(result.decision_df.iloc[-1]["close"]) == 207.14
 
 
 def test_factor_only_pipeline_skips_backtests_and_signals():
@@ -281,6 +286,69 @@ def test_factor_only_pipeline_skips_backtests_and_signals():
     assert "Final_Score" in result.df.columns
 
 
+def test_pipeline_future_mutation_does_not_change_past_scores():
+    original = _df_for_support()
+    mutated = original.copy()
+    for offset, idx in enumerate(mutated.index[100:], start=1):
+        close = 100.0 + offset * 0.5
+        mutated.loc[idx, ["open", "close"]] = [close, close]
+        mutated.loc[idx, "high"] = close + 1.0
+        mutated.loc[idx, "low"] = close - 1.0
+
+    kwargs = dict(
+        news_df=None, market="US", strategy_names=[],
+        run_backtests=False, run_signals=False, expand_pool=False,
+        skip_param_tuning=True,
+    )
+    before = run_pipeline(original, **kwargs)
+    after = run_pipeline(mutated, **kwargs)
+
+    pd.testing.assert_series_equal(
+        before.df["Final_Score"].iloc[:100],
+        after.df["Final_Score"].iloc[:100],
+    )
+
+
+def test_all_registered_strategies_use_decision_first_public_path():
+    for key in get_available_strategies():
+        strategy = get_execution_strategy(key)
+        strategy_type = type(strategy)
+        assert strategy_type.generate_decision is not BaseExecutionStrategy.generate_decision, key
+        assert strategy_type.generate_orders is BaseExecutionStrategy.generate_orders, key
+        assert strategy_type.diagnose_no_signal is not BaseExecutionStrategy.diagnose_no_signal, key
+
+
+def test_human_strategies_expose_native_missing_conditions():
+    df = _df_for_support()
+    df.loc[:, "open"] = 100.0
+    df.loc[:, "high"] = 101.0
+    df.loc[:, "low"] = 99.0
+    df.loc[:, "close"] = 100.0
+    df = calc_all_indicators(df)
+    df["Final_Score"] = 0.0
+    context = StrategyContext(
+        date="2026-01-28", equity=100000, cash=100000,
+        position=Position(), market="US",
+    )
+    for key in ("I", "J", "K", "L", "M", "N"):
+        decision = get_execution_strategy(key).generate_decision(df, context)
+        assert decision.action in ("watch", "hold"), key
+        assert decision.missing_conditions, key
+        assert all("未同时满足全部条件" not in item for item in decision.missing_conditions), key
+
+
+def test_overlay_strategies_expose_diagnostic_interface():
+    df = _df_for_support()
+    context = StrategyContext(
+        date="2026-01-28", equity=100000, cash=100000,
+        position=Position(), market="US",
+    )
+    for key in ("P", "Q", "R", "S", "T"):
+        diagnostics = get_execution_strategy(key).diagnose_no_signal(df, context)
+        assert diagnostics, key
+        assert all(isinstance(item, str) and item.strip() for item in diagnostics), key
+
+
 if __name__ == "__main__":
     tests = [
         test_ma120_support_rebound_generates_buy_decision,
@@ -292,6 +360,10 @@ if __name__ == "__main__":
         test_signal_check_carries_decision_level_and_conditions,
         test_pipeline_injects_current_position_overlay_strategies,
         test_factor_only_pipeline_skips_backtests_and_signals,
+        test_pipeline_future_mutation_does_not_change_past_scores,
+        test_all_registered_strategies_use_decision_first_public_path,
+        test_human_strategies_expose_native_missing_conditions,
+        test_overlay_strategies_expose_diagnostic_interface,
     ]
     for test in tests:
         test()

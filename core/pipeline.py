@@ -44,6 +44,7 @@ class AnalysisResult:
     operation_plan: str | None = None                       # 代码生成的操作方案 Markdown
     signal_check: list | None = None                        # 各策略信号状态 list[dict]
     data_quality: dict = field(default_factory=dict)         # 数据质量评分与交易闸门
+    decision_df: pd.DataFrame | None = None                  # 含实时临时K线的当次决策视图
 
 
 def run_pipeline(
@@ -68,6 +69,7 @@ def run_pipeline(
     current_bar: dict | None = None,
     run_backtests: bool = True,
     run_signals: bool = True,
+    realtime_quote_quality: dict | None = None,
 ):
     """
     执行完整的量化分析计算管道。
@@ -119,6 +121,7 @@ def run_pipeline(
         fundamental_data=fundamental_data,
         depth_available=depth_available,
         market=market,
+        realtime_quote_quality=realtime_quote_quality,
     )
     data_quality = data_quality_report.to_dict()
     logger.info(
@@ -140,7 +143,7 @@ def run_pipeline(
     logger.info(f"  [管道 2/4] Alpha 多因子打分 (w_tech={w_tech}, w_news={w_news}, regime={market_regime})...")
     df = calc_final_score(df, news_df, w_tech=w_tech, w_news=w_news,
                           fundamental_data=fundamental_data,
-                          validate=False,
+                          validate=True,
                           validation_mode=validation_mode,
                           depth_score=depth_score,
                           depth_available=depth_available,
@@ -329,6 +332,7 @@ def run_pipeline(
     strategy_pool_result = None
     operation_plan = None
     signal_check_results = None
+    decision_df = df
     # 选取用于信号检查的策略变体
     check_variants = []
 
@@ -397,14 +401,18 @@ def run_pipeline(
     # 运行信号检查（快速和完整模式通用）
     if check_variants:
         try:
-            from core.signal_check import run_signal_check
+            from core.signal_check import _apply_current_price_snapshot, run_signal_check
+            decision_df = _apply_current_price_snapshot(
+                df, current_price, market, current_bar
+            )
             current_fs = (
-                float(df["Final_Score"].dropna().iloc[-1])
-                if "Final_Score" in df.columns and not df["Final_Score"].dropna().empty
+                float(decision_df["Final_Score"].dropna().iloc[-1])
+                if "Final_Score" in decision_df.columns
+                and not decision_df["Final_Score"].dropna().empty
                 else 0.0
             )
             ranked, plan = run_signal_check(
-                df=df, variants=check_variants, market=market,
+                df=decision_df, variants=check_variants, market=market,
                 audit_entries=(
                     strategy_audit.entries if strategy_audit else
                     strategy_pool_result.audit_report.entries if strategy_pool_result and strategy_pool_result.audit_report else
@@ -463,6 +471,7 @@ def run_pipeline(
         operation_plan=operation_plan,
         signal_check=signal_check_results,
         data_quality=data_quality,
+        decision_df=decision_df,
     )
 
 

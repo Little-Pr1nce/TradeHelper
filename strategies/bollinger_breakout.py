@@ -16,14 +16,14 @@ import numpy as np
 import pandas as pd
 
 from strategies.base import (
-    BaseExecutionStrategy, Order, Position, StrategyContext,
+    DecisionFirstStrategy, StrategyContext,
     compute_atr, compute_percentile_score, round_lot_shares,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class BollingerBreakoutStrategy(BaseExecutionStrategy):
+class BollingerBreakoutStrategy(DecisionFirstStrategy):
     """布林带突破策略。
 
     参数说明：
@@ -65,9 +65,44 @@ class BollingerBreakoutStrategy(BaseExecutionStrategy):
             f"跌破布林中轨或 {self.exit_pct:.0%} 分位平仓。"
         )
 
-    def generate_orders(self, df: pd.DataFrame, context: StrategyContext) -> list[Order]:
+    def diagnose_no_signal(
+        self, df: pd.DataFrame, context: StrategyContext
+    ) -> list[str]:
         if df.empty or "Final_Score" not in df.columns:
-            return []
+            return ["缺少 Final_Score，无法检查布林突破"]
+        required = {"close", "bb_upper", "bb_mid"}
+        if not required.issubset(df.columns):
+            return ["缺少布林带指标，无法检查突破条件"]
+        row = df.iloc[-1]
+        close = float(row["close"])
+        current_pct = compute_percentile_score(df, window=self.lookback).iloc[-1]
+        if pd.isna(current_pct):
+            return ["百分位样本不足，至少需要60根有效K线"]
+
+        missing = []
+        if context.position.shares > 0:
+            bb_mid = float(row["bb_mid"])
+            if close >= bb_mid:
+                missing.append(f"价格{close:.2f}尚未跌破布林中轨{bb_mid:.2f}")
+            if current_pct >= self.exit_pct:
+                missing.append(
+                    f"Score百分位{current_pct:.0%}尚未跌破退出阈值{self.exit_pct:.0%}"
+                )
+        else:
+            bb_upper = float(row["bb_upper"])
+            if close <= bb_upper:
+                missing.append(f"价格{close:.2f}需突破布林上轨{bb_upper:.2f}")
+            if current_pct < self.entry_pct:
+                missing.append(
+                    f"Score百分位{current_pct:.0%}需达到{self.entry_pct:.0%}"
+                )
+            if len(df) - 1 < context.cooldown_until:
+                missing.append("策略仍处于冷却期")
+        return missing or ["布林突破条件尚未形成"]
+
+    def _evaluate_decision(self, df: pd.DataFrame, context: StrategyContext):
+        if df.empty or "Final_Score" not in df.columns:
+            return self._no_signal_decision(df, context)
 
         idx = len(df) - 1
         current_date = str(df.iloc[-1].get("date", ""))[:10]
@@ -77,10 +112,10 @@ class BollingerBreakoutStrategy(BaseExecutionStrategy):
         pct_series = compute_percentile_score(df, window=self.lookback)
         current_pct = pct_series.iloc[-1]
         if pd.isna(current_pct):
-            return []
+            return self._no_signal_decision(df, context)
 
         if "bb_upper" not in df.columns or "bb_mid" not in df.columns:
-            return []
+            return self._no_signal_decision(df, context)
         bb_upper = float(df["bb_upper"].iloc[-1])
         bb_mid = float(df["bb_mid"].iloc[-1])
         bb_lower = float(df["bb_lower"].iloc[-1]) if "bb_lower" in df.columns else bb_mid * 0.95
@@ -89,27 +124,29 @@ class BollingerBreakoutStrategy(BaseExecutionStrategy):
         if has_position:
             if close < bb_mid:
                 logger.info(f"[策略D] {current_date} 平仓 | close({close:.2f}) < BB中轨({bb_mid:.2f})")
-                return [Order(date=current_date, action="sell",
-                             shares=context.position.shares,
-                             reason=f"跌破布林中轨: {close:.2f} < {bb_mid:.2f}")]
+                return self._execution_decision(
+                    df, context, action="sell", shares=context.position.shares,
+                    reason=f"跌破布林中轨: {close:.2f} < {bb_mid:.2f}",
+                )
             if current_pct < self.exit_pct:
                 logger.info(f"[策略D] 平仓 | 百分位={current_pct:.1%} < {self.exit_pct:.0%}")
-                return [Order(date=current_date, action="sell",
-                             shares=context.position.shares,
-                             reason=f"百分位({current_pct:.1%}) < {self.exit_pct:.0%}")]
-            return []
+                return self._execution_decision(
+                    df, context, action="sell", shares=context.position.shares,
+                    reason=f"百分位({current_pct:.1%}) < {self.exit_pct:.0%}",
+                )
+            return self._no_signal_decision(df, context)
 
         # ── 开仓 ──
         if close <= bb_upper:
-            return []
+            return self._no_signal_decision(df, context)
         if current_pct < self.entry_pct:
-            return []
+            return self._no_signal_decision(df, context)
         if idx < context.cooldown_until:
-            return []
+            return self._no_signal_decision(df, context)
 
         atr = compute_atr(df, self.atr_period).iloc[-1]
         if pd.isna(atr) or atr <= 0:
-            return []
+            return self._no_signal_decision(df, context)
 
         stop_distance = self.atr_mult_stop * atr
         risk_amount = context.equity * self.risk_budget
@@ -119,8 +156,8 @@ class BollingerBreakoutStrategy(BaseExecutionStrategy):
         logger.info(
             f"[策略D] {current_date} 布林突破开仓 | close={close:.2f} > BB上轨={bb_upper:.2f}"
         )
-        return [Order(
-            date=current_date, action="buy", shares=shares,
+        return self._execution_decision(
+            df, context, action="buy", shares=shares,
             stop_loss=stop_loss,
             reason=f"布林突破: {close:.2f}>{bb_upper:.2f}, 百分位={current_pct:.1%}",
-        )]
+        )

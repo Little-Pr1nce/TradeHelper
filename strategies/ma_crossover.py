@@ -17,14 +17,14 @@ import numpy as np
 import pandas as pd
 
 from strategies.base import (
-    BaseExecutionStrategy, Order, Position, StrategyContext,
+    DecisionFirstStrategy, StrategyContext,
     compute_atr, compute_percentile_score,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class MACrossoverStrategy(BaseExecutionStrategy):
+class MACrossoverStrategy(DecisionFirstStrategy):
     """均线交叉 + Score 确认策略 — 慢涨/阴跌行情专用。
 
     参数说明：
@@ -56,15 +56,39 @@ class MACrossoverStrategy(BaseExecutionStrategy):
             f"MA5<MA20 或 Score<{self.exit_pct:.0%}分位 平仓。"
         )
 
-    def generate_orders(self, df: pd.DataFrame, context: StrategyContext) -> list[Order]:
-        orders = []
+    def diagnose_no_signal(self, df, context) -> list[str]:
+        if len(df) < 60 or "Final_Score" not in df.columns:
+            return ["至少需要60根K线和 Final_Score"]
+        close = df["close"].astype(float)
+        ma5 = float(close.rolling(5).mean().iloc[-1])
+        ma20 = float(close.rolling(20).mean().iloc[-1])
+        ma60 = float(close.rolling(60).mean().iloc[-1])
+        price = float(close.iloc[-1])
+        pct = compute_percentile_score(df, window=252).iloc[-1]
+        if pd.isna(pct):
+            return ["百分位样本不足，至少需要60根有效K线"]
+        if context.position.shares > 0:
+            return [
+                f"MA5({ma5:.2f})尚未下穿MA20({ma20:.2f})",
+                f"Score百分位{pct:.0%}尚未跌破{self.exit_pct:.0%}",
+            ]
+        missing = []
+        if ma5 <= ma20:
+            missing.append(f"MA5({ma5:.2f})需上穿MA20({ma20:.2f})")
+        if pct < self.entry_pct:
+            missing.append(f"Score百分位{pct:.0%}需达到{self.entry_pct:.0%}")
+        if price <= ma60:
+            missing.append(f"价格{price:.2f}需站上MA60({ma60:.2f})")
+        return missing or ["均线交叉条件尚未形成"]
+
+    def _evaluate_decision(self, df: pd.DataFrame, context: StrategyContext):
         if len(df) < 60:
-            return orders
+            return self._no_signal_decision(df, context)
 
         row = df.iloc[-1]
         score = row.get("Final_Score", 0.0)
         if pd.isna(score):
-            return orders
+            return self._no_signal_decision(df, context)
 
         # 计算均线
         close = df["close"].astype(float)
@@ -94,16 +118,16 @@ class MACrossoverStrategy(BaseExecutionStrategy):
                 latest_atr = float(atr.iloc[-1]) if not atr.empty and pd.notna(atr.iloc[-1]) else latest_close * 0.02
                 stop_loss = latest_close - latest_atr
 
-                orders.append(Order(
-                    date=str(df["date"].iloc[-1])[:10],
-                    action="buy",
+                decision = self._execution_decision(
+                    df, context, action="buy",
                     shares=100,
                     stop_loss=round(stop_loss, 2),
                     reason=f"MA5({latest_ma5:.1f})>MA20({latest_ma20:.1f}) "
                            f"Score_pct={latest_pct:.1%} >{self.entry_pct:.0%} "
                            f"close({latest_close:.1f})>MA60({latest_ma60:.1f})",
-                ))
-                logger.debug(f"MA Crossover BUY: {orders[-1].reason}")
+                )
+                logger.debug(f"MA Crossover BUY: {decision.reason}")
+                return decision
 
         # —— 平仓信号 ——
         elif context.position.shares > 0:
@@ -114,13 +138,13 @@ class MACrossoverStrategy(BaseExecutionStrategy):
             score_weak = latest_pct < self.exit_pct
 
             if ma_cross_down or score_weak:
-                orders.append(Order(
-                    date=str(df["date"].iloc[-1])[:10],
-                    action="sell",
+                decision = self._execution_decision(
+                    df, context, action="sell",
                     shares=context.position.shares,
                     reason=f"MA5({latest_ma5:.1f})<MA20({latest_ma20:.1f})" if ma_cross_down
                     else f"Score_pct={latest_pct:.1%} <{self.exit_pct:.0%}",
-                ))
-                logger.debug(f"MA Crossover SELL: {orders[-1].reason}")
+                )
+                logger.debug(f"MA Crossover SELL: {decision.reason}")
+                return decision
 
-        return orders
+        return self._no_signal_decision(df, context)

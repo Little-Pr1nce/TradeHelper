@@ -257,8 +257,21 @@ class PredictionLog:
     validation_status: str = "pending" # pending/verified/not_triggered/unsupported
     validation_version: int = 2        # 验证口径版本；v1 旧记录不参与健康度
     strategy_name: str = ""            # 策略标识（"A"/"B"/...），空字符串=整体预测
+    signal_action: str = ""             # buy / sell；用于拆分进出场健康度
     market_regime: str = ""            # 预测时的行情状态（trending/ranging/...）
     portfolio_snapshot: str = ""       # 组合预测的现金与持仓 JSON 快照
+    event_key: str = ""                # 同日同策略预测事件去重键
+    exit_review_status: str = "not_applicable"  # pending/verified/not_applicable
+    exit_return_1d: float = 0.0         # 卖出执行价到后续收盘的标的原始收益
+    exit_return_3d: float = 0.0
+    exit_return_5d: float = 0.0
+    exit_return_10d: float = 0.0
+    exit_return_20d: float = 0.0
+    exit_max_decline: float = 0.0       # 卖出后20日内相对执行价最大下跌
+    exit_max_rally: float = 0.0         # 卖出后20日内相对执行价最大上涨
+    exit_avoided_loss: float = 0.0      # 20日口径避免损失，扣单边退出成本
+    exit_opportunity_cost: float = 0.0  # 20日口径过早卖出的机会成本
+    exit_quality: str = ""              # effective/premature/neutral
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -316,6 +329,11 @@ class ResearchObservationLog:
     expected_direction: str = ""       # bullish / bearish / neutral
     llm_proposed: int = 0
     market_regime: str = ""
+    event_key: str = ""                  # code|pattern|observed_day，用于事件去重
+    trigger_operator: str = ""            # immediate/cross_above/cross_below
+    entry_triggered: int = 0
+    triggered_at: str = ""
+    validation_status: str = "pending"    # pending/triggered/verified/not_triggered/unsupported
     validated: int = 0
     return_1d: float = 0.0
     return_3d: float = 0.0
