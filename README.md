@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg" alt="Platform">
+  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License">
+</p>
+
 # TradeHelper
 
 基于 Python 3.12 和 Flet 的跨平台股票分析桌面应用，面向 A 股与美股，提供单股研究、组合持仓管理、条件触发交易计划、策略回测、历史预测评估和 HTML/PDF 报告。
@@ -191,3 +197,5 @@ Windows GitHub Actions 使用 `.github/workflows/build-windows.yml`。本地 Win
 - Web 版完善和打包体积优化。
 
 详细完成度以 [UPGRADE_PLAN.md](./UPGRADE_PLAN.md) 为准。
+
+MIT © TradeHelper
