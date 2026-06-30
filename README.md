@@ -1,280 +1,193 @@
-<p align="center">
-  <img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python">
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg" alt="Platform">
-  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License">
-</p>
+# TradeHelper
 
-<h1 align="center">TradeHelper</h1>
-<p align="center"><strong>AI 驱动的量化股票分析助手 · 15 策略回测 · 策略审计 · 操作方案代码生成</strong></p>
-<p align="center">A 股 & 美股 · Alpha 多因子 · 三时段分析 · 保守/激进双方案 · LLM 智能解读</p>
+基于 Python 3.12 和 Flet 的跨平台股票分析桌面应用，面向 A 股与美股，提供单股研究、组合持仓管理、条件触发交易计划、策略回测、历史预测评估和 HTML/PDF 报告。
 
----
+> 当前基线：2026-06-30。系统的目标是提高决策的一致性、可解释性和风险可控性，不承诺盈利，也不能替代券商成交回报或用户的最终决策。
 
-## 功能特性
+## 当前能力
 
-| 模块 | 能力 |
-|------|------|
-| **多市场** | A 股 + 美股自动识别，支持代码/名称搜索 |
-| **三时段分析** | 盘后（完整报告）、盘中（实时快照+盘口）、盘前（期货情绪+情景推演） |
-| **三时段联动** | 盘前预测 → 盘中验证 → 盘后总结，形成完整闭环 |
-| **Alpha 多因子** | 7 技术指标 + 基本面 + 风格 + 新闻情感 + 盘口因子，IC/IR 检验 |
-| **15 策略回测** | 9 量化(A-H,O) + 6 人类(I-N)，涵盖趋势/反转/突破/扛单等模式 |
-| **策略审计引擎** | 时间切分验证（训练 70% / 测试 30%），PASS/COND/FAIL 三级判定 |
-| **策略池扩展** | 2 可调参数 × 多值组合 → 61 变体，回测缓存加速 7x |
-| **信号检查** | 每个策略实时检查入场条件，多维排序选出 Top 3 |
-| **操作方案生成** | 保守/激进双方案，含精确价位、止损、仓位、触发条件诊断 |
-| **行情自适应** | 自动检测市场状态（强趋势/慢涨/震荡/过渡），只运行适配策略 |
-| **FinBERT 情感** | 金融文本情感分析 + 时间衰减加权（半衰期 1 天）+ 中文关键词兜底 |
-| **AI 报告** | LLM 翻译量化方案为 K 线图语言，9 维度交叉验证，含情景推演与风险提示 |
-| **策略健康度追踪** | prediction_log 驱动，持续追踪每策略准确率，自动 keep/watch/demote |
-| **跨平台打包** | PyInstaller 打包 .app / .exe，内置 FinBERT 模型，开箱即用 |
-| **首次配置引导** | 4 项必填配置，未完成时强制引导，按需校验数据源 |
-
----
+| 模块 | 当前实现 |
+|------|----------|
+| 单股分析（Tab1） | 盘前、盘中、盘后三种模式；技术面、基本面、新闻、策略审计、条件计划和 LLM 研究员解读 |
+| 我的持仓（Tab3） | 真实账户余额、持仓成本、行内编辑、关注列表、组合风险预算、调仓优先级和全宽报告 |
+| 条件化建议 | 买入/加仓、卖出/减仓、持有、失效条件、止损、止盈、最大亏损金额和仓位比例 |
+| 风控官 | A/B/C/D 执行等级，结合事实一致性、数据质量、账户风险、样本外审计和历史期望 |
+| 20 个策略 | A-H、O、I-N，以及 P-T 条件触发与持仓风控覆盖策略 |
+| 回测可信度 | `StrategyDecision -> Order` 统一实盘/回测路径，T+1 撮合、动态滑点、跳空止损、市场规则和 Bootstrap 区间 |
+| 自动优化 | walk-forward 参数候选、跨窗口确认、晋升、回滚、负期望恢复候选和后台深度优化 |
+| 历史学习 | 买入与退出信号分开复盘，记录 1/3/5/10/20 日表现、MFE/MAE、策略健康度和形态表现 |
+| 数据质量 | OHLC、样本量、上市日期、实时价新鲜度、新闻时效和因子验证覆盖率共同形成交易闸门 |
+| 跨平台打包 | macOS `.app`、Windows 目录版 `.exe`，Windows 构建包含运行时烟雾测试 |
 
 ## 快速开始
 
 ### 环境要求
 
-- Python >= 3.12
-
-### 安装
+- Python 3.12+
+- macOS、Windows 或 Linux
+- TickFlow API Key：盘中实时行情需要；免费层可获取日 K 线
+- Finnhub API Key：美股新闻、基本面和上市日期建议配置
+- OpenAI 兼容 LLM：当前首次配置要求填写，用于研究员解读
 
 ```bash
-git clone <repo-url> && cd TradeHelper
-python3.12 -m venv venv
+python3 -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 python main.py
 ```
 
-### 首次配置
-
-启动后自动跳转到**设置**页，红色 `*` 标注的 4 项必填：
-
-| 必填项 | 说明 | 示例 |
-|--------|------|------|
-| 工作目录 | 数据/报告/日志存放处 | `~/TradeHelper` |
-| LLM Base URL | OpenAI 兼容 API 地址 | `https://api.deepseek.com` |
-| LLM API Key | API 密钥 | `sk-...` |
-| 模型名称 | 使用的模型 | `deepseek-chat` |
-
-非必填项按需填写（美股/A 股数据源 Token、新闻 Token 等）。完成后点保存，分析功能解锁。
-
-### 打包（可选）
+Web 模式仍属于实验功能：
 
 ```bash
-python scripts/prepare_model.py    # 预下载 FinBERT 模型（~300MB）
-bash scripts/build_macos.sh        # macOS → dist/mac/TradeHelper.app
-scripts\build_windows.bat          # Windows → dist/win/TradeHelper/
+flet run main.py --web
 ```
 
----
+### 配置位置
+
+配置文件位于系统标准应用目录：
+
+- macOS：`~/Library/Application Support/TradeHelper/config.json`
+- Windows：`%APPDATA%\TradeHelper\config.json`
+- Linux：`${XDG_CONFIG_HOME:-~/.config}/TradeHelper/config.json`
+
+主要字段：`work_dir`、`llm_base_url`、`llm_api_key`、`llm_model`、`stock_token_us`、`stock_token_a`、`news_token_us`、`news_token_a`、`llm_enable_thinking`。
+
+## 四个页面
+
+| 页面 | 定位 |
+|------|------|
+| 分析 | 单只股票的完整研究工作台；生成后进入 K 线和报告全宽阅读区 |
+| 历史报告 | 查询、查看、评分和导出已生成报告 |
+| 我的持仓 | 组合级工作台；管理余额、持仓和关注列表，并生成组合操作手册 |
+| 设置 | 工作目录、LLM、行情和新闻数据源配置 |
+
+Tab3 不是 Tab1 的简单批量版。它额外考虑成本价、浮盈亏、现金、单票集中度、组合相关性、禁止加仓、减仓/止盈/止损和关注股替换机会。
 
 ## 三种分析模式
 
-| 模式 | 数据需求 | 核心能力 |
-|------|---------|---------|
-| 📊 **盘后分析** | K 线 + 新闻 + 基本面 | 完整报告（策略审计+操作方案+多因子+LLM 解读） |
-| ⏱ **盘中分析** | 实时报价 + 盘口深度 | 实时价格 vs 均线位置、VWAP、日内动量、盘口买卖比 |
-| 🌅 **盘前分析** | 期货 NQ/ES + 盘前价格 | 期货情绪得分、个股 vs 期货相对强弱、三种开盘情景推演 |
+| 模式 | 决策数据 | 输出重点 |
+|------|----------|----------|
+| 盘中 | 正式历史 K 线 + 当次实时 OHLCV 内存快照 | 当日可执行条件；实时快照不会写入 `price_history` |
+| 盘前 | 盘前价 + T-1 历史数据 | 开盘后的触发、止损、失效和两套风险方案 |
+| 盘后 | 当日已完成收盘数据 | 下一交易日的条件计划和历史验证 |
 
----
+## 策略系统
 
-## 15 个交易策略
+所有注册策略原生返回 `StrategyDecision`：
 
-### 量化策略（A-H, O）
-
-| 代号 | 名称 | 适配行情 | 开仓逻辑 |
-|:--:|------|---------|---------|
-| A | 百分位趋势跟踪 | 强趋势+慢涨 | Score ≥ 80%分位 |
-| B | 波动率均值回归 | 震荡/过渡 | Score ≤ 20%分位 + 低波确认 |
-| C | 动量+新闻共振 | 全行情通用 | Score ≥ 80%分位 + FinBERT > 0.3 + 突破5日高 |
-| D | 布林带突破 | 震荡 | 收盘 > 布林上轨 + Score ≥ 70%分位 |
-| E | Dual Thrust | 强趋势高波 | 收盘 > 上轨 + Score ≥ 70%分位 |
-| F | 海龟 ATR 通道 | 强趋势高波 | 收盘 > 20日高 + Score ≥ 75%分位 |
-| G | MA 交叉确认 | 慢涨 | MA5 > MA20 + Score > 50%分位 + 价 > MA60 |
-| H | MA60 中长期趋势 | 强趋势+慢涨 | 价 > MA60 + MA60 向上 + Score ≥ 65%分位 |
-| O | 趋势满仓持有 | 全行情 | 有仓位就持有（对标买入持有基准） |
-
-### 人类策略（I-N）
-
-| 代号 | 名称 | 类型 | 开仓逻辑 |
-|:--:|------|------|---------|
-| I | 追涨杀跌 | 新手 | MA5 金叉 MA20 买入 80%仓位，死叉卖出 |
-| J | 抄底摸底 | 新手 | 收盘 < 布林下轨 + RSI < 30，抄底买入 |
-| K | 死扛回本 | 新手 | 前日大跌后买入，不设止损，回本才卖 |
-| L | 趋势回调 | 老手 | 上升趋势中回调至 MA20 买入 |
-| M | 关键反转 | 老手 | 锤子线/吞没形态等 K 线反转信号 |
-| N | 均线压缩突破 | 老手 | MA 多线粘合后放量突破 |
-
-所有量化策略均使用 **Score 百分位**（滚动 252 日）替代固定阈值，无论牛熊市都能正常触发。
-
----
-
-## 市场状态自适应
-
-程序自动检测当前行情类型，跳过不适用的策略：
-
-| 行情 | 检测依据 | 激活策略 |
-|------|---------|---------|
-| 强趋势+高波 | ADX > 25, ATR > 5% | A, E, F, H, O |
-| 慢涨/弱趋势 | ADX > 25, ATR ≤ 5% | A, G, H, O |
-| 震荡 | ADX < 20 | B, D |
-| 趋势形成中 | 20 ≤ ADX ≤ 25 | B |
-| 事件驱动 | — | C（全行情通用） |
-
-人类策略（I-N）不做行情筛选，始终活跃。
-
----
-
-## 8 层系统架构
-
-```
-① 数据层: K线(TickFlow) + 基本面(Finnhub/baostock) + 新闻 + Nasdaq延伸时段
-② 因子层: 技术面(7指标) + 基本面 + 新闻(FinBERT) → Alpha Score + Rank IC
-③ 回测层: 策略池回测 → 时间切分审计 → PASS/COND/FAIL 判定
-④ 信号检查层: generate_orders() → 每个策略入场条件是否满足?
-⑤ 策略排序层: 多维评分(审计40%+夏普30%+信号20%+置信度10%)
-⑥ 操作方案层: Top 3 策略 → 保守/激进双方案(价位/止损/仓位)
-⑦ LLM 解读层: 翻译系统方案为 K 线图语言 + 风险提示 + Plan B
-⑧ 追踪反馈层: prediction_log → health_report → demote 惩罚 → 自适应
+```text
+action + execution_level + trigger_price + stop_loss + take_profit
++ max_loss_amount + position_pct + invalidation + missing_conditions
 ```
 
-| 层级 | 职责 | 实现 |
-|:--:|------|------|
-| ①② | 数据获取与因子计算 | `services/analysis_service.py` → `core/pipeline.py` |
-| ③ | 时间切分验证 | `core/strategy_audit.py`（PASS/COND/FAIL） |
-| ③ | 策略池扩展+缓存 | `core/strategy_pool.py`（61 变体，SQLite 缓存 7x 加速） |
-| ④⑤⑥ | 信号检查+排序+方案 | `core/signal_check.py`（保守/激进双方案） |
-| ⑦ | LLM 翻译解读 | `report/generator.py` + `report/prompts.py` |
-| ⑧ | 预测追踪+健康度 | `data/database.py`（prediction_log + health_report） |
+回测、Tab1、Tab3 和报告都通过同一个 `decision_to_orders()` 边界生成订单。
 
----
+| 组别 | 策略 |
+|------|------|
+| A-H | 百分位趋势、均值回归、新闻动量、布林突破、Dual Thrust、海龟 ATR、均线交叉、MA60 趋势 |
+| O | 趋势满仓对标基准 |
+| I-N | 追涨、抄底、回本、趋势回调、关键反转、均线粘合突破 |
+| P-T | MA120 支撑、冲高锁利、持仓风险、反抽失败退出、统一条件触发计划 |
 
-## Alpha 多因子模型
+P/T 对所有分析追加条件观察；Q/R/S 只在用户存在真实持仓时加载。覆盖策略由类的 `overlay_scope` 元数据自动发现。
 
-| 行情状态 | 技术面 | 风格（PE/PB） | 基本面 | 新闻 |
-|------|:--:|:--:|:--:|:--:|
-| 强趋势高波动 `trending_volatile` | 40% | 5% | 30% | 25% |
-| 稳定趋势 `trending_steady` / `trending` | 38% | 10% | 27% | 25% |
-| 震荡/过渡 `ranging` / `transitional` | 35% | 15% | 25% | 25% |
-| 无基本面数据 | 60% | — | — | 40% |
+## 执行等级
 
-数据来源：技术面来自 K 线计算；风格/基本面来自 baostock / Finnhub；新闻来自 FinBERT 情感模型。
+| 等级 | 含义 | 默认动作 |
+|------|------|----------|
+| A | 事实成立、风险可控、历史证据支持 | 可执行，但仍由用户确认 |
+| B | 事实成立、风险可控、样本或历史证据不足 | 小仓验证 |
+| C | 事实成立但风险/历史期望不支持 | 仅观察 |
+| D | 数据冲突、实时价失效或事实不可验证 | 驳回 |
 
-无盘口数据时权重自动回退；有盘口数据时仅影响最新一条实时评分，不写入历史回测序列。因子经 IC/IR 检验：D 级剔除、C 级半权。新闻情感带时间衰减（半衰期 1 天）。
+A 级买入必须有与当前股票和策略匹配的正期望历史证据。硬止损和风险减仓不会因为买入样本不足而被阻止。
 
----
+## Alpha 模型
 
-## 代码架构
+技术面由 RSI、DIF、MACD 柱、布林 `%B`、K/D/J 七个因子组成，使用滚动标准化、`tanh` 压缩和 IC/IR 验证。未知 `?` 级因子保留研究先验权重，但报告会显示“未验证”；验证覆盖率低于 50% 时降低执行可信度和仓位上限。
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  UI 层 (ui/main_page.py)      CLI 层 (run_backtest.py)   │
-├──────────────────────────────────────────────────────────┤
-│            Services 层 (analysis_service.py)              │
-│        搜索 → 取数(含缓存) → 管道 → 报告 → 持久化         │
-├──────────────────────────────────────────────────────────┤
-│            Core 层                                        │
-│    pipeline.py       — 技术指标 → Alpha 打分 → 回测       │
-│    strategy_audit.py — 时间切分验证 PASS/COND/FAIL         │
-│    strategy_pool.py  — 策略池扩展 + 缓存 + 自适应参数       │
-│    signal_check.py   — 信号检查 + 排序 + 操作方案生成       │
-├────────────────────┬─────────────────────────────────────┤
-│ 计算引擎            │ 支撑层                               │
-│ alpha/             │ data/     多源数据 + SQLite(10表)    │
-│ strategies/ (15)   │ config/   全局配置单例                │
-│ backtest/          │ report/   图表+LLM报告+PDF/HTML       │
-│ indicators/        │ utils/    市场/日期/字体/日志          │
-└────────────────────┴─────────────────────────────────────┘
-```
+有基本面时，最新时点使用行情自适应权重：
 
----
+| 行情 | 技术 | 风格 | 基本面 | 新闻 |
+|------|-----:|-----:|-------:|-----:|
+| 强趋势高波 | 40% | 5% | 30% | 25% |
+| 慢涨/弱趋势 | 38% | 10% | 27% | 25% |
+| 震荡/过渡 | 35% | 15% | 25% | 25% |
 
-## 报告结构
-
-```
-📊 一分钟速览（执行摘要）                            ← 代码生成
-[LLM 第 1-7 章]                                      ← LLM 生成
-📋 策略池审计（时间切分验证）                           ← 代码注入
-🎯 系统操作方案（Top 3 + 关键价位 + 保守/激进双方案）     ← 代码生成
-[LLM 第 8 章 — 翻译系统方案为人话]                     ← LLM 解读
-🩺 策略健康度追踪（持续优化闭环）                       ← 代码追加
-📈 系统追踪（预测验证记录）                             ← 代码追加
-```
-
-### LLM 角色边界
-
-| ✅ LLM 做 | ❌ LLM 不做 |
-|----------|-----------|
-| 翻译系统方案的量化术语为 K 线图语言 | 编造操作方案中的价位 |
-| 解释为什么选这些策略、两方案差异、风险 | 自己决定买卖时机 |
-| 判断能否等到/做不到，给出利弊权衡 | 创造新的策略规则 |
-| 建议新策略框架（需标注回测验证） | 代替回测引擎判断策略好坏 |
-| 无信号时指出最接近触发策略 + 轻仓试探可能 | 脱离数据自编方案 |
-
----
+历史回测只使用当时可得的技术面和衰减新闻得分；当前基本面、盘口和实时快照只影响最新决策点，避免把今天的信息写回过去。
 
 ## 数据源
 
-| 市场 | K线+实时+盘口 | 新闻 | 基本面 | 延伸时段 |
-|------|-------------|------|--------|---------|
-| 美股 | TickFlow | Finnhub / yfinance | Finnhub → yfinance | Nasdaq.com → yfinance |
-| A 股 | TickFlow | akshare 免费 | baostock → akshare | — |
+| 数据 | A 股 | 美股 |
+|------|------|------|
+| 日 K 线 | TickFlow | TickFlow |
+| 盘中实时价 | TickFlow | TickFlow |
+| 盘前/盘后价 | 不适用 | Nasdaq.com，失败后 yfinance |
+| 基本面 | baostock，失败后 akshare/LLM | Finnhub，失败后 yfinance/akshare/百度/LLM |
+| 新闻 | 东方财富（akshare） | Finnhub 个股新闻 + 市场新闻 |
+| 上市日期 | baostock | Finnhub `profile2` |
 
-配置文件存储于系统标准应用目录（macOS `~/Library/Application Support/`，Windows `%APPDATA%`，Linux `~/.config/`）下的 `TradeHelper/config.json`。
+上市日期会限制历史拉取和缓存读取范围，上市前数据不参与分析。Tab1 与 Tab3 共用新闻缓存，但各自执行新鲜度检查和主动刷新，不互相依赖。新闻 TTL 按时段区分：盘中约 30 分钟、盘前约 1 小时、盘后约 6 小时。
 
----
+## 系统架构
 
-## 数据库（10 张表）
+```text
+UI (ui/)
+  -> Services (services/analysis_service.py, portfolio_service.py)
+    -> Core (pipeline, signal_check, audit, strategy_pool, data_quality)
+      -> Engines (alpha, indicators, strategies, backtest)
+        -> Support (data, report, config, utils)
+```
 
-| 表 | 说明 |
-|------|------|
-| `stocks` | 股票基本信息缓存 |
-| `price_history` | 日K线 OHLCV |
-| `reports` | 分析报告记录 |
-| `news_sentiment` | 新闻情感分析 |
-| `holdings` | 用户持仓 |
-| `watchlist` | 关注列表 |
-| `account_balance` | 账户余额 |
-| `prediction_log` | 预测追踪（含 strategy_name 列） |
-| `bt_variant_cache` | 策略变体回测缓存（30 天清理） |
-| `per_stock_params` | 每股票每策略最佳自适应参数 |
+前台使用已晋升正式参数快速生成报告；几十组候选参数的 walk-forward 深度优化在报告返回后由后台单线程执行，避免 Tab1/Tab3 同步等待。
 
----
+## 数据库
 
-## 扩展开发
+SQLite 使用 WAL 模式，当前 14 张表：
 
-| 扩展目标 | 入口 | 方式 |
-|---------|------|------|
-| 新增策略 | `strategies/` | 继承 `BaseExecutionStrategy`，设置 `suitable_regimes`，注册到 `__init__.py` |
-| 新增因子 | `alpha/scoring.py` → `INDICATOR_COLUMNS` | 添加指标列名 |
-| 新增数据源 | `data/stock_fetcher.py` → `BaseStockFetcher` | 实现接口，`get_stock_fetcher()` 注册 |
-| 新增配置项 | `config/settings.py` → `DEFAULT_CONFIG` | 同步更新 `settings_ui.py` |
-| 替换情感模型 | `indicators/sentiment.py` → `_FINBERT_MODEL` | 修改模型 ID |
-| 新增审计规则 | `core/strategy_audit.py` → `_evaluate_entry()` | 修改 PASS/COND/FAIL 判定条件 |
+`stocks`、`price_history`、`reports`、`news_sentiment`、`news_refresh_state`、`holdings`、`watchlist`、`account_balance`、`prediction_log`、`bt_variant_cache`、`per_stock_params`、`strategy_param_candidates`、`deep_optimization_runs`、`research_observation_log`。
 
----
+数据库初始化会自动建表和执行兼容迁移。预测与研究员观察使用稳定 `event_key` 去重，重复运行同一事件不会虚增学习样本。
+
+## 测试
+
+项目测试文件可由 pytest 运行，也都支持直接执行：
+
+```bash
+venv/bin/python -m pytest tests/ -q
+
+# 与打包环境一致的无 pytest 入口
+for f in tests/test_*.py; do venv/bin/python "$f" || exit 1; done
+```
+
+当前基线为 **173 个测试通过**，覆盖数据源边界、新闻缓存、Alpha 因果性、20 个策略、Decision-first 路径、撮合、策略审计、参数生命周期、预测追踪、组合功能和可信度摘要。
+
+## 打包
+
+```bash
+bash scripts/build_macos.sh       # dist/mac/TradeHelper.app
+scripts\build_windows.bat         # dist\win\TradeHelper\TradeHelper.exe
+```
+
+Windows GitHub Actions 使用 `.github/workflows/build-windows.yml`。本地 Windows 脚本和远程工作流都会在产物上传前执行打包运行时烟雾测试。macOS 打包流程保持独立，不受 Windows hidden imports 调整影响。
 
 ## 文档
 
-| 文档 | 说明 |
+| 文件 | 用途 |
 |------|------|
-| [DESIGN.md](./DESIGN.md) | 完整设计文档，含优化历史和后续计划 |
-| [UPGRADE_PLAN.md](./UPGRADE_PLAN.md) | 可信交易建议系统主线升级方案，后续实现以此为准 |
-| [CLAUDE.md](./CLAUDE.md) | AI 辅助开发指南 |
+| [DESIGN.md](./DESIGN.md) | 当前架构、数据流、核心约束和扩展点 |
+| [README_BACKTEST.md](./README_BACKTEST.md) | 回测、审计、撮合和参数生命周期 |
+| [UPGRADE_PLAN.md](./UPGRADE_PLAN.md) | 五阶段可信交易建议升级主线和完成度 |
+| [AGENTS.md](./AGENTS.md) | 本仓库编码代理工作约定 |
+| [CLAUDE.md](./CLAUDE.md) | Claude Code 项目上下文 |
+| [OPTIMIZATION_REPORT.md](./OPTIMIZATION_REPORT.md) | 早期审计历史及问题处理状态，不代表当前代码现状 |
 
-## 待办
+## 当前未完成重点
 
-- **主线升级方案**: 以 [UPGRADE_PLAN.md](./UPGRADE_PLAN.md) 为准，分阶段实现 LLM 观察候选池、风控官历史验证、自我升级闭环和数据质量体系。
-- **本轮已完成的可信度升级**: 当前信号检查已支持执行等级、触发价、失效条件、真实账户权益仓位换算和盘前/盘中实时价快照；Tab3 组合报告已增加条件触发交易计划、持仓风控提示、MA120 支撑候选、冲高回落锁利和更细进度提示。
+- LLM 观察候选的更多形态模板、命中率图表和 UI 明细查询。
+- 历史预测评估面板的全局筛选、钻取和图表化。
+- 更长模拟盘观察期和相对基准超额收益门槛。
+- 可靠的停复牌/ST 数据，以及美股延伸时段流动性细化。
+- Web 版完善和打包体积优化。
 
-- **历史预测评估 UI 面板**: 独立展示 prediction_log，按股票/策略/市场状态/分析模式统计胜率、平均收益和正期望状态
-- **既有功能可信度优化**: 继续处理 LLM 建议边界、数据完整度降级、样本不足降级、实时价重算风控、策略审计置信区间等，详见 DESIGN.md
-- **Web 版本**: flet run --web 模式完善
-- **打包体积优化**: 当前 ~2GB（含 PyTorch），可探索 ONNX 量化
-
-## License
-
-MIT © TradeHelper
+详细完成度以 [UPGRADE_PLAN.md](./UPGRADE_PLAN.md) 为准。
