@@ -441,6 +441,7 @@ class Database:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._conn = None
+            cls._instance._local = threading.local()
             # 写操作锁：分析线程与 UI 线程共享同一连接时序列化写入，
             # 防止 "database is locked" 错误（WAL 仅保护读读并发）。
             cls._instance._write_lock = threading.Lock()
@@ -552,6 +553,8 @@ class Database:
         """对外建立连接入口（首次 init 时调用）。"""
         self._conn = self._open(db_path)
         self._db_path = db_path
+        self._local.conn = self._conn
+        self._local.db_path = db_path
         try:
             self.cleanup_stale_cache()
         except Exception:
@@ -560,13 +563,36 @@ class Database:
 
     @property
     def conn(self) -> sqlite3.Connection:
-        """获取数据库连接（懒加载：如已关闭则自动重连，复用 _open 应用 PRAGMA）。"""
+        """获取当前线程连接；schema 迁移只由主初始化连接执行。"""
+        db_path = getattr(self, "_db_path", None) or Settings().db_path
+        thread_conn = getattr(self._local, "conn", None)
+        if thread_conn is not None and getattr(self._local, "db_path", None) == db_path:
+            return thread_conn
+        if thread_conn is not None:
+            try:
+                thread_conn.close()
+            except sqlite3.Error:
+                pass
+            self._local.conn = None
+
         if self._conn is None:
-            db_path = getattr(self, "_db_path", None) or Settings().db_path
+            # 主连接被显式关闭后的兼容重连仍需检查 schema。
             self._conn = self._open(db_path)
             self._db_path = db_path
+            self._local.conn = self._conn
+            self._local.db_path = db_path
             logger.info(f"Database reconnected: {db_path}")
-        return self._conn
+            return self._conn
+
+        # sqlite3 连接对象不能被多个线程同时调用。WAL 支持多连接并发，
+        # 因此工作线程使用独立连接，避免 InterfaceError/API misuse。
+        thread_conn = sqlite3.connect(db_path, check_same_thread=False)
+        thread_conn.row_factory = sqlite3.Row
+        thread_conn.execute("PRAGMA foreign_keys=ON")
+        thread_conn.execute("PRAGMA busy_timeout=5000")
+        self._local.conn = thread_conn
+        self._local.db_path = db_path
+        return thread_conn
 
     def execute(self, sql: str, params=None):
         """执行 SQL 语句的快捷方法（仅适用于读；写请走 _execute_write）。"""
@@ -677,6 +703,13 @@ class Database:
             report.mode or "eod", report.prediction_data or ""
         ))
         return cursor.lastrowid
+
+    def update_report_content(self, report_id: int, content: str):
+        """更新已落库报告正文，用于追加依赖本次写入结果的追踪章节。"""
+        self._execute_write(
+            "UPDATE reports SET content = ? WHERE id = ?",
+            (content, int(report_id)),
+        )
 
 
     def get_all_reports(self, limit: int = 50) -> list[AnalysisReport]:
@@ -1385,6 +1418,117 @@ class Database:
         from datetime import datetime as _dt
         stats.updated_at = _dt.now().isoformat()
         return stats
+
+    def get_prediction_stats_for_codes(
+        self,
+        codes: list[str],
+        *,
+        mode: str = "",
+        limit: int = 10,
+    ) -> "PredictionStats":
+        """按一组组合成分股汇总真实预测统计。"""
+        from data.models import PredictionStats
+
+        normalized = list(dict.fromkeys(str(code).upper() for code in codes if code))
+        stats = PredictionStats(code="PORTFOLIO_COMPONENTS")
+        if not normalized:
+            return stats
+        placeholders = ",".join("?" for _ in normalized)
+        mode_sql = " AND mode = ?" if mode else ""
+        params: list = [*normalized]
+        if mode:
+            params.append(mode)
+        rows = self.execute(
+            f"""SELECT * FROM prediction_log
+                WHERE code IN ({placeholders}) AND validated = 1
+                  AND validation_version >= 2 AND validation_status = 'verified'
+                  {mode_sql}
+                ORDER BY predict_time DESC""",
+            tuple(params),
+        ).fetchall()
+        stats.total_predictions = len(rows)
+        if not rows:
+            return stats
+
+        def _accuracy(items) -> float:
+            actionable = [
+                row for row in items
+                if row["direction"] in ("bullish", "bearish")
+                and row["actual_direction"]
+            ]
+            correct = sum(
+                1 for row in actionable
+                if row["direction"] == row["actual_direction"]
+            )
+            return correct / len(actionable) if actionable else 0.0
+
+        recent = rows[:max(int(limit), 1)]
+        stats.direction_accuracy_10 = _accuracy(recent)
+        stats.direction_accuracy_all = _accuracy(rows)
+        returns = [float(row["actual_return"] or 0.0) for row in recent]
+        stats.avg_predicted_return = sum(returns) / len(returns) if returns else 0.0
+        if len(recent) >= 10:
+            recent_5 = _accuracy(recent[:5])
+            older_5 = _accuracy(recent[5:10])
+            stats.accuracy_trend = (
+                "improving" if recent_5 > older_5 + 0.1
+                else "declining" if recent_5 < older_5 - 0.1
+                else "stable"
+            )
+        stats.status = (
+            "reliable" if stats.direction_accuracy_10 >= 0.60
+            else "unstable" if stats.direction_accuracy_10 >= 0.45
+            else "unreliable"
+        )
+        stats.updated_at = datetime.now().isoformat()
+        return stats
+
+    def count_unverified_predictions_for_codes(
+        self,
+        codes: list[str],
+        *,
+        mode: str = "",
+    ) -> int:
+        normalized = list(dict.fromkeys(str(code).upper() for code in codes if code))
+        if not normalized:
+            return 0
+        placeholders = ",".join("?" for _ in normalized)
+        mode_sql = " AND mode = ?" if mode else ""
+        params: list = [*normalized]
+        if mode:
+            params.append(mode)
+        row = self.execute(
+            f"""SELECT COUNT(*) AS cnt FROM prediction_log
+                WHERE code IN ({placeholders}) AND validated = 0 {mode_sql}""",
+            tuple(params),
+        ).fetchone()
+        return int(row["cnt"] or 0) if row else 0
+
+    def get_validated_predictions_for_codes(
+        self,
+        codes: list[str],
+        *,
+        mode: str = "",
+        limit: int = 10,
+    ) -> list["PredictionLog"]:
+        normalized = list(dict.fromkeys(str(code).upper() for code in codes if code))
+        if not normalized:
+            return []
+        placeholders = ",".join("?" for _ in normalized)
+        mode_sql = " AND mode = ?" if mode else ""
+        params: list = [*normalized]
+        if mode:
+            params.append(mode)
+        params.append(int(limit))
+        rows = self.execute(
+            f"""SELECT * FROM prediction_log
+                WHERE code IN ({placeholders}) AND validated = 1
+                  AND validation_version >= 2 AND validation_status = 'verified'
+                  {mode_sql}
+                ORDER BY predict_time DESC LIMIT ?""",
+            tuple(params),
+        ).fetchall()
+        return [PredictionLog.from_dict(dict(row)) for row in rows]
 
     def get_latest_unverified_prediction(self, code: str) -> "PredictionLog | None":
         row = self.execute(

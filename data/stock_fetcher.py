@@ -234,6 +234,7 @@ def fetch_nasdaq_extended_quote(code: str) -> dict | None:
 
         return {
             "code": code.upper(),
+            "source": "Nasdaq.com",
             "latest": round(price, 2),
             "price": round(price, 2),
             # Nasdaq /info 不提供盘前盘后的 open/high/low，填 0
@@ -322,6 +323,7 @@ def _fetch_yfinance_extended_quote(code: str) -> dict | None:
 
         return {
             "code": code.upper(),
+            "source": "yfinance",
             "latest": round(price, 2),
             "price": round(price, 2),
             "open": round(day_open, 2),
@@ -495,6 +497,101 @@ class TickFlowFetcher(BaseStockFetcher):
 
     # ── fetch_quote ──
 
+    @staticmethod
+    def _normalize_quote(code: str, quote: dict) -> dict:
+        """Convert one TickFlow quote into the application's quote schema."""
+        latest = float(quote.get("last_price", 0))
+        prev_close = float(quote.get("prev_close", 0))
+        change_pct = (
+            (latest - prev_close) / prev_close
+            if latest and prev_close else 0.0
+        )
+        return {
+            "code": str(code),
+            "latest": latest,
+            "open": float(quote.get("open", 0)),
+            "high": float(quote.get("high", 0)),
+            "low": float(quote.get("low", 0)),
+            "prev_close": prev_close,
+            "change": latest - prev_close,
+            "change_pct": round(change_pct, 6),
+            "volume": float(quote.get("volume", 0)),
+            "amount": float(quote.get("amount", 0)),
+            "timestamp": int(quote.get("timestamp", 0)),
+            "status": 0,
+            "vwap": float(quote.get("vwap", 0)) if quote.get("vwap") else 0.0,
+        }
+
+    def fetch_quotes(self, codes: list[str]) -> dict[str, dict]:
+        """Fetch multiple realtime quotes in one TickFlow API request.
+
+        TickFlow's quota is request based. Portfolio analysis must therefore
+        use the SDK's multi-symbol endpoint instead of issuing one request per
+        symbol concurrently.
+        """
+        if not self.has_realtime:
+            logger.warning("TickFlow 免费层不支持实时行情，需要 API Key")
+            return {}
+
+        normalized_codes = list(dict.fromkeys(str(code).upper() for code in codes))
+        now_ts = time.time()
+        results: dict[str, dict] = {}
+        missing: list[str] = []
+        for code in normalized_codes:
+            cached = self._quote_cache.get(code)
+            if cached and now_ts - cached[0] < 30:
+                results[code] = cached[1]
+            else:
+                missing.append(code)
+
+        if not missing:
+            return results
+
+        # TickFlow currently accepts at most five symbols per quote request.
+        # Respect both that boundary and the free-tier 10 requests/minute cap;
+        # symbols above 50 remain visibly missing and enter the quality gate.
+        request_codes = missing[:50]
+        if len(missing) > len(request_codes):
+            logger.warning(
+                f"TickFlow 单轮最多安全获取50只，剩余{len(missing) - len(request_codes)}只进入缺价闸门"
+            )
+        success_count = 0
+        for start in range(0, len(request_codes), 5):
+            batch_codes = request_codes[start:start + 5]
+            symbols = [self._to_symbol(code) for code in batch_codes]
+            symbol_to_code = {
+                symbol.upper(): code for symbol, code in zip(symbols, batch_codes)
+            }
+            try:
+                quotes = self._tf.quotes.get(symbols=symbols) or []
+                for index, quote in enumerate(quotes):
+                    raw_symbol = str(
+                        quote.get("symbol")
+                        or quote.get("code")
+                        or quote.get("ticker")
+                        or ""
+                    ).upper()
+                    code = symbol_to_code.get(raw_symbol)
+                    # TickFlow currently preserves request order. Keep that as
+                    # a fallback for SDK versions omitting `symbol`.
+                    if code is None and index < len(batch_codes):
+                        code = batch_codes[index]
+                    if code is None:
+                        continue
+                    result = self._normalize_quote(code, quote)
+                    self._quote_cache[code] = (time.time(), result)
+                    results[code] = result
+                    success_count += 1
+            except Exception as e:
+                logger.error(
+                    f"TickFlow fetch_quotes 批量失败 ({','.join(batch_codes)}): {e}"
+                )
+        logger.info(
+            f"TickFlow 批量实时报价: 请求 {len(request_codes)} 只，成功 {success_count} 只，"
+            f"API调用 {(len(request_codes) + 4) // 5} 次"
+        )
+        return results
+
     def fetch_quote(self, code: str) -> dict | None:
         """
         实时报价（需要 API Key）。
@@ -503,48 +600,8 @@ class TickFlowFetcher(BaseStockFetcher):
             {code, latest, open, high, low, prev_close, change, change_pct,
              volume, amount, timestamp, status, vwap}
         """
-        if not self.has_realtime:
-            logger.warning("TickFlow 免费层不支持实时行情，需要 API Key")
-            return None
-
-        # 30 秒内同一代码直接返回缓存（避免 fetch_stock_tick + fetch_quote 双重调用）
-        now_ts = time.time()
-        if code in self._quote_cache:
-            cached_ts, cached_data = self._quote_cache[code]
-            if now_ts - cached_ts < 30:
-                return cached_data
-
-        try:
-            symbol = self._to_symbol(code)
-            quotes = self._tf.quotes.get(symbols=[symbol])
-            if not quotes:
-                return None
-            q = quotes[0]
-
-            latest = float(q.get("last_price", 0))
-            prev_close = float(q.get("prev_close", 0))
-            own_chp = (latest - prev_close) / prev_close if latest and prev_close else 0.0
-
-            result = {
-                "code": str(code),
-                "latest": latest,
-                "open": float(q.get("open", 0)),
-                "high": float(q.get("high", 0)),
-                "low": float(q.get("low", 0)),
-                "prev_close": prev_close,
-                "change": latest - prev_close,
-                "change_pct": round(own_chp, 6),
-                "volume": float(q.get("volume", 0)),
-                "amount": float(q.get("amount", 0)),
-                "timestamp": int(q.get("timestamp", 0)),
-                "status": 0,
-                "vwap": float(q.get("vwap", 0)) if q.get("vwap") else 0.0,
-            }
-            self._quote_cache[code] = (time.time(), result)
-            return result
-        except Exception as e:
-            logger.error(f"TickFlow fetch_quote 失败 ({code}): {e}")
-            return None
+        normalized_code = str(code).upper()
+        return self.fetch_quotes([normalized_code]).get(normalized_code)
 
     # ── fetch_stock_tick ──
 

@@ -410,9 +410,12 @@ def build_trust_hard_summary(
 def build_prediction_footer(code: str, prediction_stats,
                             validated_predictions: list,
                             unverified_count: int = 0,
-                            evaluation_panel: dict | None = None) -> str:
+                            evaluation_panel: dict | None = None,
+                            scope_label: str = "") -> str:
     """构建预测追踪报告尾部 Markdown，供 Tab1/Tab3 直接拼接到报告末尾。"""
     lines = ["\n---\n", "## 📈 系统追踪\n"]
+    if scope_label:
+        lines.append(f"> 统计范围：{scope_label}\n")
 
     if prediction_stats:
         ps = prediction_stats.to_dict() if hasattr(prediction_stats, 'to_dict') else (prediction_stats or {})
@@ -422,9 +425,9 @@ def build_prediction_footer(code: str, prediction_stats,
             lines.append(f"- 近 10 次方向正确率：{ps.get('direction_accuracy_10', 0):.0%}")
             lines.append(f"- 全部历史正确率：{ps.get('direction_accuracy_all', 0):.0%}")
             lines.append(f"- 正确率趋势：{ps.get('accuracy_trend', 'stable')}")
-        elif unverified_count > 0:
-            lines.append(f"- 已有 {unverified_count} 条预测，验证窗口未到")
-        else:
+        if unverified_count > 0:
+            lines.append(f"- 待验证预测：{unverified_count} 条（验证窗口未到）")
+        if total <= 0 and unverified_count <= 0:
             lines.append("- 暂无历史预测记录（首次分析）")
         lines.append("")
 
@@ -1305,12 +1308,13 @@ PORTFOLIO_SYSTEM_PROMPT = """你是一个专业的全持仓分析师和资产配
 8. **⚠️ 不要自己写调仓方案** — 系统已生成了「🎯 组合操作方案（代码生成）」，包含每只股票的保守/激进策略、关键价位、触发条件。你的第 5 章是**翻译解读**：用通俗语言解释系统方案，帮助用户理解哪些条件触发买入、哪些条件触发卖出/减仓、哪些条件维持持有。严禁新增系统方案中没有的交易动作、股数、入场价、止损价、调仓比例或调整后持仓结构。
 9. **执行表限制** — 只有当系统方案明确给出买入/卖出/减仓动作和股数时，才允许输出「调整后持仓结构」表格。没有明确动作时，只能输出「待观察清单」和「触发后再执行」，不得自行假设清仓、减仓 50%、买入几股等。
 10. **研究员观察候选** — 你可以在报告末尾提出“观察候选”，但这些不是交易指令。必须使用固定标题 `### 研究员观察候选`，并输出 Markdown 表格，表头必须是：`| 股票 | LLM观察 | 依据 |`。每条观察只描述值得系统复核的事实或机会，不写买入股数/卖出股数/调仓比例。
+11. **历史回测不是资产质量排名** — 横向表只表示某策略在该股票历史区间的拟合表现。严禁仅因最高历史收益/夏普就称某股票为“最优质资产”或推导当前持有结论；当前操作必须服从数据质量、持仓风控和当前信号共识。如二者冲突，必须明确写成“历史策略适配较好，但当前条件转弱/存在分歧”。
 
 ## 报告结构
 1. **账户概览** — 账户总资产（现金 + 持仓市值）、各市场持仓结构、行业分布、现金比例、集中度风险
 2. **持仓个股逐只分析** — 每只持仓股：当前盈亏状态（从成本价算起）、技术面快照、行情状态（震荡/趋势）、因子有效性（Rank IC）、基本面估值（PE/PB/ROE）、最佳回测策略、与关注股的横向对比、持有/减仓/清仓建议及理由。**必须交叉印证：技术面、基本面、回测绩效、因子有效性四个维度，任一维度矛盾时须明确指出来。**
 3. **关注股票逐只分析** — 每只关注股：技术面快照、行情状态、因子有效性、基本面估值、最佳回测策略、与当前持仓的横向对比、是否值得买入及理由。**判断逻辑与持仓股一致，确保每只股票的分析深度相同。**
-4. **策略回测横向对比** — 所有股票（持仓+关注）的策略回测排名，最佳策略-股票组合推荐
+4. **历史策略适配横向对照** — 展示各股票历史上风险调整后表现较好的策略，但明确这不是资产质量或当前买卖排名
 5. **综合调仓方案解读** — 翻译解读系统已生成的「🎯 组合操作方案（代码生成）」：
     - **不要复述系统方案的内容**（用户已经看到了），直接给解读。
     - 🛡️ 保守方案解读：系统为什么选这些策略？保守方案的逻辑是什么？执行时要注意什么风险？等不到怎么办？
@@ -1526,69 +1530,86 @@ def build_portfolio_user_prompt(
                 lines.append(f"- 策略审计：PASS={audit.get('pass', 0)}, COND={audit.get('conditional', 0)}, FAIL={audit.get('fail', 0)}")
             lines.append("")
 
-    # ── 横向对比数据 ──
+    # ── 横向对比数据：历史模型适配，不作为当前资产质量排名 ──
     lines.append("---")
-    lines.append("## 横向对比排名")
+    lines.append("## 历史策略适配横向对照（非资产质量排名）")
+    lines.append(
+        "> 该表仅比较历史回测中的风险调整后表现。当前动作以数据质量、"
+        "持仓风控和当前信号共识为准；不得由本表单独推导买卖。"
+    )
     all_stocks = []
-    for hd in holdings_data:
-        h = hd["holding"]
-        all_stocks.append({
-            "code": h.code,
-            "name": h.name,
-            "type": "持仓",
-            "alpha_score": hd.get("alpha_score"),
-            "best_return": max(
-                (r.total_return for r in (hd.get("backtest") or {}).values()), default=0
+    for item, obj, item_type in [
+        *[(hd, hd["holding"], "持仓") for hd in holdings_data],
+        *[(wd, wd["watch_item"], "关注") for wd in watchlist_data],
+    ]:
+        backtests = item.get("backtest") or {}
+        best_name, best_result = max(
+            backtests.items(),
+            key=lambda pair: (
+                float(pair[1].sharpe_ratio),
+                float(pair[1].total_return),
+                -float(pair[1].max_drawdown),
             ),
-        })
-    for wd in watchlist_data:
-        w = wd["watch_item"]
+            default=("—", None),
+        )
+        signals = item.get("signal_check") or []
+        raw_sells = [s for s in signals if s.get("signal") == "sell"]
+        from core.signal_check import select_actionable_sell_signals
+        if select_actionable_sell_signals(raw_sells):
+            current_state = "退出/减仓共识"
+        elif raw_sells:
+            current_state = "单策略退出分歧"
+        elif any(s.get("signal") == "buy" for s in signals):
+            current_state = "当前有买入信号"
+        else:
+            current_state = "持有/观察"
         all_stocks.append({
-            "code": w.code,
-            "name": w.name,
-            "type": "关注",
-            "alpha_score": wd.get("alpha_score"),
-            "best_return": max(
-                (r.total_return for r in (wd.get("backtest") or {}).values()), default=0
-            ),
+            "code": obj.code,
+            "name": obj.name,
+            "type": item_type,
+            "alpha_score": item.get("alpha_score"),
+            "strategy": best_name,
+            "best_return": float(best_result.total_return) if best_result else 0.0,
+            "best_sharpe": float(best_result.sharpe_ratio) if best_result else 0.0,
+            "best_drawdown": float(best_result.max_drawdown) if best_result else 0.0,
+            "current_state": current_state,
         })
 
-    # 按 best_return 排序
-    all_stocks.sort(key=lambda s: s["best_return"], reverse=True)
-    lines.append("| 排名 | 类型 | 代码 | 名称 | Alpha Score | 最佳策略收益 |")
-    lines.append("|------|------|------|------|-------------|-------------|")
-    for rank, s in enumerate(all_stocks, 1):
+    lines.append("| 类型 | 代码 | 名称 | 当前状态 | Alpha | 历史适配策略 | 收益 | 夏普 | 回撤 |")
+    lines.append("|------|------|------|------|------:|------|------:|------:|------:|")
+    for s in all_stocks:
         score_str = f"{s['alpha_score']:+.3f}" if s['alpha_score'] is not None else "N/A"
         lines.append(
-            f"| {rank} | {s['type']} | {s['code']} | {s['name']} | "
-            f"{score_str} | {s['best_return']*100:+.2f}% |"
+            f"| {s['type']} | {s['code']} | {s['name']} | {s['current_state']} | "
+            f"{score_str} | {s['strategy']} | {s['best_return']*100:+.2f}% | "
+            f"{s['best_sharpe']:.2f} | {s['best_drawdown']*100:.2f}% |"
         )
 
     lines.append("")
     lines.append("---")
     lines.append("## 你的任务")
     lines.append(
-        f"请基于以上全部真实数据，生成完整的{market_label}持仓综合分析报告（严格按照 SYSTEM_PROMPT 中的 5 章结构输出）。"
+        f"请基于以上全部真实数据，生成完整的{market_label}持仓综合分析报告（严格按照 SYSTEM_PROMPT 规定的结构输出）。"
     )
     lines.append("")
     lines.append("**核心要点**：")
     lines.append(
-        "- 你的第 5 章「综合调仓方案」是整份报告最有价值的部分。必须给出具体可操作的计划。"
+        "- 第 5 章只能翻译代码生成的组合操作方案；不得新增系统没有确认的买卖动作、股数或价格。"
     )
     lines.append(
         f"- 用户有 {currency}{cash:,.2f} 可用资金。每笔买入必须说明资金来源。"
     )
     lines.append(
-        "- 持仓股的卖出建议必须基于数据：浮盈是否过大需要止盈？回测是否显示策略不佳？"
-        "是否有关注股比它更好值得替换？——每个理由都要有数据支撑。"
+        "- 持仓卖出/减仓必须由系统当前退出共识或持仓风控支持。历史回测可解释背景，"
+        "但不能单独触发当前卖出，也不能仅凭某关注股历史收益更高就建议替换。"
     )
     lines.append(
-        "- 关注股的买入建议也必须基于数据：回测收益是否显著高于现有持仓？"
-        "Alpha 得分是否更高？技术面是否发出入场信号？——不能只说「值得关注」就完了。"
+        "- 关注股只有在当前系统买入信号、账户容量和数据质量同时允许时才能讨论执行；"
+        "历史回测较好但当前未触发时只能列为观察。"
     )
     lines.append(
-        "- 保守方案和激进方案的区别要明显：保守方案变动少（可能只减仓/加仓 1-2 只），"
-        "激进方案敢做大动作（卖弱买强、集中仓位）。"
+        "- 保守/激进差异必须服从系统方案。若二者来自同一触发策略，价格和止损可以相同，"
+        "此时只解释仓位、账户风险预算和最大亏损的差异，不虚构第二套价位。"
     )
 
     return "\n".join(lines)

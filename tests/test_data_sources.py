@@ -147,6 +147,56 @@ class FakeTickFlow:
         self.klines = FakeTickFlowKlines()
 
 
+class FakeTickFlowQuotes:
+    def __init__(self):
+        self.calls = []
+
+    def get(self, symbols):
+        self.calls.append(symbols)
+        return [
+            {
+                "symbol": symbol,
+                "last_price": 100 + index,
+                "prev_close": 99 + index,
+                "open": 99,
+                "high": 102,
+                "low": 98,
+                "volume": 1000,
+                "timestamp": 1_800_000_000_000,
+            }
+            for index, symbol in enumerate(symbols)
+        ]
+
+
+def test_tickflow_fetch_quotes_batches_symbols_and_reuses_cache():
+    fetcher = TickFlowFetcher.__new__(TickFlowFetcher)
+    fetcher._api_key = "test"
+    fetcher._quote_cache = {}
+    fetcher._tf = type("FakeClient", (), {"quotes": FakeTickFlowQuotes()})()
+
+    first = fetcher.fetch_quotes(["AAPL", "NVDA"])
+    second = fetcher.fetch_quotes(["AAPL", "NVDA"])
+
+    assert list(first) == ["AAPL", "NVDA"]
+    assert first["AAPL"]["latest"] == 100
+    assert first["NVDA"]["latest"] == 101
+    assert second == first
+    assert fetcher._tf.quotes.calls == [["AAPL.US", "NVDA.US"]]
+
+
+def test_tickflow_fetch_quotes_respects_five_symbol_batch_limit():
+    fetcher = TickFlowFetcher.__new__(TickFlowFetcher)
+    fetcher._api_key = "test"
+    fetcher._quote_cache = {}
+    fetcher._tf = type("FakeClient", (), {"quotes": FakeTickFlowQuotes()})()
+    codes = [f"S{i}" for i in range(11)]
+
+    result = fetcher.fetch_quotes(codes)
+
+    assert len(result) == 11
+    assert [len(call) for call in fetcher._tf.quotes.calls] == [5, 5, 1]
+
+
 def test_tickflow_availability_ok():
     with patch("data.stock_fetcher.get_stock_fetcher", return_value=DummyFetcher()):
         result = check_tickflow_available("US", "AAPL")
@@ -352,6 +402,8 @@ if __name__ == "__main__":
     test_new_listing_quality_explains_short_history_without_old_price_conflict()
     test_new_listing_short_history_runs_through_quant_pipeline()
     test_tickflow_fetch_price_history_uses_date_window()
+    test_tickflow_fetch_quotes_batches_symbols_and_reuses_cache()
+    test_tickflow_fetch_quotes_respects_five_symbol_batch_limit()
     test_finnhub_debt_ratio_uses_normalized_metric()
     test_nasdaq_timestamp_is_parsed_as_eastern_time()
-    print("13/13 passed")
+    print("15/15 passed")

@@ -18,6 +18,7 @@ import pandas as pd
 
 from config.settings import Settings
 from core.pipeline import run_pipeline
+from core.signal_check import select_actionable_sell_signals
 from data.database import Database
 from data.models import Holding, WatchItem, AccountBalance, AnalysisReport
 from data.stock_fetcher import (
@@ -323,6 +324,39 @@ def _compute_portfolio_risk_snapshot(
         "risk_flags": risk_flags,
         "new_position_capacity_pct": max(0.0, 0.90 - gross_exposure),
     }
+
+
+def _estimate_account_equity(
+    holdings: list,
+    cash_balance: float,
+    price_frames: dict[str, pd.DataFrame],
+    quote_map: dict[str, dict] | None = None,
+    quote_quality_map: dict[str, dict] | None = None,
+) -> tuple[float, dict[str, float]]:
+    """用同一批冻结价格计算账户权益，避免分子/分母使用不同价格。"""
+    equity = max(float(cash_balance or 0.0), 0.0)
+    marks: dict[str, float] = {}
+    quote_map = quote_map or {}
+    quote_quality_map = quote_quality_map or {}
+    for holding in holdings:
+        quote = quote_map.get(holding.code) or {}
+        quality = quote_quality_map.get(holding.code) or {}
+        quote_usable = bool(
+            float(quote.get("price", 0.0) or 0.0) > 0
+            and (not quality.get("required") or quality.get("fresh"))
+        )
+        frame = price_frames.get(holding.code)
+        close = 0.0
+        if frame is not None and not frame.empty and "close" in frame.columns:
+            close = float(frame["close"].iloc[-1] or 0.0)
+        mark = (
+            float(quote["price"]) if quote_usable
+            else close if close > 0
+            else float(holding.cost_price or 0.0)
+        )
+        marks[holding.code] = mark
+        equity += float(holding.shares or 0.0) * mark
+    return max(equity, 0.0), marks
 
 
 def _portfolio_risk_snapshot_markdown(snapshot: dict) -> str:
@@ -735,35 +769,50 @@ def _build_historical_evaluation_markdown(
     return "\n".join(lines)
 
 
-def _fetch_portfolio_realtime_quote(code: str, market: str, fetcher) -> dict | None:
+def _fetch_portfolio_realtime_quote(
+    code: str,
+    market: str,
+    fetcher,
+    mode: str = "intraday",
+    prefetched_quote: dict | None = None,
+    prefetch_attempted: bool = False,
+) -> dict | None:
     """获取组合页使用的当前价，返回 {price, source, timestamp, session}。"""
     try:
         from utils.session import detect_session
         from data.stock_fetcher import fetch_us_extended_quote
 
-        tick = None
-        quote = None
-        try:
-            tick = fetcher.fetch_stock_tick(code) if hasattr(fetcher, "fetch_stock_tick") else None
-        except Exception as e:
-            logger.debug(f"{code} tick 获取失败: {e}")
-        try:
-            quote = fetcher.fetch_quote(code) if hasattr(fetcher, "fetch_quote") else None
-        except Exception as e:
-            logger.debug(f"{code} quote 获取失败: {e}")
-
-        session = detect_session(market, stock_tick=tick, stock_quote=quote)
-
-        if market == "US" and session != "intraday":
+        # Premarket is an explicit user-selected horizon. Do not let a stale
+        # TickFlow timestamp reclassify it as yesterday's intraday session.
+        if market == "US" and mode == "pre":
             ext_data = fetch_us_extended_quote(code)
             if ext_data and ext_data.get("price", 0) > 0:
+                session = detect_session(market, stock_quote=ext_data)
+                source = str(ext_data.get("source") or "Nasdaq.com")
                 return _quote_payload(
                     price=float(ext_data["price"]),
                     timestamp=ext_data.get("timestamp", 0),
-                    source="Nasdaq.com延伸时段",
+                    source=f"{source}延伸时段",
                     session=session,
                     bar=ext_data,
                 )
+            return None
+
+        quote = prefetched_quote
+        if quote is None and not prefetch_attempted:
+            try:
+                quote = fetcher.fetch_quote(code) if hasattr(fetcher, "fetch_quote") else None
+            except Exception as e:
+                logger.debug(f"{code} quote 获取失败: {e}")
+        tick = None
+        if quote and quote.get("latest", 0) > 0:
+            tick = {
+                "latest": quote["latest"],
+                "volume": quote.get("volume", 0),
+                "timestamp": quote.get("timestamp", 0),
+            }
+
+        session = detect_session(market, stock_tick=tick, stock_quote=quote)
 
         if tick and tick.get("latest", 0) > 0:
             return _quote_payload(
@@ -782,16 +831,6 @@ def _fetch_portfolio_realtime_quote(code: str, market: str, fetcher) -> dict | N
                 bar=quote,
             )
 
-        if market == "US":
-            ext_data = fetch_us_extended_quote(code)
-            if ext_data and ext_data.get("price", 0) > 0:
-                return _quote_payload(
-                    price=float(ext_data["price"]),
-                    timestamp=ext_data.get("timestamp", 0),
-                    source="Nasdaq.com报价",
-                    session=session,
-                    bar=ext_data,
-                )
     except Exception as e:
         logger.warning(f"获取 {code} 当前价失败: {e}")
     return None
@@ -839,7 +878,8 @@ def _build_portfolio_operation_summary(
         op_plan = d.get("operation_plan")  # str（plan.markdown）或 None
 
         buys = [s for s in sc_list if s.get("signal") == "buy"]
-        sells = [s for s in sc_list if s.get("signal") == "sell"]
+        raw_sells = [s for s in sc_list if s.get("signal") == "sell"]
+        sells = select_actionable_sell_signals(raw_sells)
         if sells:
             sell_stocks.append({
                 "code": code, "name": name,
@@ -1288,11 +1328,18 @@ class PortfolioService:
             if on_progress:
                 on_progress(f"正在获取当前报价（0/{len(all_codes)}）...")
             from concurrent.futures import ThreadPoolExecutor, as_completed
-            with ThreadPoolExecutor(max_workers=min(4, max(len(all_codes), 1))) as executor:
+            shared_fetcher = None if market == "US" and mode == "pre" else get_stock_fetcher(market)
+            prefetched_quotes: dict[str, dict] = {}
+            if shared_fetcher is not None and hasattr(shared_fetcher, "fetch_quotes"):
+                prefetched_quotes = shared_fetcher.fetch_quotes(all_codes)
+            # Nasdaq is a public endpoint; two workers avoid burst traffic.
+            quote_workers = 2 if market == "US" and mode == "pre" else 1
+            with ThreadPoolExecutor(max_workers=min(quote_workers, max(len(all_codes), 1))) as executor:
                 futures = {
                     executor.submit(
                         _fetch_portfolio_realtime_quote, code, market,
-                        get_stock_fetcher(market),
+                        shared_fetcher, mode, prefetched_quotes.get(code.upper()),
+                        bool(shared_fetcher is not None and hasattr(shared_fetcher, "fetch_quotes")),
                     ): code
                     for code in all_codes
                 }
@@ -1366,7 +1413,9 @@ class PortfolioService:
             return frame, fundamental, listing_date, news_items
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=min(4, max(len(all_codes), 1))) as executor:
+        # Finnhub profile/fundamental/news share provider quotas. Two workers
+        # keep first-run refreshes bounded while preserving useful parallelism.
+        with ThreadPoolExecutor(max_workers=min(2, max(len(all_codes), 1))) as executor:
             futures = {executor.submit(_preload_stock, code): code for code in all_codes}
             completed_preloads = 0
             for future in as_completed(futures):
@@ -1386,44 +1435,38 @@ class PortfolioService:
                 except Exception as e:
                     logger.warning(f"{code} 数据预取任务失败: {e}")
 
+        # SQLite 单例连接或外部 API 在并发阶段偶发失败时，进入权益计算前
+        # 串行补齐整包数据，避免只补到 K 线而丢失基本面/新闻。
+        incomplete_codes = [
+            code for code in all_codes
+            if code not in price_frames
+            or code not in fundamental_map
+            or code not in news_items_map
+        ]
+        for code in incomplete_codes:
+            if on_progress:
+                on_progress(f"正在补齐 {code} 的 K线、基本面和新闻...")
+            try:
+                frame, fundamental, listing_date, news_items = _preload_stock(code)
+                if frame is not None:
+                    price_frames[code] = frame
+                fundamental_map[code] = fundamental
+                listing_date_map[code] = listing_date
+                news_items_map[code] = news_items
+                logger.info(f"{code} 并发预取失败后已串行补齐")
+            except Exception as e:
+                logger.warning(f"{code} 串行补齐仍失败: {e}")
+
         if on_progress:
             on_progress("正在批量分析新增新闻情绪...")
         analyze_and_store_news(news_items_map, db=self.db)
 
         # 先获取所有价格并估算市场当前账户权益。组合页有真实余额和持仓，
         # 信号仓位应按这个权益换算，而不是 Tab1 的 10 万参考账户。
-        account_equity = float(balance.us_balance if market == "US" else balance.a_balance)
-        for h in holdings:
-            try:
-                df_h = price_frames.get(h.code)
-                holding_quote = quote_map.get(h.code) or {}
-                holding_quote_quality = quote_quality_map.get(h.code) or {}
-                holding_quote_usable = bool(
-                    holding_quote.get("price", 0) > 0
-                    and (
-                        not holding_quote_quality.get("required")
-                        or holding_quote_quality.get("fresh")
-                    )
-                )
-                if df_h is not None:
-                    price_frames[h.code] = df_h
-                    latest_close = float(df_h["close"].iloc[-1])
-                    mark_price = (
-                        float(holding_quote["price"])
-                        if holding_quote_usable
-                        else latest_close if latest_close > 0
-                        else float(h.cost_price or 0)
-                    )
-                else:
-                    mark_price = (
-                        float(holding_quote["price"])
-                        if holding_quote_usable
-                        else float(h.cost_price or 0)
-                    )
-                account_equity += float(h.shares or 0) * mark_price
-            except Exception as e:
-                logger.warning(f"{h.code} 组合权益估算失败，使用成本价: {e}")
-                account_equity += float(h.shares or 0) * float(h.cost_price or 0)
+        cash_balance = float(balance.us_balance if market == "US" else balance.a_balance)
+        account_equity, frozen_mark_prices = _estimate_account_equity(
+            holdings, cash_balance, price_frames, quote_map, quote_quality_map
+        )
 
         # 0 是真实账户状态，不得替换为仿真的 10 万元。回测可以使用
         # 独立参考本金，但当前下单信号必须看到真实的 0 权益。
@@ -1473,6 +1516,9 @@ class PortfolioService:
                         if quote_quality.get("required")
                         else f"K线收盘价（{latest_date}）"
                     )
+                if is_holding and code in frozen_mark_prices:
+                    # 权益、持仓市值和仓位比例必须使用同一批冻结价格。
+                    current_price = frozen_mark_prices[code]
                 position_value = 0.0
                 if is_holding and i < len(holdings) and current_price:
                     position_value = float(holdings[i].shares or 0) * float(current_price)
@@ -1770,20 +1816,6 @@ class PortfolioService:
         except Exception as e:
             logger.warning(f"研究员观察候选池构建失败: {e}")
 
-        # Step 3: 追加追踪章节到报告正文
-        try:
-            from report.prompts import build_prediction_footer
-            port_stats = self.db.get_prediction_stats(portfolio_code)
-            port_validated = self.db.get_validated_predictions(portfolio_code, limit=5)
-            unverified = self.db.get_latest_unverified_prediction(portfolio_code)
-            evaluation_panel = self.db.get_prediction_evaluation_panel(portfolio_code)
-            report_content += build_prediction_footer(
-                portfolio_code, port_stats, port_validated,
-                unverified_count=1 if unverified else 0,
-                evaluation_panel=evaluation_panel)
-        except Exception as e:
-            logger.warning(f"组合预测 footer 构建失败: {e}")
-
         # 3c. 策略健康度追踪（持续优化闭环 — 汇总所有持仓+关注）
         try:
             if all_health or all_candidates:
@@ -1896,6 +1928,33 @@ class PortfolioService:
             self.db.insert_prediction(pred)
         except Exception as e:
             logger.warning(f"组合预测写入失败: {e}")
+
+        # 依赖本次逐股预测写入的真实统计必须最后生成；旧逻辑在写入前只查
+        # PORTFOLIO_US，并把“存在记录”硬编码成 1，导致组合报告严重少计。
+        try:
+            from report.prompts import build_prediction_footer
+            component_stats = self.db.get_prediction_stats_for_codes(
+                all_codes, mode=mode,
+            )
+            component_validated = self.db.get_validated_predictions_for_codes(
+                all_codes, mode=mode, limit=5,
+            )
+            pending_count = self.db.count_unverified_predictions_for_codes(
+                all_codes, mode=mode,
+            )
+            tracking_mode_label = {
+                "pre": "盘前", "intraday": "盘中", "eod": "盘后",
+            }.get(mode, mode)
+            report_content += build_prediction_footer(
+                portfolio_code,
+                component_stats,
+                component_validated,
+                unverified_count=pending_count,
+                scope_label=f"当前组合成分股，{tracking_mode_label}模式",
+            )
+            self.db.update_report_content(report_id, report_content)
+        except Exception as e:
+            logger.warning(f"组合预测 footer 构建失败: {e}")
 
         try:
             from services.optimization_scheduler import schedule_deep_optimization

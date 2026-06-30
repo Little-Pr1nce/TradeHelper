@@ -113,8 +113,9 @@ def build_research_confirmation_markdown(rows: list[ResearchObservation]) -> str
         "|------|------|------|------|:---:|------|------|",
     ]
     for obs in rows:
+        observation = str(obs.observation or "").replace("|", "\\|").replace("\n", " ")
         lines.append(
-            f"| {obs.name}（{obs.code}） | {obs.source} | {_clip(obs.observation, 56)} | "
+            f"| {obs.name}（{obs.code}） | {obs.source} | {observation} | "
             f"{obs.system_status} | {obs.execution_level} | {_clip(obs.next_step, 62)} | "
             f"{_clip(obs.reason, 72)} |"
         )

@@ -677,7 +677,8 @@ def generate_operation_plan(
         return OperationPlan(market_bias=market_bias, account_equity=sizing_equity,
                              equity_is_reference=equity_is_reference)
 
-    sell_signals = [s for s in ranked_signals if s.signal == "sell"]
+    raw_sell_signals = [s for s in ranked_signals if s.signal == "sell"]
+    sell_signals = select_actionable_sell_signals(raw_sell_signals)
     if sell_signals:
         plan = OperationPlan(market_bias=market_bias, account_equity=sizing_equity,
                              equity_is_reference=equity_is_reference)
@@ -691,6 +692,14 @@ def generate_operation_plan(
         plan = OperationPlan(market_bias=market_bias, account_equity=sizing_equity,
                              equity_is_reference=equity_is_reference)
         plan.markdown = _build_no_signal_markdown(ranked_signals, market_bias, df)
+        if raw_sell_signals and current_position and current_position.shares > 0:
+            names = "、".join(s.strategy_name for s in raw_sell_signals[:3])
+            plan.markdown = (
+                "### 🟡 持仓策略分歧\n\n"
+                f"{names} 出现退出信号，但尚未得到 Q/R/S 持仓风控策略或至少两个独立策略的共同确认。"
+                "本次不把单一策略退出升级为整只持仓卖出；保留为止损/复核提醒。\n\n"
+                + plan.markdown
+            )
         if not equity_is_reference and sizing_equity <= 0:
             plan.markdown = (
                 "> **账户资金硬约束：真实账户权益为0，本次禁止新开仓或加仓。**\n\n"
@@ -782,6 +791,32 @@ def generate_operation_plan(
         data_quality,
     )
     return plan
+
+
+def select_actionable_sell_signals(signals: list) -> list:
+    """只把持仓专用风控或多策略共识提升为组合级退出动作。"""
+    sells = [s for s in signals if _signal_value(s, "signal") == "sell"]
+    if not sells:
+        return []
+    dedicated = [
+        s for s in sells
+        if str(_signal_value(s, "base_key") or "").upper() in {"Q", "R", "S"}
+        and str(_signal_value(s, "execution_level") or "C").upper() != "D"
+    ]
+    if dedicated:
+        return sells
+    independent = {
+        str(_signal_value(s, "base_key") or _signal_value(s, "strategy_name") or "")
+        for s in sells
+        if str(_signal_value(s, "execution_level") or "C").upper() != "D"
+    }
+    return sells if len(independent) >= 2 else []
+
+
+def _signal_value(signal, key: str):
+    if isinstance(signal, dict):
+        return signal.get(key)
+    return getattr(signal, key, None)
 
 
 def _prepend_data_quality(markdown: str, data_quality: dict | None) -> str:
@@ -957,12 +992,31 @@ def _build_plan_markdown(
     )
 
     # ── 保守方案 ──
+    same_execution_price = bool(
+        plan.conservative and plan.aggressive
+        and abs(plan.conservative["entry"] - plan.aggressive["entry"]) < 1e-9
+    )
+    same_source_strategy = bool(
+        same_execution_price
+        and plan.conservative.get("source_strategies") == plan.aggressive.get("source_strategies")
+    )
+    if same_execution_price:
+        source_note = "同一已触发策略" if same_source_strategy else "两项已触发策略给出了相同价格"
+        lines.append(
+            f"> 两套方案因{source_note}，因此触发价相同；"
+            "保守/激进的差异仅在仓位、账户风险预算和最大亏损，不虚构第二个价格。\n"
+        )
+
     if plan.conservative:
         c = plan.conservative
         lines.append("### 🛡️ 保守方案\n")
         lines.append("| 项目 | 数值 | 理由 |")
         lines.append("|------|------|------|")
-        lines.append(f"| 入场价 | **${c['entry']:.2f}** | 当前收盘价附近，等回调/确认后入场 |")
+        entry_reason = (
+            "同一策略触发价；保守性由较低仓位和1%账户风险预算体现"
+            if same_execution_price else "较稳健策略给出的可执行触发价"
+        )
+        lines.append(f"| 入场价 | **${c['entry']:.2f}** | {entry_reason} |")
         c_loss = _loss_pct(c["entry"], c["stop_loss"])
         c_account_risk = (
             c["max_loss_amount"] / plan.account_equity * 100
@@ -985,7 +1039,11 @@ def _build_plan_markdown(
         lines.append("### 🚀 激进方案\n")
         lines.append("| 项目 | 数值 | 理由 |")
         lines.append("|------|------|------|")
-        lines.append(f"| 入场价 | **${a['entry']:.2f}** | 当前收盘价，不等回调直接入场 |")
+        entry_reason = (
+            "同一策略触发价；激进性由较高仓位和2%账户风险预算体现"
+            if same_execution_price else "当前排名最高策略给出的可执行触发价"
+        )
+        lines.append(f"| 入场价 | **${a['entry']:.2f}** | {entry_reason} |")
         a_loss = _loss_pct(a["entry"], a["stop_loss"])
         a_account_risk = (
             a["max_loss_amount"] / plan.account_equity * 100

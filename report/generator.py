@@ -1236,22 +1236,38 @@ def _generate_fallback_portfolio_report(
         lines.append("暂无关注股票。")
 
     lines.append("")
-    lines.append("## 四、策略回测排名")
+    lines.append("## 四、历史策略适配对照（非资产质量排名）")
+    lines.append(
+        "> 仅表示历史回测中风险调整后表现较好的策略，不代表当前资产质量或买卖顺序。"
+    )
     all_stocks = []
     for hd in holdings_data:
         h = hd["holding"]
-        best = max((r.total_return for r in (hd.get("backtest") or {}).values()), default=0)
-        all_stocks.append((h.code, h.name, "持仓", best))
+        best_name, best = max(
+            (hd.get("backtest") or {}).items(),
+            key=lambda pair: (pair[1].sharpe_ratio, pair[1].total_return),
+            default=("—", None),
+        )
+        all_stocks.append((h.code, h.name, "持仓", best_name, best))
     for wd in watchlist_data:
         w = wd["watch_item"]
-        best = max((r.total_return for r in (wd.get("backtest") or {}).values()), default=0)
-        all_stocks.append((w.code, w.name, "关注", best))
-    all_stocks.sort(key=lambda x: x[3], reverse=True)
+        best_name, best = max(
+            (wd.get("backtest") or {}).items(),
+            key=lambda pair: (pair[1].sharpe_ratio, pair[1].total_return),
+            default=("—", None),
+        )
+        all_stocks.append((w.code, w.name, "关注", best_name, best))
 
-    lines.append("| 排名 | 类型 | 代码 | 名称 | 最佳策略收益 |")
-    lines.append("|------|------|------|------|-------------|")
-    for rank, (code, name, stype, ret) in enumerate(all_stocks, 1):
-        lines.append(f"| {rank} | {stype} | {code} | {name} | {ret*100:+.2f}% |")
+    lines.append("| 类型 | 代码 | 名称 | 历史适配策略 | 收益 | 夏普 | 最大回撤 |")
+    lines.append("|------|------|------|------|------:|------:|------:|")
+    for code, name, stype, strategy_name, result in all_stocks:
+        ret = result.total_return if result else 0.0
+        sharpe = result.sharpe_ratio if result else 0.0
+        drawdown = result.max_drawdown if result else 0.0
+        lines.append(
+            f"| {stype} | {code} | {name} | {strategy_name} | "
+            f"{ret*100:+.2f}% | {sharpe:.2f} | {drawdown*100:.2f}% |"
+        )
 
     lines.append("")
     lines.append("---")

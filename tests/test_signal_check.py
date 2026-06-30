@@ -431,6 +431,37 @@ def test_missing_take_profit_is_reported_as_unquantifiable():
     assert "不可量化（未设止盈）" in plan.markdown
 
 
+def test_single_ordinary_strategy_exit_is_reported_as_conflict_not_global_sell():
+    signal = SignalResult(
+        variant_label="C", strategy_name="动量突破策略", base_key="C",
+        signal="sell", entry_price=100.0, position_pct=0.1,
+        execution_level="A", reason="动量条件转弱",
+    )
+    plan = generate_operation_plan(
+        [signal], current_price=100.0, account_equity=10000.0,
+        current_position=Position(shares=10, avg_cost=90.0, entry_price=90.0),
+        df=_df(),
+    )
+
+    assert "持仓策略分歧" in plan.markdown
+    assert "不把单一策略退出升级为整只持仓卖出" in plan.markdown
+    assert "持仓退出/减仓信号" not in plan.markdown
+
+
+def test_same_trigger_price_explains_risk_budget_difference():
+    signal = SignalResult(
+        variant_label="O", strategy_name="趋势策略", base_key="O",
+        signal="buy", entry_price=100.0, stop_loss=92.0,
+        position_pct=0.2, execution_level="B", reason="趋势条件满足",
+    )
+    plan = generate_operation_plan([signal], current_price=100.0, df=_df())
+
+    assert plan.conservative["entry"] == plan.aggressive["entry"]
+    assert "不虚构第二个价格" in plan.markdown
+    assert "保守性由较低仓位" in plan.markdown
+    assert "激进性由较高仓位" in plan.markdown
+
+
 if __name__ == "__main__":
     test_check_signals_position_pct_comes_from_order_shares()
     test_check_signals_can_use_real_account_equity()
@@ -450,4 +481,6 @@ if __name__ == "__main__":
     test_signal_rank_does_not_depend_on_reason_length()
     test_existing_concentration_can_block_additional_position()
     test_missing_take_profit_is_reported_as_unquantifiable()
-    print("18/18 passed")
+    test_single_ordinary_strategy_exit_is_reported_as_conflict_not_global_sell()
+    test_same_trigger_price_explains_risk_budget_difference()
+    print("20/20 passed")

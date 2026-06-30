@@ -813,7 +813,8 @@ def get_fundamental_data(name: str, code: str, market: str) -> dict | None:
     now_ts = __import__("time").time()
     if cache_key in _fundamental_cache:
         cached_ts, cached_data = _fundamental_cache[cache_key]
-        if now_ts - cached_ts < 86400:  # 24h
+        ttl = 86400 if cached_data else 300
+        if now_ts - cached_ts < ttl:
             logger.debug(f"基本面缓存命中 ({cache_key})")
             return cached_data
 
@@ -826,5 +827,8 @@ def get_fundamental_data(name: str, code: str, market: str) -> dict | None:
         api_key=settings.get("llm_api_key", ""),
         finnhub_token=settings.get("news_token_us", ""),
     )
+    # Successful fundamentals are stable for a day. A transient provider or
+    # DNS failure is cached for only five minutes so it cannot poison the
+    # whole desktop session.
     _fundamental_cache[cache_key] = (now_ts, result)
     return result

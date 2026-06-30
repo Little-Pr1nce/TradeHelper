@@ -5,8 +5,11 @@
 import os
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -30,16 +33,20 @@ from services.portfolio_service import (
     PortfolioService,
     _build_portfolio_operation_summary,
     _compute_portfolio_risk_snapshot,
+    _estimate_account_equity,
     _evaluate_realtime_quote_quality,
+    _fetch_portfolio_realtime_quote,
     _quote_payload,
 )
 from services.research_observations import (
     apply_history_feedback,
+    build_research_confirmation_markdown,
     build_research_history_markdown,
     build_research_confirmation_section,
     parse_llm_observations,
     ResearchObservation,
 )
+from report.prompts import build_prediction_footer
 from services.signal_stabilizer import SignalStabilizer
 
 
@@ -107,6 +114,42 @@ def test_realtime_quote_keeps_ohlcv_and_checks_each_stock_freshness():
     assert missing_quality["issues"]
 
 
+def test_premarket_quote_uses_extended_source_without_touching_tickflow():
+    class FailIfCalledFetcher:
+        def fetch_quote(self, code):
+            raise AssertionError("premarket must not call TickFlow")
+
+    extended = {
+        "price": 281.60,
+        "timestamp": int(datetime(
+            2026, 6, 30, 6, 54,
+            tzinfo=ZoneInfo("America/New_York"),
+        ).timestamp() * 1000),
+        "source": "Nasdaq.com",
+        "prev_close": 280.0,
+    }
+    with patch("data.stock_fetcher.fetch_us_extended_quote", return_value=extended):
+        quote = _fetch_portfolio_realtime_quote(
+            "AAPL", "US", FailIfCalledFetcher(), mode="pre"
+        )
+
+    assert quote["price"] == 281.60
+    assert quote["source"] == "Nasdaq.com延伸时段"
+    assert quote["session"] == "pre"
+
+
+def test_missing_batch_quote_does_not_fall_back_to_individual_request():
+    class FailIfCalledFetcher:
+        def fetch_quote(self, code):
+            raise AssertionError("batch miss must remain a visible data-quality failure")
+
+    quote = _fetch_portfolio_realtime_quote(
+        "AAPL", "US", FailIfCalledFetcher(), mode="intraday",
+        prefetched_quote=None, prefetch_attempted=True,
+    )
+    assert quote is None
+
+
 def test_holdings_watchlist_balance_crud():
     db = fresh_db()
     # 测试持仓
@@ -128,6 +171,26 @@ def test_holdings_watchlist_balance_crud():
     b = db.get_balance()
     assert b.us_balance == 50000.0
     assert b.a_balance == 100000.0
+
+
+def test_database_uses_independent_connections_for_parallel_reads():
+    db = fresh_db()
+    db.upsert_stock(StockInfo(code="FCX", name="Freeport", market="US"))
+    db.insert_prices([
+        PriceData(
+            code="FCX", date="2026-06-29", open=60.0, high=62.0,
+            low=59.0, close=61.62, volume=1_000_000,
+        )
+    ])
+
+    def read_bundle(_):
+        return db.get_stock("FCX"), db.get_prices("FCX"), db.get_news("FCX")
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        rows = list(executor.map(read_bundle, range(200)))
+
+    assert len(rows) == 200
+    assert all(stock and prices and prices[0].close == 61.62 for stock, prices, _ in rows)
 
 
 def test_portfolio_summary_adds_risk_overlay_and_compacts_no_signal():
@@ -305,6 +368,25 @@ def test_portfolio_risk_snapshot_limits_concentration_and_correlation():
     assert "组合风险预算" in md
     assert "AAA / BBB" in md
     assert "高相关持仓已达到组合上限" in md
+
+
+def test_account_equity_and_exposure_use_same_frozen_prices():
+    holding = Holding(
+        code="FCX", name="Freeport", market="US", shares=55, cost_price=54.788
+    )
+    frame = pd.DataFrame({"close": [61.62]})
+    equity, marks = _estimate_account_equity(
+        [holding], 61.18, {"FCX": frame}
+    )
+
+    assert marks["FCX"] == 61.62
+    assert round(equity, 2) == 3450.28
+    snapshot = _compute_portfolio_risk_snapshot(
+        [{"holding": holding, "current_price": marks["FCX"]}],
+        {"FCX": frame},
+        equity,
+    )
+    assert snapshot["gross_exposure"] < 1.0
 
 
 def test_research_observations_parse_and_confirm_llm_candidates():
@@ -619,16 +701,94 @@ def test_untriggered_observation_does_not_enter_learning_stats():
     assert stats["count"] == 0
 
 
+def test_research_confirmation_keeps_full_observation_text():
+    observation = (
+        "基本面处于历史极端低位，MA120 支撑近在咫尺，"
+        "建议系统复核释放资金后是否满足小仓验证的全部条件"
+    )
+    markdown = build_research_confirmation_markdown([
+        ResearchObservation(
+            code="NVDA", name="NVIDIA", observation=observation,
+            system_status="已确认", execution_level="B",
+        )
+    ])
+
+    assert observation in markdown
+    assert "近..." not in markdown
+
+
+def test_portfolio_tracking_counts_component_predictions_after_write():
+    db = fresh_db()
+    rows = [
+        PredictionLog(
+            code="AAPL", market="US", mode="pre", strategy_name="A",
+            signal_action="buy", predict_time="2026-06-20T08:00:00",
+            reference_date="2026-06-19", direction="bullish",
+            actual_direction="bullish", actual_return=0.03,
+            validated=1, validation_status="verified", validation_version=2,
+        ),
+        PredictionLog(
+            code="AAPL", market="US", mode="pre", strategy_name="B",
+            signal_action="buy", predict_time="2026-06-30T08:00:00",
+            reference_date="2026-06-29", direction="bullish", validated=0,
+        ),
+        PredictionLog(
+            code="NVDA", market="US", mode="pre", strategy_name="C",
+            signal_action="sell", predict_time="2026-06-30T08:01:00",
+            reference_date="2026-06-29", direction="bearish", validated=0,
+        ),
+        PredictionLog(
+            code="AAPL", market="US", mode="eod", strategy_name="D",
+            signal_action="buy", predict_time="2026-06-30T20:00:00",
+            reference_date="2026-06-29", direction="bullish", validated=0,
+        ),
+    ]
+    for row in rows:
+        db.insert_prediction(row)
+
+    stats = db.get_prediction_stats_for_codes(["AAPL", "NVDA"], mode="pre")
+    pending = db.count_unverified_predictions_for_codes(
+        ["AAPL", "NVDA"], mode="pre"
+    )
+    validated = db.get_validated_predictions_for_codes(
+        ["AAPL", "NVDA"], mode="pre", limit=5
+    )
+    footer = build_prediction_footer(
+        "PORTFOLIO_US", stats, validated, unverified_count=pending,
+        scope_label="当前组合成分股，盘前模式",
+    )
+
+    assert stats.total_predictions == 1
+    assert pending == 2
+    assert len(validated) == 1
+    assert "累计已验证预测：1 次" in footer
+    assert "待验证预测：2 条" in footer
+    assert "统计范围：当前组合成分股，盘前模式" in footer
+
+    report_id = db.insert_report(AnalysisReport(
+        code="PORTFOLIO_US", name="US", market="US", backtest_period="1y",
+        create_time="2026-06-30T22:00:00", content="before", mode="pre",
+    ))
+    db.update_report_content(report_id, "after")
+    assert db.execute(
+        "SELECT content FROM reports WHERE id=?", (report_id,)
+    ).fetchone()["content"] == "after"
+
+
 if __name__ == "__main__":
     tests = [
         test_filter_reports_by_market_mode_period_rating,
         test_signal_stabilizer_reuses_small_move,
         test_realtime_quote_keeps_ohlcv_and_checks_each_stock_freshness,
+        test_premarket_quote_uses_extended_source_without_touching_tickflow,
+        test_missing_batch_quote_does_not_fall_back_to_individual_request,
         test_holdings_watchlist_balance_crud,
+        test_database_uses_independent_connections_for_parallel_reads,
         test_portfolio_summary_adds_risk_overlay_and_compacts_no_signal,
         test_portfolio_summary_shows_data_quality_gate,
         test_portfolio_summary_flags_profit_lock_and_ma120_support,
         test_portfolio_risk_snapshot_limits_concentration_and_correlation,
+        test_account_equity_and_exposure_use_same_frozen_prices,
         test_research_observations_parse_and_confirm_llm_candidates,
         test_research_observation_log_verifies_future_returns,
         test_research_history_feedback_demotes_negative_expectancy,
@@ -636,6 +796,8 @@ if __name__ == "__main__":
         test_single_stock_research_item_feeds_observation_confirmation,
         test_research_observation_same_event_is_deduplicated,
         test_untriggered_observation_does_not_enter_learning_stats,
+        test_research_confirmation_keeps_full_observation_text,
+        test_portfolio_tracking_counts_component_predictions_after_write,
     ]
     for test in tests:
         test()
