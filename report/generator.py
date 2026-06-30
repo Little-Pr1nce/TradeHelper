@@ -285,58 +285,70 @@ def generate_report(
 
     data_info = f"回测数据范围：{data_range}" if data_range else ""
     # 构建额外数据段（因子检验 + 基本面 + 盘口）
-    extra = ""
+    analysis_context = ""
     if validation:
+        from alpha.validation import factor_validation_coverage
+
         rows = []
         for col, v in validation.items():
             grade = v.get("grade", "?")
             mult = v.get("multiplier", 1.0)
-            status = "全权" if mult >= 1.0 else ("半权" if mult >= 0.5 else "剔除")
+            status = (
+                "未验证（原权重）" if grade == "?"
+                else ("全权" if mult >= 1.0 else ("半权" if mult >= 0.5 else "剔除"))
+            )
             rows.append(f"| {col} | {v.get('samples', 0)} | {v.get('IC', 0):+.4f} | {v.get('IR', 0):+.2f} | {grade} | {status} |")
         if rows:
-            extra += "\n## 因子有效性检验\n\n| 因子 | 样本数 | IC | IR | 评级 | 处置 |\n|------|--------|-----|------|------|------|\n" + "\n".join(rows) + "\n"
+            coverage = factor_validation_coverage(validation)
+            analysis_context += (
+                f"\n## 因子有效性检验\n\n验证覆盖率：{coverage:.0%}。"
+                "未验证因子保留研究先验权重，但不会被视为已通过历史检验。\n\n"
+                "| 因子 | 样本数 | IC | IR | 评级 | 处置 |\n"
+                "|------|--------|-----|------|------|------|\n"
+                + "\n".join(rows) + "\n"
+            )
     if fundamental_data and fundamental_data.get("style_factors"):
         sf = fundamental_data["style_factors"]
         ff = fundamental_data["fundamental_factors"]
-        extra += f"\n## 基本面与估值因子\n- PE(TTM)历史分位: {sf['pe_percentile']:.1%}\n- PB历史分位: {sf['pb_percentile']:.1%}\n- ROE: {ff['roe']:.1%}\n- 毛利率: {ff['gross_margin']:.1%}\n- 资产负债率: {ff['debt_ratio']:.1%}\n- 净利润同比: {ff['net_profit_yoy']:+.1%}\n- 营收同比: {ff['revenue_yoy']:+.1%}\n"
+        analysis_context += f"\n## 基本面与估值因子\n- PE(TTM)历史分位: {sf['pe_percentile']:.1%}\n- PB历史分位: {sf['pb_percentile']:.1%}\n- ROE: {ff['roe']:.1%}\n- 毛利率: {ff['gross_margin']:.1%}\n- 资产负债率: {ff['debt_ratio']:.1%}\n- 净利润同比: {ff['net_profit_yoy']:+.1%}\n- 营收同比: {ff['revenue_yoy']:+.1%}\n"
     if depth_factor and depth_factor.get("available"):
         d = depth_factor
-        extra += f"\n## 实时盘口数据\n- 买盘总量: {d['bid_volume']:,.0f}\n- 卖盘总量: {d['ask_volume']:,.0f}\n- 买卖比: {d['imbalance']:.2f}\n- 盘口信号得分: {d['depth_score']:+.3f}\n"
+        analysis_context += f"\n## 实时盘口数据\n- 买盘总量: {d['bid_volume']:,.0f}\n- 卖盘总量: {d['ask_volume']:,.0f}\n- 买卖比: {d['imbalance']:.2f}\n- 盘口信号得分: {d['depth_score']:+.3f}\n"
     if rank_ic:
-        extra += f"\n## 因子模型整体有效性（Rank IC — 多周期）\n" \
+        analysis_context += f"\n## 因子模型整体有效性（Rank IC — 多周期）\n" \
                  f"| 周期 | Rank IC 均值 | IC_IR | 解读 |\n" \
                  f"|------|-------------|-------|------|\n" \
                  f"| 1 日 | {rank_ic.get('rank_ic_mean', 0):+.4f} | {rank_ic.get('ic_ir', 0):+.2f} | "
         ic1 = rank_ic.get('rank_ic_mean', 0)
-        extra += ("短期预测力偏多" if ic1 > 0.05 else ("短期预测力偏空" if ic1 < -0.05 else "短期预测力中性")) + " |\n"
+        analysis_context += ("短期预测力偏多" if ic1 > 0.05 else ("短期预测力偏空" if ic1 < -0.05 else "短期预测力中性")) + " |\n"
         if rank_ic_5d:
-            extra += f"| 5 日 | {rank_ic_5d.get('rank_ic_mean', 0):+.4f} | {rank_ic_5d.get('ic_ir', 0):+.2f} | "
+            analysis_context += f"| 5 日 | {rank_ic_5d.get('rank_ic_mean', 0):+.4f} | {rank_ic_5d.get('ic_ir', 0):+.2f} | "
             ic5 = rank_ic_5d.get('rank_ic_mean', 0)
-            extra += ("中期预测力偏多" if ic5 > 0.05 else ("中期预测力偏空" if ic5 < -0.05 else "中期预测力中性")) + " |\n"
+            analysis_context += ("中期预测力偏多" if ic5 > 0.05 else ("中期预测力偏空" if ic5 < -0.05 else "中期预测力中性")) + " |\n"
         if rank_ic_10d:
-            extra += f"| 10 日 | {rank_ic_10d.get('rank_ic_mean', 0):+.4f} | {rank_ic_10d.get('ic_ir', 0):+.2f} | "
+            analysis_context += f"| 10 日 | {rank_ic_10d.get('rank_ic_mean', 0):+.4f} | {rank_ic_10d.get('ic_ir', 0):+.2f} | "
             ic10 = rank_ic_10d.get('rank_ic_mean', 0)
-            extra += ("中长期预测力偏多" if ic10 > 0.05 else ("中长期预测力偏空" if ic10 < -0.05 else "中长期预测力中性")) + " |\n"
-        extra += (
+            analysis_context += ("中长期预测力偏多" if ic10 > 0.05 else ("中长期预测力偏空" if ic10 < -0.05 else "中长期预测力中性")) + " |\n"
+        analysis_context += (
             f"\n注：Rank IC > 0.05 表示因子在该周期有正向预测力；"
             f"< -0.05 表示有反向预测力（短期可能为均值回归）；"
             f"IC_IR > 0.5 表示预测能力稳定。\n"
             f"不同周期的 IC 符号可能不同——短期均值回归（IC 为负）与中长期趋势跟随（IC 为正）可同时存在。\n"
         )
     if benchmark_return:
-        extra += f"\n## 基准收益\n" \
+        analysis_context += f"\n## 基准收益\n" \
                  f"- 买入持有收益（同期）: {benchmark_return*100:+.2f}%\n" \
                  f"注：用于对比策略是否跑赢被动持有。\n"
     # ── 策略参数调优结果 ──
     if param_tuning:
-        extra += "\n## 策略参数优化\n\n"
-        extra += "| 策略 | 参数 | 默认值 | 最优值 |\n"
-        extra += "|------|------|--------|--------|\n"
+        analysis_context += "\n## 策略参数优化\n\n"
+        analysis_context += "| 策略 | 参数 | 默认值 | 最优值 |\n"
+        analysis_context += "|------|------|--------|--------|\n"
         for key, info in param_tuning.items():
             s = get_execution_strategy(key)
-            extra += (f"| {key} {s.name} | {info['param']} "
+            analysis_context += (f"| {key} {s.name} | {info['param']} "
                      f"| {info['default']:.2f} | {info['best_value']:.2f} |\n")
-        extra += ("\n注：以上为基于回测期内数据的参数扫描结果，最优值可能受过拟合影响。"
+        analysis_context += ("\n注：以上为基于回测期内数据的参数扫描结果，最优值可能受过拟合影响。"
                   "实际使用时建议综合考虑。\n")
 
     # ── 市场状态 + 策略适配 ──
@@ -348,30 +360,30 @@ def generate_report(
             "transitional": "趋势形成中",
         }
         regime_label = regime_labels.get(market_regime, market_regime)
-        extra += f"\n## 市场状态检测\n\n当前行情：**{regime_label}**（{market_regime}）\n\n"
+        analysis_context += f"\n## 市场状态检测\n\n当前行情：**{regime_label}**（{market_regime}）\n\n"
         if active_strategies or skipped_strategies:
-            extra += "| 策略 | 状态 | 说明 |\n|------|------|------|\n"
+            analysis_context += "| 策略 | 状态 | 说明 |\n|------|------|------|\n"
             for name in (active_strategies or []):
                 s = get_execution_strategy(name)
-                extra += f"| {name} {s.name} | ▶ 运行 | 适配当前 {regime_label} 行情 |\n"
+                analysis_context += f"| {name} {s.name} | ▶ 运行 | 适配当前 {regime_label} 行情 |\n"
             for name in (skipped_strategies or []):
                 s = get_execution_strategy(name)
                 regime_desc = ", ".join(s.suitable_regimes) if s.suitable_regimes else "全部行情"
-                extra += f"| {name} {s.name} | ⏭ 跳过 | 适配 {regime_desc}；当前为 {regime_label} |\n"
-            extra += "\n"
+                analysis_context += f"| {name} {s.name} | ⏭ 跳过 | 适配 {regime_desc}；当前为 {regime_label} |\n"
+            analysis_context += "\n"
 
     if realtime_quote:
         status_map = {0: "正常交易", 1: "停牌", 2: "退市", 3: "熔断"}
         ts = realtime_quote.get("timestamp", 0)
         time_str = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M:%S") if ts else "未知"
-        extra += f"\n## 实时报价\n" \
+        analysis_context += f"\n## 实时报价\n" \
                  f"- 最新价: {realtime_quote['latest']:.2f}（{realtime_quote['change_pct']:+.2%}）\n" \
                  f"- 开盘: {realtime_quote['open']:.2f} | 最高: {realtime_quote['high']:.2f} | 最低: {realtime_quote['low']:.2f}\n" \
                  f"- 前收盘: {realtime_quote['prev_close']:.2f} | 成交量: {realtime_quote['volume']:,.0f}\n" \
                  f"- 状态: {status_map.get(realtime_quote.get('status', 0), '未知')} | 更新时间: {time_str}\n"
     user_prompt = build_user_prompt(
         stock_info, technical_summary, news_aggregation,
-        bt_summary, bt_table, alpha_text, data_info, extra,
+        bt_summary, bt_table, alpha_text, data_info, analysis_context,
         swot_data=swot_data,
         peer_data=peer_data,
     )
@@ -380,18 +392,16 @@ def generate_report(
     if operation_plan:
         user_prompt = operation_plan + "\n\n" + user_prompt
 
-    full_prompt = SYSTEM_PROMPT + "\n\n" + user_prompt
-
     # 调用 LLM API（OpenAI 兼容格式，Ollama 通过 /v1 端点同样支持）
     try:
         from openai import OpenAI
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=300.0)
         logger.info(f"调用 LLM: model={model}, thinking={enable_thinking}")
-        extra = {}
+        request_options = {}
         if enable_thinking:
             # DeepSeek extended thinking: 让模型在输出前先深度推理
             # 兼容 deepseek-chat (V3/V3.1) 和 deepseek-reasoner (R1)
-            extra["extra_body"] = {"thinking": {"type": "enabled"}}
+            request_options["extra_body"] = {"thinking": {"type": "enabled"}}
         response = client.chat.completions.create(
             model=model,
             messages=[
@@ -400,7 +410,7 @@ def generate_report(
             ],
             temperature=0.3,
             max_tokens=9000,
-            **extra,
+            **request_options,
         )
         choice = response.choices[0]
         finish = choice.finish_reason
@@ -491,18 +501,26 @@ def _generate_fallback_report(
     # ── 因子有效性检验 ──
     validation_str = ""
     if validation:
+        from alpha.validation import factor_validation_coverage
+
         rows = []
         for col, v in validation.items():
             grade = v.get("grade", "?")
             mult = v.get("multiplier", 1.0)
-            status = "✓ 全权" if mult >= 1.0 else ("△ 半权" if mult >= 0.5 else "✗ 剔除")
+            status = (
+                "? 未验证（原权重）" if grade == "?"
+                else ("✓ 全权" if mult >= 1.0 else ("△ 半权" if mult >= 0.5 else "✗ 剔除"))
+            )
             rows.append(
                 f"| {col} | {v.get('samples', 0)} | {v.get('IC', 0):+.4f} | "
                 f"{v.get('IR', 0):+.2f} | {grade} | {status} |"
             )
         if rows:
+            coverage = factor_validation_coverage(validation)
             validation_str = (
                 "\n### 因子有效性检验\n\n"
+                f"验证覆盖率：**{coverage:.0%}**。未验证因子保留原始研究权重，"
+                "但执行可信度会降级。\n\n"
                 "| 因子 | 样本数 | IC | IR | 评级 | 处置 |\n"
                 "|------|--------|-----|------|------|------|\n"
                 + "\n".join(rows) + "\n"
@@ -797,14 +815,6 @@ def _split_t1_report(report_content: str) -> tuple[str, str]:
     # ── 策略 4：兜底 ──
     logger.debug("_split_t1_report: 未找到章节 8 分割点，返回完整报告作为前 7 章")
     return report_content.strip(), ""
-
-
-def _strip_ch8_header(ch8_content: str) -> str:
-    """移除 LLM 可能重复输出的「## 八、...」标题行，避免报告中出现重复标题。"""
-    # LLM 输出时可能已经带了 ## 八、... 标题，先检查
-    ch8 = ch8_content.strip()
-    # 如果 LLM 输出以 ## 八 开头，保留它；否则需要拼接
-    return ch8
 
 
 # ============================================================

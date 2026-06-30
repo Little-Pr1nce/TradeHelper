@@ -14,7 +14,7 @@ import pandas as pd
 import numpy as np
 
 from strategies.base import StrategyContext, Position
-from strategies import get_execution_strategy
+from strategies import get_execution_strategy, get_overlay_strategy_keys
 
 
 def make_test_df(n: int = 200, final_scores: list[float] | None = None,
@@ -308,6 +308,11 @@ class TestHardRiskControls:
     def test_time_stop_in_broker(self):
         """时间止损由 Broker 层执行。"""
         pass
+
+
+def test_overlay_strategies_are_discovered_from_strategy_metadata():
+    assert get_overlay_strategy_keys(has_position=False) == ["P", "T"]
+    assert get_overlay_strategy_keys(has_position=True) == ["P", "Q", "R", "S", "T"]
 
 
 def _run_script_tests():

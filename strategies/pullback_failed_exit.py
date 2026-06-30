@@ -19,6 +19,7 @@ class PullbackFailedExitStrategy(BaseExecutionStrategy):
     """关键均线跌破后的反抽失败退出策略。"""
 
     suitable_regimes: list[str] = []
+    overlay_scope = "position"
 
     def __init__(
         self,

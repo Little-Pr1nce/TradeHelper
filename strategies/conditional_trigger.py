@@ -15,6 +15,7 @@ class ConditionalTriggerStrategy(BaseExecutionStrategy):
     """统一生成条件触发计划，不直接产生交易订单。"""
 
     suitable_regimes: list[str] = []
+    overlay_scope = "always"
 
     @property
     def name(self) -> str:

@@ -14,7 +14,7 @@ from datetime import datetime
 
 from indicators.technical import calc_all_indicators
 from alpha.scoring import calc_final_score
-from strategies import get_execution_strategy
+from strategies import get_execution_strategy, get_overlay_strategy_keys
 from strategies.base import Position
 from backtest.engine import BacktestEngine, BacktestConfig
 from backtest.analytics import compare_strategies, compute_rank_ic
@@ -156,6 +156,28 @@ def run_pipeline(
                           depth_available=depth_available,
                           market_regime=market_regime,
                           prediction_reliability=prediction_reliability)
+
+    # 未验证因子保留研究先验权重，但验证覆盖不足必须降低建议可信等级。
+    validation = {}
+    norm_cols = [c for c in df.columns if c.endswith("_norm")]
+    if norm_cols and "close" in df.columns:
+        from alpha.validation import factor_validation_coverage, validate_factors
+
+        validation = validate_factors(df, mode=validation_mode)
+        factor_names = [c[:-5] for c in norm_cols]
+        validation_coverage = factor_validation_coverage(validation, factor_names)
+        data_quality["factor_validation_coverage"] = round(validation_coverage, 3)
+        if validation_coverage < 0.5:
+            warning = f"因子有效性验证覆盖率偏低：{validation_coverage:.0%}"
+            if warning not in data_quality["warnings"]:
+                data_quality["warnings"].append(warning)
+            data_quality["score"] = max(0.0, float(data_quality["score"]) - 5.0)
+            if data_quality["status"] == "ok":
+                data_quality["status"] = "watch"
+                data_quality["action"] = "watch"
+            data_quality["max_position_multiplier"] = min(
+                float(data_quality["max_position_multiplier"]), 0.75
+            )
 
     # ---- ③ Rank IC 计算（多周期：1/5/10 日远期收益） ----
     logger.info("  [管道 3/4] 计算多周期 Rank IC（因子有效性）...")
@@ -387,9 +409,9 @@ def run_pipeline(
     if run_signals:
         try:
             from core.strategy_pool import StrategyVariant
-            overlay_keys = ["P", "T"]
-            if current_position and current_position.shares > 0:
-                overlay_keys.extend(["Q", "R", "S"])
+            overlay_keys = get_overlay_strategy_keys(
+                has_position=bool(current_position and current_position.shares > 0)
+            )
             existing_labels = {getattr(v, "variant_label", "") for v in check_variants}
             for key in overlay_keys:
                 if key in existing_labels:
@@ -451,13 +473,6 @@ def run_pipeline(
 
     logger.info(f"管道完成: 基准收益={benchmark_return*100:+.2f}%")
     logger.info("=" * 50)
-
-    # 提取因子检验结果
-    validation = {}
-    norm_cols = [c for c in df.columns if c.endswith("_norm")]
-    if norm_cols and "close" in df.columns:
-        from alpha.validation import validate_factors
-        validation = validate_factors(df, mode=validation_mode)
 
     return AnalysisResult(
         df=df,

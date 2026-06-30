@@ -1189,7 +1189,7 @@ def refresh_realtime_signal_plan(
         return getattr(pipeline_result, "df", pd.DataFrame())
 
     from core.strategy_pool import StrategyVariant
-    from strategies import get_execution_strategy
+    from strategies import get_execution_strategy, get_overlay_strategy_keys
 
     variants = []
     pool = getattr(pipeline_result, "strategy_pool", None)
@@ -1209,7 +1209,9 @@ def refresh_realtime_signal_plan(
                 continue
 
     present_keys = {getattr(v, "base_key", "") for v in variants}
-    for key in ("P", "Q", "R", "S", "T"):
+    for key in get_overlay_strategy_keys(
+        has_position=bool(current_position and current_position.shares > 0)
+    ):
         if key in present_keys:
             continue
         try:

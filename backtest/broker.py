@@ -288,6 +288,7 @@ class Broker:
         pos = account.position
         if cfg.t_plus_one and pos.entry_date == str(current_date)[:10]:
             return []
+        open_price = float(bar_t1["open"])
         high = float(bar_t1["high"])
         low = float(bar_t1["low"])
         close = float(bar_t1["close"])
@@ -300,12 +301,17 @@ class Broker:
         hard_stop = pos.entry_price * (1 - hard_stop_pct)
         if low <= hard_stop:
             exit_reason = f"硬止损触发 low({low:.2f}) <= hard_stop({hard_stop:.2f})"
-            exit_price = hard_stop
+            # 日线回测无法假设跳空低开后仍能按更高的止损价成交。
+            exit_price = min(open_price, hard_stop)
+            if open_price < hard_stop:
+                exit_reason += f"；跳空按开盘价({open_price:.2f})成交"
 
         # 移动止盈（最高点回撤 2×ATR，由策略设置）
         elif pos.stop_loss > 0 and low <= pos.stop_loss:
             exit_reason = f"止损触发 low({low:.2f}) <= stop({pos.stop_loss:.2f})"
-            exit_price = pos.stop_loss
+            exit_price = min(open_price, pos.stop_loss)
+            if open_price < pos.stop_loss:
+                exit_reason += f"；跳空按开盘价({open_price:.2f})成交"
 
         # 时间止损：优先使用策略级配置，否则用 Broker 默认 10 天
         elif pos.entry_date:
@@ -321,7 +327,6 @@ class Broker:
                 pass
 
         if exit_reason and exit_price:
-            exit_price = max(exit_price, low)
             fill_value = exit_price * pos.shares
             commission = self._commission(fill_value)
             sell_tax = fill_value * cfg.sell_tax

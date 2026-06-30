@@ -1065,7 +1065,7 @@ class AnalysisService:
 
                 if not peer_name or peer_name == peer_code:
                     try:
-                        db_info = Database().get_stock_info(peer_code)
+                        db_info = Database().get_stock(peer_code)
                         if db_info and db_info.name:
                             peer_name = db_info.name
                     except Exception:

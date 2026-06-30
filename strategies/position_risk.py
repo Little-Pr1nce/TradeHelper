@@ -23,6 +23,7 @@ class PositionRiskManagementStrategy(BaseExecutionStrategy):
     """真实持仓组合风控策略。"""
 
     suitable_regimes: list[str] = []
+    overlay_scope = "position"
 
     def __init__(
         self,

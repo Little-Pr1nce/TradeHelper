@@ -14,8 +14,6 @@
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
-
 import pandas as pd
 import numpy as np
 

@@ -23,6 +23,7 @@ class ProfitLockAfterHighStrategy(BaseExecutionStrategy):
     """冲高回落后的利润保护策略。"""
 
     suitable_regimes: list[str] = []
+    overlay_scope = "position"
 
     def __init__(
         self,

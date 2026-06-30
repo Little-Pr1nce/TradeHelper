@@ -137,6 +137,8 @@ class BaseExecutionStrategy(ABC):
 
     # 适配的行情类型（空列表 = 全行情通用）
     suitable_regimes: list[str] = []
+    # 覆盖策略由自身声明加载范围，避免管道维护另一份策略编号清单。
+    overlay_scope: str = ""  # "always" / "position" / ""
 
     def generate_orders(
         self, df: pd.DataFrame, context: StrategyContext

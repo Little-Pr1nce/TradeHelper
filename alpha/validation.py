@@ -152,7 +152,7 @@ def apply_factor_weights(
 
     综合三层权重：
       1. 检验权重（multiplier）：D 级剔除 ×0.0，C 级半权 ×0.5，A/B 级全权 ×1.0
-      2. 方向正确性降权：direction_correct=False → multiplier /= 2
+      2. 方向正确性降权：仅 direction_correct 明确为 False 时 multiplier /= 2
       3. 预测可靠性降权：prediction_reliability < 0.5 → 所有 multiplier *= reliability
       2. 市场状态权重（regime）：趋势市 MACD/ADX 高权重，震荡市 RSI/KDJ 高权重
 
@@ -180,7 +180,7 @@ def apply_factor_weights(
             logger.debug(f"  因子 {col} D 级剔除，不参与打分")
             continue
         # 方向性错误的因子降权
-        if not v.get("direction_correct", True):
+        if v.get("direction_correct") is False:
             mult = max(mult / 2, 0.25)
             logger.debug(f"  因子 {col} 方向错误，降权至 {mult:.2f}")
         rw = regime_weights.get(col, 1.0 / len(indicator_values))
@@ -216,9 +216,24 @@ def _all_unknown() -> dict:
 def _unknown_result(min_samples: int = 0) -> dict:
     return {
         "IC": 0.0, "IR": 0.0, "grade": "?",
-        "multiplier": 1.0, "direction_correct": False,
+        "multiplier": 1.0, "direction_correct": None,
         "samples": min_samples,
     }
+
+
+def factor_validation_coverage(
+    validation: dict[str, dict],
+    factor_names: list[str] | None = None,
+) -> float:
+    """返回已有足够样本完成 IC/IR 检验的因子比例。"""
+    names = factor_names or list(validation)
+    if not names:
+        return 0.0
+    known = sum(
+        1 for name in names
+        if validation.get(name, {}).get("grade", "?") != "?"
+    )
+    return known / len(names)
 
 
 def _grade(abs_ic: float, abs_ir: float) -> str:

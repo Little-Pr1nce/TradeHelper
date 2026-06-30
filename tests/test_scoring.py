@@ -18,7 +18,7 @@ from alpha.scoring import (
     calc_final_score,
     INDICATOR_COLUMNS,
 )
-from alpha.validation import apply_factor_weights
+from alpha.validation import apply_factor_weights, factor_validation_coverage
 
 
 def assert_raises(exc_type, match=None):
@@ -223,6 +223,22 @@ def test_factor_reliability_does_not_cancel_during_normalization():
     full = apply_factor_weights(values, validation, prediction_reliability=1.0)
     reduced = apply_factor_weights(values, validation, prediction_reliability=0.3)
     pd.testing.assert_series_equal(reduced, full * 0.3)
+
+
+def test_unknown_factor_keeps_prior_weight_without_direction_penalty():
+    values = {
+        "rsi": pd.Series([1.0]),
+        "dif": pd.Series([-1.0]),
+    }
+    validation = {
+        "rsi": {"grade": "?", "multiplier": 1.0, "direction_correct": None},
+        "dif": {"grade": "A", "multiplier": 1.0, "direction_correct": True},
+    }
+    result = apply_factor_weights(
+        values, validation, regime_weights={"rsi": 0.8, "dif": 0.2}
+    )
+    assert np.isclose(result.iloc[0], 0.6)
+    assert factor_validation_coverage(validation) == 0.5
 
 
 def test_future_prices_cannot_rewrite_past_factor_scores():

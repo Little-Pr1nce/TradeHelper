@@ -200,6 +200,23 @@ class TestBroker:
         assert "硬止损" in fills[0].reason
         assert self.account.position is None
 
+    def test_gap_down_stop_fills_at_open_not_stop_price(self):
+        """跳空跌破止损时不能乐观地按止损线成交。"""
+        self.account.position = Position(
+            shares=500, avg_cost=100.0, entry_date="2024-01-02",
+            entry_price=100.0, highest_close=100.0, stop_loss=92.0,
+        )
+        bar = pd.Series({
+            "date": "2024-01-03", "open": 80.0, "high": 85.0,
+            "low": 75.0, "close": 82.0, "volume": 10000000,
+        })
+        fills = self.broker.check_intraday_stops(
+            bar, self.account, prev_close=100.0, current_date="2024-01-03"
+        )
+        assert len(fills) == 1
+        assert fills[0].price == 80.0
+        assert "跳空按开盘价" in fills[0].reason
+
     def test_slippage_calculation(self):
         """验证滑点计算。"""
         bar = pd.Series({

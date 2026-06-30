@@ -117,6 +117,16 @@ def get_available_strategies() -> list[str]:
             "I", "J", "K", "L", "M", "N", "P", "Q", "R", "S", "T"]
 
 
+def get_overlay_strategy_keys(has_position: bool = False) -> list[str]:
+    """按策略声明返回当前场景需要追加的条件/风控覆盖策略。"""
+    keys = []
+    for key in get_available_strategies():
+        scope = getattr(_STRATEGY_REGISTRY[key], "overlay_scope", "")
+        if scope == "always" or (scope == "position" and has_position):
+            keys.append(key)
+    return keys
+
+
 def get_strategy_info() -> dict[str, dict]:
     """返回所有策略的名称和描述。"""
     result = {}

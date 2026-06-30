@@ -18,6 +18,7 @@ class MA120SupportReboundStrategy(BaseExecutionStrategy):
     """MA120 半年线支撑反弹策略。"""
 
     suitable_regimes = ["ranging", "transitional"]
+    overlay_scope = "always"
 
     def __init__(
         self,

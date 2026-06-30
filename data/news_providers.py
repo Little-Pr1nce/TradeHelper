@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from datetime import date, datetime, timedelta, timezone
 
 from data.models import NewsItem
-from data.stock_fetcher import _apply_proxy, _retry, _without_system_proxy
+from data.stock_fetcher import _retry, _without_system_proxy
 
 logger = logging.getLogger(__name__)
 
