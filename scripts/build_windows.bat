@@ -80,6 +80,17 @@ echo.
 echo [5/5] Verifying output...
 set OUTPUT_DIR=%PROJECT_DIR%\dist\win\TradeHelper
 if exist "!OUTPUT_DIR!\TradeHelper.exe" (
+    echo Running packaged runtime smoke test...
+    set TRADEHELPER_SMOKE_TEST=1
+    start "" /wait "!OUTPUT_DIR!\TradeHelper.exe"
+    set SMOKE_EXIT=!ERRORLEVEL!
+    set TRADEHELPER_SMOKE_TEST=
+    if !SMOKE_EXIT! NEQ 0 (
+        echo ERROR: Packaged executable failed runtime smoke test with exit code !SMOKE_EXIT!.
+        pause
+        exit /b !SMOKE_EXIT!
+    )
+    echo Runtime smoke test passed.
     echo ========================================================================
     echo  Packaging successful!
     echo  Output: !OUTPUT_DIR!

@@ -27,6 +27,11 @@ from data.stock_fetcher import (
 )
 from indicators.technical import summarize as summarize_technical
 from strategies.base import Position
+from services.news_service import (
+    analyze_and_store_news,
+    fetch_stock_news_items,
+    news_items_to_df,
+)
 from utils.dates import get_backtest_dates
 from utils.market import detect_market, search_us_stock_online, search_a_stock
 
@@ -1273,6 +1278,7 @@ class PortfolioService:
         price_frames: dict[str, pd.DataFrame] = {}
         listing_date_map: dict[str, str] = {}
         fundamental_map: dict[str, dict | None] = {}
+        news_items_map: dict[str, list] = {}
         quote_map: dict[str, dict] = {}
         quote_quality_map: dict[str, dict] = {}
         optimization_jobs: list[dict] = []
@@ -1322,7 +1328,7 @@ class PortfolioService:
 
         # K线与基本面彼此独立，有限并发预取，后续权益估算和逐股分析直接复用。
         if on_progress:
-            on_progress(f"正在并行预取 K线和基本面（0/{len(all_codes)}）...")
+            on_progress(f"正在并行预取 K线、基本面和最新新闻（0/{len(all_codes)}）...")
 
         name_by_code = {
             item.code: item.name
@@ -1345,7 +1351,19 @@ class PortfolioService:
                 )
             except Exception as e:
                 logger.warning(f"{code} 基本面预取失败: {e}")
-            return frame, fundamental, listing_date
+            news_items = []
+            try:
+                news_items = fetch_stock_news_items(
+                    code=code,
+                    name=name_by_code.get(code, code),
+                    market=market,
+                    mode=mode,
+                    db=self.db,
+                    limit=8,
+                )
+            except Exception as e:
+                logger.warning(f"{code} 最新新闻预取失败: {e}")
+            return frame, fundamental, listing_date, news_items
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=min(4, max(len(all_codes), 1))) as executor:
@@ -1356,16 +1374,21 @@ class PortfolioService:
                 completed_preloads += 1
                 if on_progress:
                     on_progress(
-                        f"正在并行预取 K线和基本面（{completed_preloads}/{len(all_codes)}）{code}"
+                        f"正在并行预取 K线、基本面和最新新闻（{completed_preloads}/{len(all_codes)}）{code}"
                     )
                 try:
-                    frame, fundamental, listing_date = future.result()
+                    frame, fundamental, listing_date, news_items = future.result()
                     if frame is not None:
                         price_frames[code] = frame
                     fundamental_map[code] = fundamental
                     listing_date_map[code] = listing_date
+                    news_items_map[code] = news_items
                 except Exception as e:
                     logger.warning(f"{code} 数据预取任务失败: {e}")
+
+        if on_progress:
+            on_progress("正在批量分析新增新闻情绪...")
+        analyze_and_store_news(news_items_map, db=self.db)
 
         # 先获取所有价格并估算市场当前账户权益。组合页有真实余额和持仓，
         # 信号仓位应按这个权益换算，而不是 Tab1 的 10 万参考账户。
@@ -1454,21 +1477,8 @@ class PortfolioService:
                 if is_holding and i < len(holdings) and current_price:
                     position_value = float(holdings[i].shares or 0) * float(current_price)
 
-                # 获取新闻（尝试从缓存）
-                news_df = None
-                try:
-                    news_items = self.db.get_recent_news_with_sentiment(code, hours=72, limit=30)
-                    if news_items:
-                        news_df = pd.DataFrame([{
-                            "date": n.date,
-                            "title": n.title,
-                            "sentiment": n.sentiment,
-                            "confidence": n.confidence,
-                            "finbert_score": (1.0 if n.sentiment == "positive" else
-                                             -1.0 if n.sentiment == "negative" else 0.0),
-                        } for n in news_items])
-                except Exception:
-                    pass
+                # 使用 Tab3 本轮独立刷新并完成情感分析的新闻，不依赖 Tab1。
+                news_df = news_items_to_df(news_items_map.get(code, []))
 
                 fundamental_data = fundamental_map.get(code)
 

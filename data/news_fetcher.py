@@ -8,7 +8,7 @@
 """
 
 import logging
-from datetime import date
+from datetime import datetime, timedelta, timezone
 
 from data.models import NewsItem
 from data.database import Database
@@ -19,12 +19,30 @@ logger = logging.getLogger(__name__)
 _CACHE_HOURS = 24
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _refresh_state_is_fresh(state: dict | None, cache_hours: float) -> bool:
+    if not state or cache_hours <= 0:
+        return False
+    value = str(state.get("last_attempt_at") or "")
+    try:
+        attempted = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except (TypeError, ValueError):
+        return False
+    return datetime.now(timezone.utc) - attempted <= timedelta(hours=cache_hours)
+
+
 def fetch_news(
     name: str, code: str, market: str,
     news_token_us: str = "",
     news_token_a: str = "",
     limit: int = 5,
     include_macro: bool = False,
+    cache_hours: float = _CACHE_HOURS,
 ) -> list[NewsItem]:
     """
     获取股票新闻（缓存优先 → 真实 API → 历史降级）。
@@ -43,11 +61,18 @@ def fetch_news(
     """
     db = Database()
 
-    # 1. 优先使用 24h 内已完成情感分析的缓存
-    cached = db.get_recent_news_with_sentiment(code, hours=_CACHE_HOURS, limit=limit)
-    if len(cached) >= limit:
-        logger.info(f"新闻缓存命中: {len(cached)} 条 (24h 内已分析)")
-        return cached[:limit]
+    # 1. 刷新状态与新闻条数分离。数据源只返回 0~2 条时，也应认为本轮
+    # 已刷新，不能因为未凑满 limit 而在每个页面重复请求。
+    cached = db.get_recent_news_with_sentiment(
+        code, hours=max(int(cache_hours + 1), 1), limit=limit
+    )
+    refresh_state = db.get_news_refresh_state(code)
+    if _refresh_state_is_fresh(refresh_state, cache_hours):
+        logger.info(
+            f"新闻刷新状态命中: {code}，{cache_hours:g}h 内已检查，"
+            f"可用缓存 {len(cached)} 条"
+        )
+        return cached[:limit] if cached else _fallback_cache(db, code, limit, [])
 
     # 2. 真实新闻 API
     providers = get_news_providers(market, news_token_us, news_token_a)
@@ -59,6 +84,8 @@ def fetch_news(
         from data.news_providers import fetch_macro_news
         macro_items = fetch_macro_news(market, news_token_us, limit=3)
         if macro_items:
+            for item in macro_items:
+                item.code = code
             logger.info(f"宏观新闻: {len(macro_items)} 条")
 
     if items or macro_items:
@@ -70,10 +97,24 @@ def fetch_news(
             merged.extend(macro_items[:2])
             merged.extend(items[3:])
             result = merged[:limit + 2]  # 稍微多取，LLM 会自行筛选
+        fetched_at = _utc_now()
+        for item in result:
+            item.fetched_at = fetched_at
+            if not item.published_at:
+                item.published_at = item.date
+        db.save_news_refresh_state(
+            code, market, attempted_at=fetched_at,
+            status="success", item_count=len(result),
+        )
         logger.info(f"新闻总数（含宏观）: {len(result)} 条")
         return result
 
     # 3. 全部失败 → 降级缓存
+    attempted_at = _utc_now()
+    db.save_news_refresh_state(
+        code, market, attempted_at=attempted_at,
+        status="empty", item_count=0,
+    )
     return _fallback_cache(db, code, limit, cached)
 
 

@@ -41,6 +41,25 @@ from ui.settings_ui import SettingsPage
 from utils.logging import setup_logging
 
 
+def _run_packaged_smoke_test() -> None:
+    """导入运行时动态依赖，供 Windows 打包产物启动验收。"""
+    import importlib
+
+    modules = (
+        "tickflow",
+        "baostock",
+        "akshare",
+        "jsonpath",
+        "markdown_it",
+        "setuptools._vendor.jaraco.text",
+        "transformers",
+        "torch",
+        "openai",
+    )
+    for module in modules:
+        importlib.import_module(module)
+
+
 def main(page: ft.Page):
     """
     Flet 应用主函数。
@@ -229,4 +248,7 @@ async def _show_setup_hint(page: ft.Page, settings: Settings):
 
 # ======================== 程序入口 ========================
 if __name__ == "__main__":
-    ft.run(main)
+    if os.environ.get("TRADEHELPER_SMOKE_TEST") == "1":
+        _run_packaged_smoke_test()
+    else:
+        ft.run(main)

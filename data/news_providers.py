@@ -11,7 +11,7 @@
 
 import logging
 from abc import ABC, abstractmethod
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from data.models import NewsItem
 from data.stock_fetcher import _apply_proxy, _retry, _without_system_proxy
@@ -70,6 +70,7 @@ class AkshareEastMoneyProvider(BaseNewsProvider):
                 title=title,
                 source=str(row.get("文章来源", "东方财富")).strip() or "东方财富",
                 content=str(row.get("新闻内容", "")).strip()[:500],
+                published_at=pub,
             ))
             if len(items) >= limit:
                 break
@@ -178,8 +179,12 @@ def _parse_finnhub_entry(entry: dict, code: str) -> NewsItem | None:
     ts = entry.get("datetime")
     if isinstance(ts, (int, float)) and ts > 0:
         news_date = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        published_at = datetime.fromtimestamp(ts, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
     else:
         news_date = date.today().isoformat()
+        published_at = ""
 
     return NewsItem(
         code=code,
@@ -187,6 +192,7 @@ def _parse_finnhub_entry(entry: dict, code: str) -> NewsItem | None:
         title=title,
         source=str(entry.get("source", "Finnhub")).strip() or "Finnhub",
         content=str(entry.get("summary", "")).strip()[:500],
+        published_at=published_at,
     )
 
 
@@ -257,8 +263,12 @@ class FinnhubMarketNewsProvider(BaseNewsProvider):
             ts = entry.get("datetime")
             if isinstance(ts, (int, float)) and ts > 0:
                 news_date = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+                published_at = datetime.fromtimestamp(ts, timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
             else:
                 news_date = date.today().isoformat()
+                published_at = ""
 
             items.append(NewsItem(
                 code=code,
@@ -267,6 +277,7 @@ class FinnhubMarketNewsProvider(BaseNewsProvider):
                 source=str(entry.get("source", "Finnhub")).strip() or "Finnhub",
                 content=str(entry.get("summary", "")).strip()[:500],
                 is_macro=True,
+                published_at=published_at,
             ))
             if len(items) >= limit:
                 break

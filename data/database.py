@@ -112,11 +112,24 @@ CREATE TABLE IF NOT EXISTS news_sentiment (
     title TEXT NOT NULL,                    -- 新闻标题
     source TEXT DEFAULT '',                 -- 新闻来源
     sentiment TEXT DEFAULT '',             -- 情感标签
-    confidence REAL DEFAULT 0.0           -- 置信度
+    confidence REAL DEFAULT 0.0,           -- 置信度
+    content TEXT DEFAULT '',               -- 新闻摘要
+    is_macro INTEGER DEFAULT 0,            -- 是否宏观新闻
+    published_at TEXT DEFAULT '',          -- 数据源发布时间
+    fetched_at TEXT DEFAULT ''             -- 实际抓取时间，用于缓存失效
 );
 
 CREATE INDEX IF NOT EXISTS idx_news_code ON news_sentiment(code);
 CREATE INDEX IF NOT EXISTS idx_news_date ON news_sentiment(date);
+-- 新闻刷新状态：即使数据源返回 0 条，也能记录已刷新，避免反复请求。
+CREATE TABLE IF NOT EXISTS news_refresh_state (
+    code TEXT PRIMARY KEY,
+    market TEXT DEFAULT '',
+    last_attempt_at TEXT DEFAULT '',
+    last_success_at TEXT DEFAULT '',
+    status TEXT DEFAULT '',
+    item_count INTEGER DEFAULT 0
+);
 
 -- 用户持仓表
 CREATE TABLE IF NOT EXISTS holdings (
@@ -344,6 +357,9 @@ def _prepare_research_observation_events(conn: sqlite3.Connection):
 
     同一股票、同一形态、同一天重复生成报告，不能被当成多个独立样本。
     """
+    # 旧索引存在时，重新标准化 event_key 可能让两条旧记录在 UPDATE
+    # 阶段先发生碰撞，尚未执行后续去重就抛 UNIQUE。迁移必须先移除索引。
+    conn.execute("DROP INDEX IF EXISTS idx_research_obs_event")
     conn.execute(
         """UPDATE research_observation_log
            SET event_key = UPPER(code) || '|' ||
@@ -373,6 +389,9 @@ def _prepare_research_observation_events(conn: sqlite3.Connection):
 
 def _prepare_prediction_events(conn: sqlite3.Connection):
     """同一参考日、策略、模式和动作的重复报告只保留一个样本。"""
+    # event_key 的定义曾加入 signal_action。旧库可能同时保存旧键与新键，
+    # 它们在标准化 UPDATE 后才变成重复；先移除唯一索引，再去重并重建。
+    conn.execute("DROP INDEX IF EXISTS idx_prediction_event")
     conn.execute(
         """UPDATE prediction_log
            SET event_key = UPPER(code) || '|' ||
@@ -462,6 +481,12 @@ class Database:
         _ensure_column(conn, "reports", "prediction_data", "TEXT", "''")
         _ensure_column(conn, "news_sentiment", "content", "TEXT", "''")
         _ensure_column(conn, "news_sentiment", "is_macro", "INTEGER", "0")
+        _ensure_column(conn, "news_sentiment", "published_at", "TEXT", "''")
+        _ensure_column(conn, "news_sentiment", "fetched_at", "TEXT", "''")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_news_fetched_at "
+            "ON news_sentiment(code, fetched_at)"
+        )
         _ensure_column(conn, "prediction_log", "strategy_name", "TEXT", "''")
         _ensure_column(conn, "prediction_log", "signal_action", "TEXT", "''")
         _ensure_column(conn, "prediction_log", "market_regime", "TEXT", "''")
@@ -848,16 +873,22 @@ class Database:
         """
         if not news_list:
             return
-        sql = """INSERT INTO news_sentiment (code, date, title, source, content, sentiment, confidence, is_macro)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        sql = """INSERT INTO news_sentiment
+                 (code, date, title, source, content, sentiment, confidence,
+                  is_macro, published_at, fetched_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(code, date, title) DO UPDATE SET
                    source=excluded.source,
-                   content=excluded.content,
-                   sentiment=excluded.sentiment,
-                   confidence=excluded.confidence,
-                   is_macro=excluded.is_macro"""
+                   content=CASE WHEN excluded.content != '' THEN excluded.content ELSE news_sentiment.content END,
+                   sentiment=CASE WHEN excluded.sentiment != '' THEN excluded.sentiment ELSE news_sentiment.sentiment END,
+                   confidence=CASE WHEN excluded.sentiment != '' THEN excluded.confidence ELSE news_sentiment.confidence END,
+                   is_macro=excluded.is_macro,
+                   published_at=CASE WHEN excluded.published_at != '' THEN excluded.published_at ELSE news_sentiment.published_at END,
+                   fetched_at=CASE WHEN excluded.fetched_at != '' THEN excluded.fetched_at ELSE news_sentiment.fetched_at END"""
         data = [(n.code, n.date, n.title, n.source, n.content or "",
-                 n.sentiment, n.confidence, 1 if getattr(n, 'is_macro', False) else 0)
+                 n.sentiment, n.confidence, 1 if getattr(n, 'is_macro', False) else 0,
+                 getattr(n, "published_at", "") or "",
+                 getattr(n, "fetched_at", "") or "")
                 for n in news_list]
         self._executemany_write(sql, data)
 
@@ -894,15 +925,51 @@ class Database:
         Returns:
             NewsItem 列表（按日期倒序）；窗口内无缓存时返回空列表
         """
-        from datetime import datetime, timedelta
-        cutoff = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d")
+        from datetime import datetime, timedelta, timezone
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=hours)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
         rows = self.execute(
             """SELECT * FROM news_sentiment
-               WHERE code = ? AND date >= ? AND sentiment != ''
-               ORDER BY date DESC LIMIT ?""",
+               WHERE code = ? AND fetched_at >= ? AND sentiment != ''
+               ORDER BY published_at DESC, date DESC LIMIT ?""",
             (code, cutoff, limit)
         ).fetchall()
         return [NewsItem.from_dict(dict(r)) for r in rows]
+
+    def get_news_refresh_state(self, code: str) -> dict | None:
+        row = self.execute(
+            "SELECT * FROM news_refresh_state WHERE code = ?", (code.upper(),)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def save_news_refresh_state(
+        self,
+        code: str,
+        market: str,
+        *,
+        attempted_at: str,
+        status: str,
+        item_count: int,
+    ) -> None:
+        success_at = attempted_at if status in ("success", "empty") else ""
+        self._execute_write(
+            """INSERT INTO news_refresh_state
+               (code, market, last_attempt_at, last_success_at, status, item_count)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(code) DO UPDATE SET
+                 market=excluded.market,
+                 last_attempt_at=excluded.last_attempt_at,
+                 last_success_at=CASE
+                   WHEN excluded.last_success_at != '' THEN excluded.last_success_at
+                   ELSE news_refresh_state.last_success_at END,
+                 status=excluded.status,
+                 item_count=excluded.item_count""",
+            (
+                code.upper(), market, attempted_at, success_at,
+                status, int(item_count),
+            ),
+        )
 
     # ═══════════════════════════════════════════════════════════════
     # 预测追踪 (prediction_log) CRUD

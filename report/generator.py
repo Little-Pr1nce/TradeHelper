@@ -207,6 +207,7 @@ def generate_report(
     swot_data: dict | None = None,
     peer_data: list[dict] | None = None,
     operation_plan: str | None = None,
+    use_llm: bool = True,
 ) -> str:
     """
     生成完整分析报告。market_regime 等回测元信息会体现在报告中。
@@ -227,7 +228,11 @@ def generate_report(
     model = settings.get("llm_model", "gpt-4o")
     enable_thinking = settings.get("llm_enable_thinking", False)
 
-    if not api_key and "localhost" not in base_url and "127.0.0.1" not in base_url:
+    if not use_llm or (
+        not api_key
+        and "localhost" not in base_url
+        and "127.0.0.1" not in base_url
+    ):
         return _generate_fallback_report(
             stock_info, technical_summary, news_aggregation,
             backtest_results, alpha_stats, data_range, depth_factor,

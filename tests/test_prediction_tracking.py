@@ -436,6 +436,44 @@ def test_sell_health_does_not_demote_entry_parameters():
     assert db.get_best_params("AAPL", "A") is None
 
 
+def test_prediction_event_migration_dedupes_before_recreating_unique_index():
+    db = _fresh_db()
+    db_path = db._db_path
+    db._execute_write("DROP INDEX IF EXISTS idx_prediction_event")
+    rows = [
+        (
+            "AAPL", "US", "eod", "2026-06-29T16:00:00", "2026-06-29",
+            "bullish", "A", "buy", "legacy-key", 0,
+        ),
+        (
+            "AAPL", "US", "eod", "2026-06-29T17:00:00", "2026-06-29",
+            "bullish", "A", "buy", "new-key", 1,
+        ),
+    ]
+    db._executemany_write(
+        """INSERT INTO prediction_log
+           (code, market, mode, predict_time, reference_date, direction,
+            strategy_name, signal_action, event_key, validated)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        rows,
+    )
+    db._execute_write(
+        """CREATE UNIQUE INDEX idx_prediction_event
+           ON prediction_log(event_key) WHERE event_key != ''"""
+    )
+    db.conn.close()
+    db._conn = None
+
+    reopened = Database.init(db_path)
+    remaining = reopened.execute(
+        """SELECT COUNT(*) AS n, MAX(validated) AS validated
+           FROM prediction_log WHERE code='AAPL' AND strategy_name='A'"""
+    ).fetchone()
+
+    assert remaining["n"] == 1
+    assert remaining["validated"] == 1
+
+
 if __name__ == "__main__":
     test_prediction_trade_levels_come_from_signal_check()
     test_prediction_signals_follow_current_action_not_backtest_trade()
@@ -454,4 +492,5 @@ if __name__ == "__main__":
     test_strategy_health_uses_sample_confidence_and_expectancy()
     test_strategy_health_feedback_marks_demoted_params()
     test_sell_health_does_not_demote_entry_parameters()
-    print("17/17 passed")
+    test_prediction_event_migration_dedupes_before_recreating_unique_index()
+    print("18/18 passed")

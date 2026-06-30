@@ -149,6 +149,8 @@ class NewsItem:
     sentiment: str = ""
     confidence: float = 0.0
     is_macro: bool = False  # 是否为宏观新闻（非个股新闻）
+    published_at: str = ""  # 数据源发布时间（ISO，尽量保留到秒）
+    fetched_at: str = ""    # 本次从数据源获取时间（UTC ISO），用于缓存失效
 
     def to_dict(self) -> dict:
         return asdict(self)

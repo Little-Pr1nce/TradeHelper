@@ -21,10 +21,9 @@ import pandas as pd
 from config.settings import Settings
 from data.database import Database
 from data.stock_fetcher import get_stock_fetcher, fetch_us_extended_quote
-from data.news_fetcher import fetch_news
 from data.models import StockInfo, PriceData, AnalysisReport
 from indicators.technical import calc_all_indicators, summarize
-from indicators.sentiment import analyze, aggregate
+from indicators.sentiment import aggregate
 from core.pipeline import run_pipeline, AnalysisResult as PipelineResult
 from core.pipeline import compute_intraday_snapshot, compute_premarket_snapshot
 from strategies import get_execution_strategy
@@ -213,7 +212,10 @@ class AnalysisService:
         if _stop(): return self._empty_response(code)
 
         # ---- 4. 获取新闻情感数据 ----
-        news_agg = self._fetch_news(code, request.market, _progress, info.name, include_macro=(request.market == "US"))
+        news_agg = self._fetch_news(
+            code, request.market, _progress, info.name,
+            include_macro=(request.market == "US"), mode=request.mode,
+        )
         if _stop(): return self._empty_response(code)
 
         news_df = self._build_news_df(code)
@@ -668,29 +670,15 @@ class AnalysisService:
         )
 
     def _fetch_news(self, code: str, market: str, progress,
-                    name: str = "", include_macro: bool = False) -> dict:
+                    name: str = "", include_macro: bool = False,
+                    mode: str = "eod") -> dict:
         progress("正在加载新闻...")
-        from config.settings import Settings
-        settings = Settings()
-        news_list = fetch_news(
-            name=name, code=code, market=market,
-            news_token_us=settings.get("news_token_us", ""),
-            news_token_a=settings.get("news_token_a", ""),
-            limit=5,
-            include_macro=include_macro,
+        from services.news_service import refresh_stock_news
+        news_list = refresh_stock_news(
+            code=code, name=name, market=market, mode=mode,
+            db=Database(), limit=5, include_macro=include_macro,
         )
         logger.info(f"新闻: {len(news_list)} 条")
-
-        if news_list:
-            needs_analysis = [n for n in news_list if not n.sentiment]
-            if needs_analysis:
-                progress("正在进行新闻情感分析...")
-                analyzed = analyze(needs_analysis)
-                analyzed_map = {(n.date, n.title): n for n in analyzed}
-                news_list = [
-                    analyzed_map.get((n.date, n.title), n) for n in news_list
-                ]
-            Database().insert_news(news_list)
 
         news_agg = aggregate(news_list)
         logger.info(f"情感得分: {news_agg['sentiment_score']:.2f}")
@@ -1219,22 +1207,11 @@ class AnalysisService:
 
         # 增量新闻（今日，含情感分析）
         try:
-            today_news_list = fetch_news(
-                name=info.name, code=code, market=request.market,
-                news_token_us=settings.get("news_token_us", ""),
-                news_token_a=settings.get("news_token_a", ""),
-                limit=5,
+            from services.news_service import refresh_stock_news
+            today_news_list = refresh_stock_news(
+                code=code, name=info.name, market=request.market,
+                mode="intraday", db=Database(), limit=5,
             )
-            if today_news_list:
-                needs_analysis = [n for n in today_news_list if not n.sentiment]
-                if needs_analysis:
-                    from indicators.sentiment import analyze
-                    analyzed = analyze(needs_analysis)
-                    analyzed_map = {(n.date, n.title): n for n in analyzed}
-                    today_news_list = [
-                        analyzed_map.get((n.date, n.title), n)
-                        for n in today_news_list
-                    ]
         except Exception as e:
             logger.warning(f"增量新闻获取失败: {e}")
 
@@ -1666,22 +1643,11 @@ class AnalysisService:
 
         # 隔夜新闻（含情感分析）
         try:
-            overnight_news_list = fetch_news(
-                name=info.name, code=code, market=request.market,
-                news_token_us=settings.get("news_token_us", ""),
-                news_token_a=settings.get("news_token_a", ""),
-                limit=8,
+            from services.news_service import refresh_stock_news
+            overnight_news_list = refresh_stock_news(
+                code=code, name=info.name, market=request.market,
+                mode="pre", db=Database(), limit=8,
             )
-            if overnight_news_list:
-                needs_analysis = [n for n in overnight_news_list if not n.sentiment]
-                if needs_analysis:
-                    from indicators.sentiment import analyze
-                    analyzed = analyze(needs_analysis)
-                    analyzed_map = {(n.date, n.title): n for n in analyzed}
-                    overnight_news_list = [
-                        analyzed_map.get((n.date, n.title), n)
-                        for n in overnight_news_list
-                    ]
         except Exception as e:
             logger.warning(f"隔夜新闻获取失败: {e}")
 
@@ -2004,7 +1970,11 @@ class AnalysisService:
         self, code: str, info: StockInfo,
         pipeline_result: PipelineResult, period: str,
     ) -> str:
-        """基于 pipeline_result 生成 T-1 日报告文本（调用完整报告生成流程）。"""
+        """生成确定性的 T-1 上下文，供盘中/盘前最终 LLM 使用。
+
+        中间上下文不再单独调用一次 LLM；最终报告仍保留一次 LLM
+        综合解读，避免无缓存时连续生成两份长报告。
+        """
         try:
             tech = summarize(pipeline_result.df, info.name)
             dates = pipeline_result.df["date"]
@@ -2034,6 +2004,7 @@ class AnalysisService:
                 active_strategies=pipeline_result.active_strategies,
                 skipped_strategies=pipeline_result.skipped_strategies,
                 param_tuning=pipeline_result.param_tuning,
+                use_llm=False,
             )
             return content or ""
         except Exception as e:

@@ -6,7 +6,8 @@ import sys
 import tempfile
 import os
 from pathlib import Path
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -43,15 +44,111 @@ def test_cache_24h_with_sentiment():
     Database._instance = None
     db = Database.init(os.path.join(tmpdir, "test2.db"))
     today = date.today().isoformat()
+    fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     for i in range(5):
         db.insert_news([NewsItem(
             code="AAPL", date=today, title=f"News {i}",
             source="CNBC", sentiment="positive", confidence=0.8,
+            fetched_at=fetched_at,
         )])
 
     recent = db.get_recent_news_with_sentiment("AAPL", hours=24, limit=5)
     assert len(recent) == 5
+
+
+def test_refresh_state_reuses_partial_cache_without_refetching():
+    tmpdir = tempfile.mkdtemp()
+    Database._instance = None
+    db = Database.init(os.path.join(tmpdir, "partial.db"))
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.insert_news([
+        NewsItem(
+            code="AAPL", date=date.today().isoformat(), title=f"Partial {i}",
+            sentiment="positive", confidence=0.8, fetched_at=now,
+        )
+        for i in range(2)
+    ])
+    db.save_news_refresh_state(
+        "AAPL", "US", attempted_at=now, status="success", item_count=2
+    )
+
+    with patch("data.news_fetcher.fetch_from_providers") as provider_fetch:
+        result = news_fetcher.fetch_news(
+            "Apple", "AAPL", "US", news_token_us="token",
+            limit=5, cache_hours=1,
+        )
+
+    assert len(result) == 2
+    provider_fetch.assert_not_called()
+
+
+def test_expired_refresh_state_fetches_and_stamps_latest_news():
+    tmpdir = tempfile.mkdtemp()
+    Database._instance = None
+    db = Database.init(os.path.join(tmpdir, "expired.db"))
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    db.save_news_refresh_state(
+        "AAPL", "US", attempted_at=old, status="success", item_count=1
+    )
+    latest = NewsItem(
+        code="AAPL", date=date.today().isoformat(), title="Latest independent news"
+    )
+
+    with (
+        patch("data.news_fetcher.get_news_providers", return_value=[object()]),
+        patch("data.news_fetcher.fetch_from_providers", return_value=[latest]) as provider_fetch,
+    ):
+        result = news_fetcher.fetch_news(
+            "Apple", "AAPL", "US", news_token_us="token",
+            limit=5, cache_hours=0.5,
+        )
+
+    assert provider_fetch.call_count == 1
+    assert result[0].fetched_at
+    state = db.get_news_refresh_state("AAPL")
+    assert state["status"] == "success"
+    assert state["item_count"] == 1
+
+
+def test_shared_news_service_refreshes_without_tab1_and_persists_sentiment():
+    from services.news_service import analyze_and_store_news, fetch_stock_news_items
+
+    tmpdir = tempfile.mkdtemp()
+    Database._instance = None
+    db = Database.init(os.path.join(tmpdir, "shared.db"))
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    db.save_news_refresh_state(
+        "MSFT", "US", attempted_at=now, status="success", item_count=1
+    )
+    latest = NewsItem(
+        code="MSFT", date=date.today().isoformat(), title="MSFT latest",
+        fetched_at=now,
+    )
+
+    def fake_analyze(items):
+        for item in items:
+            item.sentiment = "positive"
+            item.confidence = 0.91
+        return items
+
+    with (
+        patch("services.news_service.fetch_news", return_value=[latest]) as fetch_mock,
+        patch("services.news_service.analyze", side_effect=fake_analyze) as analyze_mock,
+    ):
+        items = fetch_stock_news_items(
+            code="MSFT", name="Microsoft", market="US", mode="intraday",
+            db=db,
+        )
+        analyze_and_store_news({"MSFT": items}, db=db)
+
+    fetch_mock.assert_called_once()
+    analyze_mock.assert_called_once()
+    stored = db.get_news("MSFT", limit=5)
+    assert stored[0].title == "MSFT latest"
+    assert stored[0].sentiment == "positive"
 
 
 def test_fallback_cache():
@@ -167,6 +264,9 @@ if __name__ == "__main__":
     tests = [
         test_insert_news_upsert,
         test_cache_24h_with_sentiment,
+        test_refresh_state_reuses_partial_cache_without_refetching,
+        test_expired_refresh_state_fetches_and_stamps_latest_news,
+        test_shared_news_service_refreshes_without_tab1_and_persists_sentiment,
         test_fallback_cache,
         test_parse_finnhub_entry,
         test_dedupe_before_unique_index,

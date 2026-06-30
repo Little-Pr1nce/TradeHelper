@@ -66,6 +66,16 @@ jobs:
             exit 1
           }
 
+      - name: 启动打包产物并执行运行时依赖检查
+        shell: pwsh
+        run: |
+          $env:TRADEHELPER_SMOKE_TEST = "1"
+          $process = Start-Process -FilePath "dist/win/TradeHelper/TradeHelper.exe" -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged runtime smoke test failed with exit code $($process.ExitCode)"
+          }
+          Write-Host "Packaged runtime smoke test passed"
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:

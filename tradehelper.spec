@@ -37,10 +37,17 @@ for _icon_file in ["controls/material/icons.json", "controls/cupertino/cupertino
 
 # 鈹€鈹€ 鍖呭厓鏁版嵁锛堥伩鍏?"no package metadata was found" 閿欒锛?鈹€鈹€
 # tickflow/baostock 鐢?importlib.metadata 鏌ョ増鏈紝PyInstaller 闇€鏄惧紡鎵撳寘 METADATA
-from PyInstaller.utils.hooks import copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
+
+# akshare 在 import 阶段读取交易日历等 JSON；只收集 Python 模块会导致
+# 打包成功但 EXE 启动时报 file_fold/calendar.json 不存在。
+datas += collect_data_files('akshare')
 
 # 閫愪釜 try锛岄伩鍏嶆煇涓€涓寘娌?metadata 灏卞叏灞€鎶ラ敊
-for _pkg in ('tickflow', 'baostock', 'httpx', 'h11', 'httpcore', 'anyio'):
+for _pkg in (
+    'tickflow', 'baostock', 'httpx', 'h11', 'httpcore', 'anyio',
+    'setuptools', 'jsonpath', 'markdown-it-py',
+):
     try:
         datas += copy_metadata(_pkg)
     except Exception:
@@ -96,6 +103,13 @@ hiddenimports = [
     "h11",                    # httpcore 渚濊禆
     "anyio",                  # httpx 渚濊禆
     "asyncio",                # httpx 渚濊禆
+    "pkg_resources",
+    "setuptools",
+    "setuptools._vendor.jaraco.text",
+    "setuptools._vendor.jaraco.context",
+    "setuptools._vendor.jaraco.functools",
+    "jsonpath",               # akshare 部分接口动态导入
+    "markdown_it",            # HTML 报告导出动态导入
 ]
 
 a = Analysis(
@@ -109,11 +123,9 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         'tkinter',
-        'unittest',
         'test',
         'xmlrpc',
         'pydoc',
-        'setuptools',
     ],
 )
 
