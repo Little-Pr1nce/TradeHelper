@@ -612,6 +612,24 @@ def test_historical_evaluation_panel_summarizes_predictions_and_patterns():
     assert "MA120支撑" in md
 
 
+def test_a_share_evaluation_includes_tab1_predictions_without_holdings():
+    db = fresh_db()
+    db.upsert_stock(StockInfo(code="600519", name="贵州茅台", market="A"))
+    db.insert_prediction(PredictionLog(
+        code="600519", market="A", mode="eod", strategy_name="A",
+        signal_action="buy", predict_time="2026-06-30T15:30:00",
+        reference_date="2026-06-30", direction="bullish",
+        predicted_price=1500.0, validated=0,
+    ))
+
+    markdown = PortfolioService().build_historical_evaluation_panel("A")
+
+    assert "A股历史预测评估面板" in markdown
+    assert "贵州茅台（600519）" in markdown
+    assert "| 已验证 | 待验证 | 不可验证 |" in markdown
+    assert "| 贵州茅台（600519） | 0 | 1 | 0 |" in markdown
+
+
 def test_single_stock_research_item_feeds_observation_confirmation():
     rows = []
     dates = pd.date_range("2026-01-01", periods=130, freq="B")
@@ -793,6 +811,7 @@ if __name__ == "__main__":
         test_research_observation_log_verifies_future_returns,
         test_research_history_feedback_demotes_negative_expectancy,
         test_historical_evaluation_panel_summarizes_predictions_and_patterns,
+        test_a_share_evaluation_includes_tab1_predictions_without_holdings,
         test_single_stock_research_item_feeds_observation_confirmation,
         test_research_observation_same_event_is_deduplicated,
         test_untriggered_observation_does_not_enter_learning_stats,

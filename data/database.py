@@ -1541,6 +1541,35 @@ class Database:
             return PredictionLog.from_dict(dict(row))
         return None
 
+    def list_prediction_codes(self, market: str) -> list[str]:
+        """返回某市场已有预测的单股代码，供历史评估独立于持仓展示。"""
+        rows = self.execute(
+            """SELECT code, MAX(predict_time) AS latest
+               FROM prediction_log
+               WHERE market = ? AND code NOT LIKE 'PORTFOLIO_%'
+               GROUP BY code ORDER BY latest DESC""",
+            (market,),
+        ).fetchall()
+        return [str(row["code"] or "") for row in rows if row["code"]]
+
+    def get_prediction_status_counts(self, code: str) -> dict[str, int]:
+        """返回已验证、待验证和不可验证数量。"""
+        row = self.execute(
+            """SELECT
+                   SUM(CASE WHEN validated=1 AND validation_version>=2
+                                  AND validation_status='verified' THEN 1 ELSE 0 END) AS verified,
+                   SUM(CASE WHEN validated=0 THEN 1 ELSE 0 END) AS pending,
+                   SUM(CASE WHEN validated<0 OR validation_status IN
+                                  ('unsupported', 'legacy_unverifiable') THEN 1 ELSE 0 END) AS unsupported
+               FROM prediction_log WHERE code=?""",
+            (code,),
+        ).fetchone()
+        return {
+            "verified": int(row["verified"] or 0) if row else 0,
+            "pending": int(row["pending"] or 0) if row else 0,
+            "unsupported": int(row["unsupported"] or 0) if row else 0,
+        }
+
     def get_validated_predictions(self, code: str, limit: int = 10) -> list[PredictionLog]:
         rows = self.execute(
             """SELECT * FROM prediction_log

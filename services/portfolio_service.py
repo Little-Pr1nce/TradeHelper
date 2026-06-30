@@ -710,13 +710,15 @@ def _build_historical_evaluation_markdown(
 
     if prediction_rows:
         lines.extend([
-            "| 标的 | 验证次数 | 方向正确率 | 平均方向净收益 | 期望 |",
-            "|------|------:|------:|------:|------|",
+            "| 标的 | 已验证 | 待验证 | 不可验证 | 方向正确率 | 平均方向净收益 | 期望 |",
+            "|------|------:|------:|------:|------:|------:|------|",
         ])
         for row in prediction_rows:
             lines.append(
                 f"| {row.get('label', '')} "
                 f"| {int(row.get('count', 0))} "
+                f"| {int(row.get('pending', 0))} "
+                f"| {int(row.get('unsupported', 0))} "
                 f"| {float(row.get('accuracy', 0)):.0%} "
                 f"| {float(row.get('avg_return', 0)):+.2%} "
                 f"| {_expectancy_label(str(row.get('expectancy', 'insufficient')))} |"
@@ -1245,6 +1247,13 @@ class PortfolioService:
                 label = item.name or item.code
                 codes.append((item.code, f"{label}（{item.code}）"))
                 seen.add(item.code)
+        # Tab1 产生的预测也属于市场历史，不应因未录入 Tab3 持仓而消失。
+        for code in self.db.list_prediction_codes(market):
+            if code not in seen:
+                stock = self.db.get_stock(code)
+                label = stock.name if stock and stock.name else code
+                codes.append((code, f"{label}（{code}）"))
+                seen.add(code)
 
         prediction_rows: list[dict] = []
         exit_rows: list[dict] = []
@@ -1252,11 +1261,16 @@ class PortfolioService:
             panel = self.db.get_prediction_evaluation_panel(code)
             overall = panel.get("overall") or {}
             count = int(overall.get("count", 0) or 0)
-            if count <= 0:
+            status_counts = self.db.get_prediction_status_counts(code)
+            pending = int(status_counts.get("pending", 0) or 0)
+            unsupported = int(status_counts.get("unsupported", 0) or 0)
+            if count <= 0 and pending <= 0 and unsupported <= 0:
                 continue
             prediction_rows.append({
                 "label": label,
                 "count": count,
+                "pending": pending,
+                "unsupported": unsupported,
                 "accuracy": float(overall.get("accuracy", 0.0) or 0.0),
                 "avg_return": float(overall.get("avg_return", 0.0) or 0.0),
                 "expectancy": overall.get("expectancy", "insufficient"),

@@ -168,7 +168,9 @@ venv/bin/python -m pytest tests/ -q
 for f in tests/test_*.py; do venv/bin/python "$f" || exit 1; done
 ```
 
-当前基线为 **186 个测试通过**，覆盖数据源边界、新闻缓存、Alpha 因果性、20 个策略、Decision-first 路径、撮合、策略审计、参数生命周期、预测追踪、组合功能和可信度摘要。
+Tab3 历史评估提供独立的美股/A股切换，并纳入该市场全部 Tab1/Tab3 预测；即使股票尚未录入组合，也会展示已验证、待验证和不可验证数量。
+
+当前基线为 **187 个测试通过**，覆盖数据源边界、新闻缓存、Alpha 因果性、20 个策略、Decision-first 路径、撮合、策略审计、参数生命周期、预测追踪、组合功能和可信度摘要。
 
 ## 打包
 

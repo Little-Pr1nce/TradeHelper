@@ -283,7 +283,7 @@ SQLite WAL，当前 14 张表：
 
 ## 16. 测试与发布
 
-当前 13 个测试文件、186 个测试。除 pytest 外，每个测试文件都有直接执行入口：
+当前 13 个测试文件、187 个测试。除 pytest 外，每个测试文件都有直接执行入口：
 
 ```bash
 venv/bin/python -m pytest tests/ -q

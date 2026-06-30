@@ -206,7 +206,7 @@ venv/bin/python tests/test_scoring.py
 venv/bin/python -m pytest tests/ -q
 ```
 
-当前全项目基线为 186 个测试通过。回测相关回归覆盖：
+当前全项目基线为 187 个测试通过。回测相关回归覆盖：
 
 - T/T+1 时序和无未来函数。
 - Decision 到 Order 的统一转换。

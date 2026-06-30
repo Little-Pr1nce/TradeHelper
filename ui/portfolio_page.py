@@ -35,6 +35,7 @@ class PortfolioPage(ft.Container):
         self._analysis_started_at = None
         self._editing_holding_id = None
         self._active_editor_tab = "holdings"
+        self._evaluation_market = "US"
 
     # ======================== 样式 ========================
 
@@ -280,6 +281,21 @@ class PortfolioPage(ft.Container):
             ),
             on_click=self._on_refresh_evaluation,
         )
+        self._evaluation_us_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=6, controls=[
+                ft.Icon(ft.Icons.PUBLIC, size=16),
+                ft.Text("美股"),
+            ]),
+            on_click=lambda e: self._select_evaluation_market("US"),
+        )
+        self._evaluation_a_btn = ft.ElevatedButton(
+            content=ft.Row(spacing=6, controls=[
+                ft.Icon(ft.Icons.SHOW_CHART, size=16),
+                ft.Text("A股"),
+            ]),
+            on_click=lambda e: self._select_evaluation_market("A"),
+        )
+        self._update_evaluation_market_buttons()
         self._evaluation_container = ft.Container(
             **self._PANEL_STYLE,
             content=ft.Column(spacing=12, controls=[
@@ -287,7 +303,11 @@ class PortfolioPage(ft.Container):
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     controls=[
                         ft.Text("历史预测评估", size=17, weight=ft.FontWeight.BOLD),
-                        self._evaluation_refresh_btn,
+                        ft.Row(spacing=8, controls=[
+                            self._evaluation_us_btn,
+                            self._evaluation_a_btn,
+                            self._evaluation_refresh_btn,
+                        ]),
                     ],
                 ),
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
@@ -544,9 +564,33 @@ class PortfolioPage(ft.Container):
 
     # ======================== 历史预测评估 ========================
 
+    def _select_evaluation_market(self, market: str):
+        self._evaluation_market = market
+        self._update_evaluation_market_buttons()
+        self._load_evaluation_panel()
+
+    def _update_evaluation_market_buttons(self):
+        us_active = self._evaluation_market == "US"
+
+        def style(active: bool):
+            return ft.ButtonStyle(
+                bgcolor={"": ft.Colors.BLUE_700 if active else ft.Colors.GREY_200},
+                color={"": ft.Colors.WHITE if active else ft.Colors.GREY_700},
+                shape=ft.RoundedRectangleBorder(radius=8),
+                padding=ft.Padding(12, 9, 12, 9),
+            )
+
+        self._evaluation_us_btn.style = style(us_active)
+        self._evaluation_a_btn.style = style(not us_active)
+        try:
+            self._evaluation_us_btn.update()
+            self._evaluation_a_btn.update()
+        except Exception:
+            pass
+
     def _load_evaluation_panel(self):
         try:
-            self._evaluation_view.value = self._service.build_historical_evaluation_panel(self._selected_market)
+            self._evaluation_view.value = self._service.build_historical_evaluation_panel(self._evaluation_market)
             self._evaluation_view.update()
         except Exception as ex:
             logger.warning(f"历史预测评估面板加载失败: {ex}")
