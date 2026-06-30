@@ -21,6 +21,7 @@ class DataQualityReport:
     issues: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -32,6 +33,7 @@ class DataQualityReport:
             "issues": list(self.issues),
             "warnings": list(self.warnings),
             "missing": list(self.missing),
+            "notes": list(self.notes),
         }
 
 
@@ -44,6 +46,8 @@ def evaluate_data_quality(
     depth_available: bool = False,
     market: str = "",
     realtime_quote_quality: dict | None = None,
+    listing_date: str = "",
+    requested_start: str = "",
 ) -> DataQualityReport:
     """评估交易建议可依赖的数据质量。"""
     report = DataQualityReport()
@@ -59,9 +63,23 @@ def evaluate_data_quality(
 
     n = len(df)
     if n < 20:
-        report.issues.append(f"K线样本不足：仅{n}条，少于20条")
+        if listing_date:
+            report.issues.append(
+                f"新股上市后K线样本不足：{listing_date}上市，当前仅{n}条，少于20条"
+            )
+        else:
+            report.issues.append(f"K线样本不足：仅{n}条，少于20条")
     elif n < 60:
-        report.warnings.append(f"K线样本偏少：{n}条，低于60条，策略审计可信度下降")
+        if listing_date:
+            report.warnings.append(
+                f"上市后K线样本偏少：{listing_date}上市，当前{n}条，策略审计可信度下降"
+            )
+        else:
+            report.warnings.append(f"K线样本偏少：{n}条，低于60条，策略审计可信度下降")
+    if listing_date and requested_start and listing_date > requested_start:
+        report.notes.append(
+            f"所选回测窗口早于上市日，已自动裁剪为 {listing_date} 至今，上市前数据未参与计算"
+        )
 
     price_cols = ["open", "high", "low", "close"]
     numeric = df[price_cols + ["volume"]].apply(pd.to_numeric, errors="coerce")
@@ -186,11 +204,14 @@ def data_quality_markdown(report: dict | DataQualityReport | None) -> str:
     issues = data.get("issues") or []
     warnings = data.get("warnings") or []
     missing = data.get("missing") or []
+    notes = data.get("notes") or []
     if issues:
         lines.append("- 阻断问题：" + "；".join(str(x) for x in issues[:3]))
     if warnings:
         lines.append("- 降级警告：" + "；".join(str(x) for x in warnings[:3]))
     if missing:
         lines.append("- 缺失数据：" + "；".join(str(x) for x in missing[:4]))
+    if notes:
+        lines.append("- 数据口径：" + "；".join(str(x) for x in notes[:3]))
     lines.append("")
     return "\n".join(lines)

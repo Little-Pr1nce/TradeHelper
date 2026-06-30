@@ -10,6 +10,7 @@ Finnhub API 客户端 — 美股新闻、基本面、公司信息。
 """
 
 import logging
+import threading
 import time
 from datetime import date, datetime, timedelta
 
@@ -23,15 +24,19 @@ BASE_URL = "https://finnhub.io/api/v1"
 # 60 次/分钟 → 每秒最多 1 次，保守取 1.5s/次
 _MIN_INTERVAL = 1.5
 _last_request_time: float = 0.0
+_rate_limit_lock = threading.Lock()
 
 
 def _rate_limit():
     """简单限速：距离上一次请求至少间隔 _MIN_INTERVAL 秒。"""
     global _last_request_time
-    elapsed = time.monotonic() - _last_request_time
-    if elapsed < _MIN_INTERVAL:
-        time.sleep(_MIN_INTERVAL - elapsed)
-    _last_request_time = time.monotonic()
+    # Tab3 会并发预取多只股票；限速窗口必须跨线程串行，否则首轮元数据
+    # 补全会在同一时刻打出多次请求并触发 Finnhub 429。
+    with _rate_limit_lock:
+        elapsed = time.monotonic() - _last_request_time
+        if elapsed < _MIN_INTERVAL:
+            time.sleep(_MIN_INTERVAL - elapsed)
+        _last_request_time = time.monotonic()
 
 
 def _get(token: str, path: str, params: dict | None = None, max_retries: int = 3) -> dict:

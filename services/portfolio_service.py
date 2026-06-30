@@ -20,7 +20,11 @@ from config.settings import Settings
 from core.pipeline import run_pipeline
 from data.database import Database
 from data.models import Holding, WatchItem, AccountBalance, AnalysisReport
-from data.stock_fetcher import get_stock_fetcher, fetch_cached_prices
+from data.stock_fetcher import (
+    get_stock_fetcher,
+    fetch_cached_prices,
+    resolve_listing_date,
+)
 from indicators.technical import summarize as summarize_technical
 from strategies.base import Position
 from utils.dates import get_backtest_dates
@@ -1267,6 +1271,7 @@ class PortfolioService:
         holdings_data = []
         watchlist_data = []
         price_frames: dict[str, pd.DataFrame] = {}
+        listing_date_map: dict[str, str] = {}
         fundamental_map: dict[str, dict | None] = {}
         quote_map: dict[str, dict] = {}
         quote_quality_map: dict[str, dict] = {}
@@ -1325,8 +1330,12 @@ class PortfolioService:
         }
 
         def _preload_stock(code: str):
+            listing_date = resolve_listing_date(
+                code, market, db=self.db, name=name_by_code.get(code, code)
+            )
             frame = fetch_cached_prices(
-                code, market, start, end, db=self.db, min_records=20
+                code, market, start, end, db=self.db, min_records=20,
+                listing_date=listing_date,
             )
             fundamental = None
             try:
@@ -1336,7 +1345,7 @@ class PortfolioService:
                 )
             except Exception as e:
                 logger.warning(f"{code} 基本面预取失败: {e}")
-            return frame, fundamental
+            return frame, fundamental, listing_date
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=min(4, max(len(all_codes), 1))) as executor:
@@ -1350,10 +1359,11 @@ class PortfolioService:
                         f"正在并行预取 K线和基本面（{completed_preloads}/{len(all_codes)}）{code}"
                     )
                 try:
-                    frame, fundamental = future.result()
+                    frame, fundamental, listing_date = future.result()
                     if frame is not None:
                         price_frames[code] = frame
                     fundamental_map[code] = fundamental
+                    listing_date_map[code] = listing_date
                 except Exception as e:
                     logger.warning(f"{code} 数据预取任务失败: {e}")
 
@@ -1409,7 +1419,8 @@ class PortfolioService:
                     if on_progress:
                         on_progress(f"正在分析 {code}（{i+1}/{len(all_codes)}）：获取K线...")
                     df = fetch_cached_prices(code, market, start, end,
-                                             db=self.db, min_records=20)
+                                             db=self.db, min_records=20,
+                                             listing_date=listing_date_map.get(code, ""))
                     if df is not None:
                         price_frames[code] = df
                 if df is None:
@@ -1502,6 +1513,8 @@ class PortfolioService:
                     stock_code=code,
                     expand_pool=False,
                     realtime_quote_quality=quote_quality,
+                    listing_date=listing_date_map.get(code, ""),
+                    requested_history_start=start,
                 )
                 optimization_jobs.append({
                     "stock_code": code,

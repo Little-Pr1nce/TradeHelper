@@ -36,6 +36,7 @@ class StockInfo:
     market: str
     industry: str = ""
     description: str = ""
+    listing_date: str = ""
     update_time: str = ""
 
     def to_dict(self) -> dict:

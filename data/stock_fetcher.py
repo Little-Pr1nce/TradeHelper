@@ -753,9 +753,81 @@ def check_extended_quote_available(code: str = "AAPL") -> dict:
     except Exception as e:
         return {"source": "Nasdaq.com (yfinance fallback)", "ok": False, "error": str(e)}
 
+
+def _normalize_listing_date(value) -> str:
+    """Return a trustworthy ISO listing date, or an empty string."""
+    text = str(value or "").strip()[:10]
+    try:
+        parsed = dt_date.fromisoformat(text)
+    except (TypeError, ValueError):
+        return ""
+    if parsed.year < 1900 or parsed > dt_date.today():
+        return ""
+    return parsed.isoformat()
+
+
+def resolve_listing_date(
+    code: str,
+    market: str,
+    *,
+    db=None,
+    name: str = "",
+) -> str:
+    """Resolve and cache the current security's listing date.
+
+    Finnhub profile2 is authoritative for US stocks. A shares use baostock's
+    stock-basic record. A cached value is reused so portfolio analysis only
+    pays the metadata request cost once per symbol.
+    """
+    from data.database import Database
+
+    db = db or Database()
+    cached = db.get_stock(code) if hasattr(db, "get_stock") else None
+    cached_date = _normalize_listing_date(getattr(cached, "listing_date", ""))
+    if cached_date:
+        return cached_date
+
+    listing_date = ""
+    profile = None
+    if (market or "").upper() == "US":
+        from config.settings import Settings
+        token = (Settings().get("news_token_us", "") or "").strip()
+        if token:
+            try:
+                from data.finnhub_client import fetch_company_profile
+                profile = fetch_company_profile(token, code)
+                listing_date = _normalize_listing_date(
+                    (profile or {}).get("ipo") or (profile or {}).get("ipoDate")
+                )
+            except Exception as exc:
+                logger.warning(f"Finnhub 上市日期获取失败 ({code}): {exc}")
+    elif (market or "").upper() == "A":
+        try:
+            from alpha.fundamental import _fetch_stock_listing_date_baostock
+            listing_date = _normalize_listing_date(
+                _fetch_stock_listing_date_baostock(code)
+            )
+        except Exception as exc:
+            logger.warning(f"baostock 上市日期获取失败 ({code}): {exc}")
+
+    if listing_date and hasattr(db, "upsert_stock"):
+        stock = cached or StockInfo(
+            code=code.upper(), name=name or code.upper(), market=market.upper()
+        )
+        stock.listing_date = listing_date
+        if profile:
+            stock.name = stock.name or str(profile.get("name") or code.upper())
+            stock.industry = stock.industry or str(
+                profile.get("finnhubIndustry") or profile.get("industry") or ""
+            )
+        stock.update_time = datetime.now().isoformat()
+        db.upsert_stock(stock)
+        logger.info(f"{code} 上市日期已确认并缓存: {listing_date}")
+    return listing_date
+
 def fetch_cached_prices(
     code: str, market: str, start: str, end: str,
-    db=None, min_records: int = 0,
+    db=None, min_records: int = 0, listing_date: str = "",
 ) -> "pd.DataFrame | None":
     """缓存优先的 K 线获取：DB 缓存 → 增量拉取 → 全量拉取降级。
 
@@ -767,7 +839,8 @@ def fetch_cached_prices(
         start: 起始日期
         end: 结束日期
         db: Database 实例（必传）
-        min_records: 最少需要的 K 线条数（不足则返回 None）
+        min_records: 最少需要的 K 线条数；已确认的新股不因自然样本短而丢失
+        listing_date: 当前证券上市日期；早于该日期的数据不会读取、补拉或计算
 
     Returns:
         排序好的 DataFrame（含 date 列为 datetime），数据不足则返回 None
@@ -778,6 +851,27 @@ def fetch_cached_prices(
 
     if db is None:
         db = Database()
+
+    listing_date = _normalize_listing_date(listing_date)
+    if not listing_date and hasattr(db, "get_stock"):
+        stock = db.get_stock(code)
+        listing_date = _normalize_listing_date(
+            getattr(stock, "listing_date", "") if stock else ""
+        )
+    if not listing_date:
+        # 所有价格调用方（Tab1、Tab3、T-1、同板块分析）最终都会经过
+        # 此入口。元数据未缓存时在这里统一补全，避免页面之间口径不同。
+        listing_date = resolve_listing_date(code, market, db=db)
+    requested_start = start
+    history_limited_by_listing = bool(listing_date and listing_date > start)
+    if history_limited_by_listing:
+        start = listing_date
+        logger.info(
+            f"{code} 请求窗口 {requested_start}~{end} 早于上市日 {listing_date}，"
+            f"仅使用上市后K线"
+        )
+    if start > end:
+        return None
 
     prices = _sanitize_cached_prices_for_use(db.get_prices(code, start, end), market, code)
     fetcher = get_stock_fetcher(market)
@@ -839,12 +933,20 @@ def fetch_cached_prices(
         if fetched_any:
             prices = _sanitize_cached_prices_for_use(db.get_prices(code, start, end), market, code)
 
-    if not prices or (min_records > 0 and len(prices) < min_records):
+    if not prices or (
+        min_records > 0
+        and len(prices) < min_records
+        and not history_limited_by_listing
+    ):
         return None
 
     df = pd.DataFrame([p.to_dict() for p in prices])
     df["date"] = pd.to_datetime(df["date"])
-    return df.sort_values("date").reset_index(drop=True)
+    df = df.sort_values("date").reset_index(drop=True)
+    df.attrs["listing_date"] = listing_date
+    df.attrs["requested_start"] = requested_start
+    df.attrs["history_limited_by_listing"] = history_limited_by_listing
+    return df
 
 
 def get_stock_fetcher(market: str = "US") -> BaseStockFetcher:

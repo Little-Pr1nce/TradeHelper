@@ -204,7 +204,10 @@ class AnalysisService:
 
         # ---- 3. 获取股价数据（含缓存） ----
         _progress("正在获取股价数据...")
-        df = self._fetch_prices(code, request.period, request.market)
+        df = self._fetch_prices(
+            code, request.period, request.market,
+            listing_date=info.listing_date,
+        )
         if df is None or df.empty:
             raise RuntimeError(f"无法获取 {code} 的股价数据")
         if _stop(): return self._empty_response(code)
@@ -616,6 +619,10 @@ class AnalysisService:
                     from data.finnhub_client import fetch_company_profile
                     profile = fetch_company_profile(finnhub_token, code)
                     if profile:
+                        from data.stock_fetcher import _normalize_listing_date
+                        info.listing_date = _normalize_listing_date(
+                            profile.get("ipo") or profile.get("ipoDate")
+                        )
                         if not info.industry:
                             info.industry = profile.get("finnhubIndustry") or profile.get("industry") or ""
                         if not info.description:
@@ -647,10 +654,18 @@ class AnalysisService:
         logger.info(f"股票信息: {info.name} ({info.industry or '未知行业'})")
         return info
 
-    def _fetch_prices(self, code: str, period: str, market: str = "US") -> pd.DataFrame | None:
+    def _fetch_prices(
+        self,
+        code: str,
+        period: str,
+        market: str = "US",
+        listing_date: str = "",
+    ) -> pd.DataFrame | None:
         start, end = get_backtest_dates(period)
         from data.stock_fetcher import fetch_cached_prices
-        return fetch_cached_prices(code, market, start, end, db=Database())
+        return fetch_cached_prices(
+            code, market, start, end, db=Database(), listing_date=listing_date
+        )
 
     def _fetch_news(self, code: str, market: str, progress,
                     name: str = "", include_macro: bool = False) -> dict:

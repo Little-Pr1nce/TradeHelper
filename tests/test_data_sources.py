@@ -3,6 +3,7 @@
 """
 
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +21,9 @@ from data.stock_fetcher import (
 )
 from data.models import StockInfo, PriceData
 from alpha.fundamental import _extract_financials_from_finnhub
+from core.data_quality import evaluate_data_quality
+from core.pipeline import run_pipeline
+from data.database import Database
 
 
 class DummyFetcher:
@@ -81,6 +85,35 @@ class DirtyTailDB:
 
     def insert_prices(self, prices):
         self.prices.extend(prices)
+
+
+class IpoPriceDB:
+    def __init__(self):
+        self.prices = [
+            PriceData(code="SPCX", date="2026-06-10", open=25, high=26, low=24, close=25.5, volume=100),
+        ]
+
+    def get_prices(self, code, start_date="", end_date=""):
+        return sorted(
+            [p for p in self.prices if p.code == code and p.date >= start_date and p.date <= end_date],
+            key=lambda p: p.date,
+        )
+
+    def insert_prices(self, prices):
+        self.prices.extend(prices)
+
+
+class IpoFetcher:
+    def __init__(self):
+        self.calls = []
+
+    def fetch_price_history(self, code, start, end):
+        self.calls.append((start, end))
+        return [
+            PriceData(code=code, date="2026-06-11", open=145, high=160, low=140, close=155, volume=1000),
+            PriceData(code=code, date="2026-06-12", open=155, high=162, low=150, close=158, volume=1200),
+            PriceData(code=code, date="2026-06-15", open=158, high=165, low=154, close=161, volume=900),
+        ]
 
 
 class FakeTickFlowKlines:
@@ -185,6 +218,93 @@ def test_fetch_cached_prices_ignores_dirty_cached_tail():
     assert ("2026-01-04", "2026-01-04") in fetcher.calls
 
 
+def test_fetch_cached_prices_clamps_window_to_ipo_and_allows_short_history():
+    db = IpoPriceDB()
+    fetcher = IpoFetcher()
+
+    with patch("data.stock_fetcher.get_stock_fetcher", return_value=fetcher):
+        df = fetch_cached_prices(
+            "SPCX", "US", "2025-06-30", "2026-06-25",
+            db=db, min_records=20, listing_date="2026-06-11",
+        )
+
+    assert fetcher.calls == [("2026-06-11", "2026-06-25")]
+    assert df["date"].min().strftime("%Y-%m-%d") == "2026-06-11"
+    assert len(df) == 3
+    assert df.attrs["history_limited_by_listing"] is True
+
+
+def test_fetch_cached_prices_resolves_listing_date_for_every_caller():
+    db = IpoPriceDB()
+    fetcher = IpoFetcher()
+
+    with (
+        patch("data.stock_fetcher.resolve_listing_date", return_value="2026-06-11") as resolver,
+        patch("data.stock_fetcher.get_stock_fetcher", return_value=fetcher),
+    ):
+        df = fetch_cached_prices(
+            "SPCX", "US", "2025-06-30", "2026-06-25",
+            db=db, min_records=20,
+        )
+
+    resolver.assert_called_once_with("SPCX", "US", db=db)
+    assert fetcher.calls == [("2026-06-11", "2026-06-25")]
+    assert df["date"].min().strftime("%Y-%m-%d") == "2026-06-11"
+
+
+def test_new_listing_quality_explains_short_history_without_old_price_conflict():
+    dates = pd.date_range("2026-06-11", periods=13, freq="B")
+    df = pd.DataFrame({
+        "date": dates,
+        "open": [150.0] * 13,
+        "high": [160.0] * 13,
+        "low": [145.0] * 13,
+        "close": [155.0] * 13,
+        "volume": [1000.0] * 13,
+    })
+
+    report = evaluate_data_quality(
+        df,
+        current_price=156.0,
+        market="US",
+        listing_date="2026-06-11",
+        requested_start="2025-06-30",
+    )
+
+    assert report.status == "blocked"
+    assert any("新股上市后K线样本不足" in item for item in report.issues)
+    assert not any("实时价与最新K线收盘价偏离" in item for item in report.issues)
+    assert any("上市前数据未参与计算" in item for item in report.notes)
+
+
+def test_new_listing_short_history_runs_through_quant_pipeline():
+    Database.init(tempfile.mktemp(suffix=".db"))
+    dates = pd.date_range("2026-06-11", periods=13, freq="B")
+    df = pd.DataFrame({
+        "date": dates,
+        "open": [150.0 + i for i in range(13)],
+        "high": [152.0 + i for i in range(13)],
+        "low": [149.0 + i for i in range(13)],
+        "close": [151.0 + i for i in range(13)],
+        "volume": [1_000_000.0] * 13,
+    })
+    df.attrs["listing_date"] = "2026-06-11"
+    df.attrs["requested_start"] = "2025-06-30"
+
+    result = run_pipeline(
+        df,
+        market="US",
+        stock_code="SPCX",
+        current_price=164.0,
+        expand_pool=False,
+        skip_param_tuning=True,
+    )
+
+    assert len(result.df) == 13
+    assert result.data_quality["status"] == "blocked"
+    assert "新股上市后K线样本不足" in result.data_quality["issues"][0]
+
+
 def test_tickflow_fetch_price_history_uses_date_window():
     fake_tf = FakeTickFlow()
     fetcher = TickFlowFetcher.__new__(TickFlowFetcher)
@@ -227,7 +347,11 @@ if __name__ == "__main__":
     test_filter_prices_for_cache_drops_unfinished_and_invalid_bars()
     test_filter_prices_for_cache_quarantines_jump_tail()
     test_fetch_cached_prices_ignores_dirty_cached_tail()
+    test_fetch_cached_prices_clamps_window_to_ipo_and_allows_short_history()
+    test_fetch_cached_prices_resolves_listing_date_for_every_caller()
+    test_new_listing_quality_explains_short_history_without_old_price_conflict()
+    test_new_listing_short_history_runs_through_quant_pipeline()
     test_tickflow_fetch_price_history_uses_date_window()
     test_finnhub_debt_ratio_uses_normalized_metric()
     test_nasdaq_timestamp_is_parsed_as_eastern_time()
-    print("9/9 passed")
+    print("13/13 passed")

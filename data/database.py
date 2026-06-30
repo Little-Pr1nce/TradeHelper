@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS stocks (
     market TEXT NOT NULL,            -- 市场："A" / "US"
     industry TEXT DEFAULT '',        -- 所属行业
     description TEXT DEFAULT '',     -- 公司简介
+    listing_date TEXT DEFAULT '',    -- 当前证券上市日期（用于隔离上市前伪K线）
     update_time TEXT DEFAULT ''     -- 信息更新时间
 );
 
@@ -456,6 +457,7 @@ class Database:
         conn.executescript(CREATE_TABLES_SQL)       # 自动建表
         # 老版本数据库 schema 迁移
         _ensure_column(conn, "reports", "chart_path", "TEXT", "''")
+        _ensure_column(conn, "stocks", "listing_date", "TEXT", "''")
         _ensure_column(conn, "reports", "mode", "TEXT", "'eod'")
         _ensure_column(conn, "reports", "prediction_data", "TEXT", "''")
         _ensure_column(conn, "news_sentiment", "content", "TEXT", "''")
@@ -568,11 +570,20 @@ class Database:
         Args:
             stock: StockInfo 实例
         """
-        sql = """INSERT OR REPLACE INTO stocks (code, name, market, industry, description, update_time)
-                 VALUES (?, ?, ?, ?, ?, ?)"""
+        sql = """INSERT OR REPLACE INTO stocks
+                 (code, name, market, industry, description, listing_date, update_time)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)"""
         self._execute_write(sql, (stock.code, stock.name, stock.market,
                                   stock.industry, stock.description,
+                                  stock.listing_date,
                                   stock.update_time))
+
+    def get_stock(self, code: str) -> StockInfo | None:
+        """读取股票元数据，包括用于历史窗口裁剪的上市日期。"""
+        row = self.execute(
+            "SELECT * FROM stocks WHERE code = ?", (code.upper(),)
+        ).fetchone()
+        return StockInfo.from_dict(dict(row)) if row else None
 
 
     # ======================== 股价历史 ========================

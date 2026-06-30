@@ -515,6 +515,22 @@ def _fetch_stock_industry_baostock(code: str) -> str:
     return ""
 
 
+def _fetch_stock_listing_date_baostock(code: str) -> str:
+    """通过 baostock 股票基本资料获取 A 股上市日期。"""
+    import baostock as bs
+    try:
+        if not _baostock_login():
+            return ""
+        symbol = f"sh.{code}" if code.startswith(("6", "5", "9")) else f"sz.{code}"
+        rs = bs.query_stock_basic(code=symbol)
+        if rs.error_code == "0" and rs.next():
+            row = dict(zip(rs.fields, rs.get_row_data()))
+            return str(row.get("ipoDate") or "")[:10]
+    except Exception as exc:
+        logger.warning(f"baostock 上市日期获取失败 ({code}): {exc}")
+    return ""
+
+
 # ── yfinance 数据获取（美股基本面降级） ──
 
 

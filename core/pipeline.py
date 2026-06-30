@@ -70,6 +70,8 @@ def run_pipeline(
     run_backtests: bool = True,
     run_signals: bool = True,
     realtime_quote_quality: dict | None = None,
+    listing_date: str = "",
+    requested_history_start: str = "",
 ):
     """
     执行完整的量化分析计算管道。
@@ -122,6 +124,11 @@ def run_pipeline(
         depth_available=depth_available,
         market=market,
         realtime_quote_quality=realtime_quote_quality,
+        listing_date=listing_date or str(df.attrs.get("listing_date", "") or ""),
+        requested_start=(
+            requested_history_start
+            or str(df.attrs.get("requested_start", "") or "")
+        ),
     )
     data_quality = data_quality_report.to_dict()
     logger.info(
