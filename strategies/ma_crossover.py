@@ -33,6 +33,9 @@ class MACrossoverStrategy(DecisionFirstStrategy):
     """
 
     suitable_regimes = ["trending_steady"]
+    take_profit_mode = "conditional"
+    take_profit_rule = "MA5下穿MA20或Score跌破退出阈值时平仓"
+    strategy_family = "trend_following"
 
     def tunable_params(self) -> list[dict]:
         return [

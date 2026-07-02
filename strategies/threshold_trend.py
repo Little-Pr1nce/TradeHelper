@@ -41,6 +41,9 @@ class ThresholdTrendStrategy(DecisionFirstStrategy):
     """
 
     suitable_regimes = ["trending_volatile", "trending_steady"]
+    take_profit_mode = "conditional"
+    take_profit_rule = "Final_Score滚动百分位跌破退出阈值时平仓"
+    strategy_family = "trend_following"
 
     def tunable_params(self) -> list[dict]:
         return [

@@ -43,6 +43,9 @@ class MeanReversionStrategy(DecisionFirstStrategy):
     """
 
     suitable_regimes = ["ranging", "transitional"]
+    take_profit_mode = "conditional"
+    take_profit_rule = "浮盈达到策略ATR倍数，或Score百分位回升至退出阈值时平仓"
+    strategy_family = "mean_reversion"
 
     def tunable_params(self) -> list[dict]:
         return [

@@ -39,9 +39,12 @@ class SignalResult:
     strategy_name: str             # 策略可读名
     base_key: str                  # "A", "B", ...
     signal: str                    # "buy" | "sell" | "no_signal"
+    strategy_family: str = ""      # 同逻辑家族只允许一个代表进入执行方案
     entry_price: float = 0.0       # 建议入场价
     stop_loss: float = 0.0         # 止损价
     take_profit: float = 0.0       # 止盈价（如有）
+    take_profit_mode: str = "none" # fixed / dynamic / conditional / none
+    take_profit_rule: str = ""     # 动态公式或条件退出说明
     position_pct: float = 0.0      # 建议仓位比例
     reason: str = ""               # 入场理由（来自 Order.reason）
     audit_verdict: str = ""        # PASS / CONDITIONAL
@@ -57,11 +60,14 @@ class SignalResult:
             "key": self.base_key,
             "variant": self.variant_label,
             "name": self.strategy_name,
+            "strategy_family": self.strategy_family,
             "signal": self.signal,
             "no_signal_reason": self.no_signal_reason,
             "entry_price": self.entry_price,
             "stop_loss": self.stop_loss,
             "take_profit": self.take_profit,
+            "take_profit_mode": self.take_profit_mode,
+            "take_profit_rule": self.take_profit_rule,
             "position_pct": self.position_pct,
             "reason": self.reason,
             "audit": self.audit_verdict,
@@ -150,11 +156,17 @@ def check_signals(
                 strategy_name=v.strategy.name,
                 base_key=v.base_key,
                 signal=signal,
+                strategy_family=(
+                    getattr(v.strategy, "strategy_family", "")
+                    or v.strategy.__class__.__name__
+                ),
             )
             if decision:
                 sr.execution_level = getattr(decision, "execution_level", "")
                 sr.trigger_price = float(getattr(decision, "trigger_price", 0) or 0)
                 sr.invalidation = getattr(decision, "invalidation", "") or ""
+                sr.take_profit_mode = getattr(decision, "take_profit_mode", "none") or "none"
+                sr.take_profit_rule = getattr(decision, "take_profit_rule", "") or ""
 
             if buy_orders:
                 o = buy_orders[0]
@@ -399,6 +411,8 @@ def _structured_signal_confidence_score(signal: SignalResult) -> float:
             score += 3.0
         if signal.take_profit > signal.entry_price:
             score += 2.0
+        elif signal.take_profit_mode in ("dynamic", "conditional") and signal.take_profit_rule:
+            score += 1.0
     elif signal.signal == "sell":
         if signal.entry_price > 0:
             score += 3.0
@@ -687,7 +701,9 @@ def generate_operation_plan(
         plan.markdown = _prepend_data_quality(plan.markdown, data_quality)
         return plan
 
-    buy_signals = [s for s in ranked_signals if s.signal == "buy"]
+    buy_signals = select_signal_family_representatives(
+        [s for s in ranked_signals if s.signal == "buy"]
+    )
     if not buy_signals:
         plan = OperationPlan(market_bias=market_bias, account_equity=sizing_equity,
                              equity_is_reference=equity_is_reference)
@@ -725,6 +741,8 @@ def generate_operation_plan(
             "entry": entry,
             "stop_loss": stop,
             "take_profit": cons_signal.take_profit,
+            "take_profit_mode": cons_signal.take_profit_mode,
+            "take_profit_rule": cons_signal.take_profit_rule,
             "position_pct": position_pct,
             "position_cap_reason": cap_reason,
             "signal_strength": _signal_strength(cons_signal),
@@ -750,6 +768,8 @@ def generate_operation_plan(
             "entry": entry,
             "stop_loss": stop,
             "take_profit": agg_signal.take_profit,
+            "take_profit_mode": agg_signal.take_profit_mode,
+            "take_profit_rule": agg_signal.take_profit_rule,
             "position_pct": position_pct,
             "position_cap_reason": cap_reason,
             "signal_strength": _signal_strength(agg_signal),
@@ -770,6 +790,8 @@ def generate_operation_plan(
             "entry": entry,
             "stop_loss": stop,
             "take_profit": agg_signal.take_profit,
+            "take_profit_mode": agg_signal.take_profit_mode,
+            "take_profit_rule": agg_signal.take_profit_rule,
             "position_pct": position_pct,
             "position_cap_reason": cap_reason,
             "signal_strength": _signal_strength(agg_signal),
@@ -806,11 +828,34 @@ def select_actionable_sell_signals(signals: list) -> list:
     if dedicated:
         return sells
     independent = {
-        str(_signal_value(s, "base_key") or _signal_value(s, "strategy_name") or "")
+        str(
+            _signal_value(s, "strategy_family")
+            or _signal_value(s, "base_key")
+            or _signal_value(s, "strategy_name")
+            or ""
+        )
         for s in sells
         if str(_signal_value(s, "execution_level") or "C").upper() != "D"
     }
     return sells if len(independent) >= 2 else []
+
+
+def select_signal_family_representatives(signals: list) -> list:
+    """排序结果中每个策略家族只保留最高分代表进入执行方案。"""
+    selected = []
+    seen = set()
+    for signal in signals:
+        family = str(
+            _signal_value(signal, "strategy_family")
+            or _signal_value(signal, "base_key")
+            or _signal_value(signal, "strategy_name")
+            or ""
+        )
+        if family in seen:
+            continue
+        seen.add(family)
+        selected.append(signal)
+    return selected
 
 
 def _signal_value(signal, key: str):
@@ -1023,7 +1068,10 @@ def _build_plan_markdown(
             if plan.account_equity > 0 else 0.0
         )
         lines.append(f"| 止损价 | **${c['stop_loss']:.2f}** | 策略止损，单价风险 {c_loss:.1f}% |")
-        lines.append(f"| 止盈目标 | **{_take_profit_text(c['take_profit'])}** | 仅展示策略明确给出的目标，不推测止盈价 |")
+        lines.append(
+            f"| 止盈计划 | **{_take_profit_text(c['take_profit'], c['take_profit_mode'], c['take_profit_rule'])}** "
+            "| 固定目标可计算风险收益比；动态/条件退出只展示真实规则 |"
+        )
         lines.append(f"| 信号强度 | **{c['signal_strength']}** | 基于审计结论、验证夏普和综合排名 |")
         lines.append(f"| 仓位 | **{c['position_pct']*100:.1f}%** 账户权益 | {c['position_cap_reason']} |")
         lines.append(f"| 账户风险 | **{c_account_risk:.2f}%** 净值 | 若触发止损，按仓位估算的组合层面亏损 |")
@@ -1050,7 +1098,10 @@ def _build_plan_markdown(
             if plan.account_equity > 0 else 0.0
         )
         lines.append(f"| 止损价 | **${a['stop_loss']:.2f}** | 策略止损，单价风险 {a_loss:.1f}% |")
-        lines.append(f"| 止盈目标 | **{_take_profit_text(a['take_profit'])}** | 仅展示策略明确给出的目标，不推测止盈价 |")
+        lines.append(
+            f"| 止盈计划 | **{_take_profit_text(a['take_profit'], a['take_profit_mode'], a['take_profit_rule'])}** "
+            "| 固定目标可计算风险收益比；动态/条件退出只展示真实规则 |"
+        )
         lines.append(f"| 信号强度 | **{a['signal_strength']}** | 基于审计结论、验证夏普和综合排名 |")
         lines.append(f"| 仓位 | **{a['position_pct']*100:.1f}%** 账户权益 | {a['position_cap_reason']} |")
         lines.append(f"| 账户风险 | **{a_account_risk:.2f}%** 净值 | 若触发止损，按仓位估算的组合层面亏损 |")
@@ -1068,15 +1119,18 @@ def _build_plan_markdown(
         lines.append("|------|:------:|:------:|")
         lines.append(f"| 入场价 | ${c['entry']:.2f} | ${a['entry']:.2f} |")
         lines.append(f"| 止损 | ${c['stop_loss']:.2f} (风险{_loss_pct(c['entry'], c['stop_loss']):.1f}%) | ${a['stop_loss']:.2f} (风险{_loss_pct(a['entry'], a['stop_loss']):.1f}%) |")
-        lines.append(f"| 止盈目标 | {_take_profit_text(c['take_profit'])} | {_take_profit_text(a['take_profit'])} |")
+        lines.append(
+            f"| 止盈计划 | {_take_profit_text(c['take_profit'], c['take_profit_mode'], c['take_profit_rule'])} | "
+            f"{_take_profit_text(a['take_profit'], a['take_profit_mode'], a['take_profit_rule'])} |"
+        )
         lines.append(f"| 仓位 | {c['position_pct']*100:.1f}% | {a['position_pct']*100:.1f}% |")
         c_total_risk = c["max_loss_amount"] / plan.account_equity * 100 if plan.account_equity > 0 else 0.0
         a_total_risk = a["max_loss_amount"] / plan.account_equity * 100 if plan.account_equity > 0 else 0.0
         lines.append(f"| 账户风险 | {c_total_risk:.2f}% | {a_total_risk:.2f}% |")
         lines.append(f"| 最大亏损 | ${c['max_loss_amount']:,.0f} | ${a['max_loss_amount']:,.0f} |")
         lines.append(
-            f"| 风险收益比 | {_risk_reward_text(c['entry'], c['stop_loss'], c['take_profit'])} | "
-            f"{_risk_reward_text(a['entry'], a['stop_loss'], a['take_profit'])} |"
+            f"| 风险收益比 | {_risk_reward_text(c['entry'], c['stop_loss'], c['take_profit'], c['take_profit_mode'])} | "
+            f"{_risk_reward_text(a['entry'], a['stop_loss'], a['take_profit'], a['take_profit_mode'])} |"
         )
         lines.append("")
 
@@ -1116,17 +1170,28 @@ def _loss_pct(entry: float, stop_loss: float) -> float:
     return max((entry - stop_loss) / entry * 100, 0.0)
 
 
-def _take_profit_text(take_profit: float) -> str:
+def _take_profit_text(take_profit: float, mode: str = "none", rule: str = "") -> str:
     if take_profit and np.isfinite(take_profit) and take_profit > 0:
-        return f"${take_profit:.2f}"
-    return "未设定"
+        return f"固定目标 ${take_profit:.2f}" + (f"；{rule}" if rule else "")
+    clean_rule = str(rule or "").replace("|", "/")
+    if mode == "dynamic":
+        return f"动态止盈：{clean_rule or '随价格和波动率更新'}"
+    if mode == "conditional":
+        return f"条件止盈：{clean_rule or '满足策略退出条件时执行'}"
+    return clean_rule or "无主动止盈，仅止损/时间退出"
 
 
-def _risk_reward_text(entry: float, stop_loss: float, take_profit: float) -> str:
+def _risk_reward_text(
+    entry: float, stop_loss: float, take_profit: float, mode: str = "none",
+) -> str:
     risk = entry - stop_loss
     reward = take_profit - entry
     if entry <= 0 or risk <= 0 or not np.isfinite(take_profit) or reward <= 0:
-        return "不可量化（未设止盈）"
+        if mode == "dynamic":
+            return "不可固定量化（动态止盈）"
+        if mode == "conditional":
+            return "不可固定量化（条件退出）"
+        return "不可量化（无主动止盈）"
     return f"1:{reward / risk:.2f}"
 
 
@@ -1195,6 +1260,10 @@ def run_signal_check(
     Returns:
         (ranked_signals, operation_plan)
     """
+    variants = [
+        variant for variant in (variants or [])
+        if getattr(getattr(variant, "strategy", None), "live_signal_enabled", True)
+    ]
     if not variants:
         return [], None
 

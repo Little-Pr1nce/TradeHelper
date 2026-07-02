@@ -17,6 +17,8 @@ from core.signal_check import (
     generate_operation_plan,
     rank_signals,
     run_signal_check,
+    select_actionable_sell_signals,
+    select_signal_family_representatives,
 )
 from core.data_quality import evaluate_data_quality
 from strategies.base import BaseExecutionStrategy, Order, Position
@@ -24,6 +26,8 @@ from strategies.base import BaseExecutionStrategy, Order, Position
 
 class FixedBuyStrategy(BaseExecutionStrategy):
     suitable_regimes = []
+    take_profit_mode = "dynamic"
+    take_profit_rule = "最高收盘价减2倍ATR"
 
     @property
     def name(self):
@@ -428,7 +432,21 @@ def test_missing_take_profit_is_reported_as_unquantifiable():
     )
     plan = generate_operation_plan([signal], current_price=100.0, df=_df())
 
-    assert "不可量化（未设止盈）" in plan.markdown
+    assert "无主动止盈，仅止损/时间退出" in plan.markdown
+    assert "不可量化（无主动止盈）" in plan.markdown
+
+
+def test_dynamic_take_profit_rule_flows_into_signal_and_plan():
+    signals = check_signals(_df(), [Variant()], "US", initial_capital=100000.0)
+
+    assert signals[0].take_profit == 0.0
+    assert signals[0].take_profit_mode == "dynamic"
+    assert signals[0].take_profit_rule == "最高收盘价减2倍ATR"
+    assert signals[0].to_dict()["take_profit_mode"] == "dynamic"
+
+    plan = generate_operation_plan(signals, current_price=100.0, df=_df())
+    assert "动态止盈：最高收盘价减2倍ATR" in plan.markdown
+    assert "不可固定量化（动态止盈）" in plan.markdown
 
 
 def test_single_ordinary_strategy_exit_is_reported_as_conflict_not_global_sell():
@@ -462,6 +480,33 @@ def test_same_trigger_price_explains_risk_budget_difference():
     assert "激进性由较高仓位" in plan.markdown
 
 
+def test_execution_plan_keeps_one_representative_per_strategy_family():
+    signals = [
+        SignalResult("A", "趋势A", "A", "buy", strategy_family="trend_following", rank_score=90),
+        SignalResult("H", "趋势H", "H", "buy", strategy_family="trend_following", rank_score=80),
+        SignalResult("B", "均值B", "B", "buy", strategy_family="mean_reversion", rank_score=70),
+    ]
+
+    selected = select_signal_family_representatives(signals)
+
+    assert [s.base_key for s in selected] == ["A", "B"]
+
+
+def test_same_family_sell_signals_do_not_create_false_consensus():
+    signals = [
+        SignalResult(
+            "A", "趋势A", "A", "sell", strategy_family="trend_following",
+            execution_level="A",
+        ),
+        SignalResult(
+            "H", "趋势H", "H", "sell", strategy_family="trend_following",
+            execution_level="A",
+        ),
+    ]
+
+    assert select_actionable_sell_signals(signals) == []
+
+
 if __name__ == "__main__":
     test_check_signals_position_pct_comes_from_order_shares()
     test_check_signals_can_use_real_account_equity()
@@ -481,6 +526,9 @@ if __name__ == "__main__":
     test_signal_rank_does_not_depend_on_reason_length()
     test_existing_concentration_can_block_additional_position()
     test_missing_take_profit_is_reported_as_unquantifiable()
+    test_dynamic_take_profit_rule_flows_into_signal_and_plan()
     test_single_ordinary_strategy_exit_is_reported_as_conflict_not_global_sell()
     test_same_trigger_price_explains_risk_budget_difference()
-    print("20/20 passed")
+    test_execution_plan_keeps_one_representative_per_strategy_family()
+    test_same_family_sell_signals_do_not_create_false_consensus()
+    print("23/23 passed")

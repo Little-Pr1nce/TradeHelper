@@ -134,9 +134,11 @@ def test_auto_tuned_params_can_recover_demoted_strategy():
         "A_v2": {
             "pass_oos": True,
             "avg_oos_return": 0.04,
+            "avg_oos_excess_return": 0.02,
             "avg_oos_sharpe": 0.8,
             "oos_trades": 6,
             "selected_windows": 2,
+            "positive_excess_windows": 2,
         }
     }
     _update_per_stock_params(
@@ -161,7 +163,21 @@ def test_auto_tuned_params_can_recover_demoted_strategy():
         audit_entries=[AuditEntry("A_v2", 1.25)],
         allowed_labels={"A_v2"},
         walk_forward=wf,
-        data_end="2026-02-02",
+        data_end="2026-02-10",
+    )
+
+    second = db.get_best_params("AAPL", "A")
+    assert second["source"] == "demoted"
+
+    _update_per_stock_params(
+        db=db,
+        stock_code="AAPL",
+        variants=[variant],
+        bt_results={},
+        audit_entries=[AuditEntry("A_v2", 1.25)],
+        allowed_labels={"A_v2"},
+        walk_forward=wf,
+        data_end="2026-02-25",
     )
 
     best = db.get_best_params("AAPL", "A")
@@ -176,17 +192,21 @@ def test_promoted_candidate_rolls_back_when_health_demotes():
     wf = {
         "pass_oos": True,
         "avg_oos_return": 0.03,
+        "avg_oos_excess_return": 0.02,
         "avg_oos_sharpe": 0.7,
         "oos_trades": 5,
         "selected_windows": 2,
+        "positive_excess_windows": 2,
     }
     db.record_strategy_param_candidate(
         stock_code="AAPL", strategy_key="A", params_json=params_json,
         test_sharpe=1.1, walk_forward=wf, data_end="2026-01-31",
+        min_confirmations=2, min_paper_days=0,
     )
     promoted = db.record_strategy_param_candidate(
         stock_code="AAPL", strategy_key="A", params_json=params_json,
         test_sharpe=1.1, walk_forward=wf, data_end="2026-02-02",
+        min_confirmations=2, min_paper_days=0,
     )
     assert promoted["promoted"] is True
 
@@ -226,6 +246,67 @@ def test_demoted_strategy_gets_conservative_recovery_variants():
     assert any(v.params.get("exit_pct") == 0.60 for v in recovery)
 
 
+def test_positive_absolute_return_cannot_promote_when_losing_to_benchmark():
+    db = _fresh_db()
+    lifecycle = db.record_strategy_param_candidate(
+        stock_code="AAPL",
+        strategy_key="A",
+        params_json='{"entry_pct": 0.8}',
+        test_sharpe=1.2,
+        walk_forward={
+            "pass_oos": True,
+            "avg_oos_return": 0.03,
+            "avg_oos_excess_return": -0.02,
+            "avg_oos_sharpe": 0.8,
+            "oos_trades": 8,
+            "selected_windows": 3,
+            "positive_excess_windows": 1,
+        },
+        data_end="2026-03-31",
+    )
+
+    assert lifecycle["eligible"] is False
+    assert lifecycle["promoted"] is False
+    row = db.get_strategy_param_candidates("AAPL", "A")[0]
+    assert row["status"] == "rejected"
+    assert "基准超额收益" in row["reason"]
+
+
+def test_candidate_failure_resets_shadow_confirmations():
+    db = _fresh_db()
+    passing = {
+        "pass_oos": True,
+        "avg_oos_return": 0.03,
+        "avg_oos_excess_return": 0.02,
+        "avg_oos_sharpe": 0.8,
+        "oos_trades": 8,
+        "selected_windows": 3,
+        "positive_excess_windows": 2,
+    }
+    failing = dict(passing, pass_oos=False, avg_oos_excess_return=-0.01)
+    common = {
+        "stock_code": "AAPL",
+        "strategy_key": "A",
+        "params_json": '{"entry_pct": 0.8}',
+        "test_sharpe": 1.2,
+    }
+
+    first = db.record_strategy_param_candidate(
+        **common, walk_forward=passing, data_end="2026-01-01",
+    )
+    failed = db.record_strategy_param_candidate(
+        **common, walk_forward=failing, data_end="2026-01-15",
+    )
+    restarted = db.record_strategy_param_candidate(
+        **common, walk_forward=passing, data_end="2026-02-15",
+    )
+
+    assert first["confirmations"] == 1
+    assert failed["confirmations"] == 0
+    assert restarted["confirmations"] == 1
+    assert restarted["paper_days"] == 0
+
+
 if __name__ == "__main__":
     test_variant_memory_cache_key_is_stock_scoped()
     test_backtest_cache_context_separates_capital_and_alpha()
@@ -235,4 +316,6 @@ if __name__ == "__main__":
     test_promoted_candidate_rolls_back_when_health_demotes()
     test_deep_optimization_run_state_prevents_duplicate_jobs()
     test_demoted_strategy_gets_conservative_recovery_variants()
-    print("8/8 passed")
+    test_positive_absolute_return_cannot_promote_when_losing_to_benchmark()
+    test_candidate_failure_resets_shadow_confirmations()
+    print("10/10 passed")

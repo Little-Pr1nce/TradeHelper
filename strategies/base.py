@@ -30,6 +30,7 @@ class Order:
     price_type: str = "open" # 成交价类型（"open" = T+1 开盘价）
     stop_loss: float = 0.0   # 硬止损价格（买入时计算）
     take_profit: float = float("inf")  # 止盈价格
+    take_profit_pct: float = 0.0  # 相对实际成交价的固定止盈比例
     reason: str = ""         # 触发原因（调试用）
     # 策略级覆盖 Broker 默认值（0 = 使用 Broker 默认值）
     time_stop_days: int = 0       # 覆盖时间止损天数（0=使用默认10天）
@@ -51,6 +52,9 @@ class StrategyDecision:
     trigger_price: float = 0.0
     stop_loss: float = 0.0
     take_profit: float = 0.0
+    take_profit_pct: float = 0.0
+    take_profit_mode: str = "none"  # fixed / dynamic / conditional / none
+    take_profit_rule: str = ""
     max_loss_amount: float = 0.0
     position_pct: float = 0.0
     invalidation: str = ""
@@ -69,6 +73,9 @@ class StrategyDecision:
             "trigger_price": round(float(self.trigger_price or 0), 4),
             "stop_loss": round(float(self.stop_loss or 0), 4),
             "take_profit": round(float(self.take_profit or 0), 4),
+            "take_profit_pct": round(float(self.take_profit_pct or 0), 4),
+            "take_profit_mode": self.take_profit_mode,
+            "take_profit_rule": self.take_profit_rule,
             "max_loss_amount": round(float(self.max_loss_amount or 0), 2),
             "position_pct": round(float(self.position_pct or 0), 4),
             "invalidation": self.invalidation,
@@ -105,6 +112,7 @@ class Position:
     entry_price: float = 0.0
     highest_close: float = 0.0   # 持仓期间最高收盘价（移动止盈用）
     stop_loss: float = 0.0       # 当前硬止损价
+    take_profit: float = 0.0     # 固定止盈价；动态/条件止盈由策略每日重算
     added_position: bool = False # 是否已加仓（策略C用）
     additions_count: int = 0     # 已加仓次数（策略F用）
     # 策略级 Broker 参数覆盖（0 = 使用默认值）
@@ -139,6 +147,11 @@ class BaseExecutionStrategy(ABC):
     suitable_regimes: list[str] = []
     # 覆盖策略由自身声明加载范围，避免管道维护另一份策略编号清单。
     overlay_scope: str = ""  # "always" / "position" / ""
+    # 回测对照策略可以参与历史比较，但不得进入当前可执行信号路径。
+    live_signal_enabled: bool = True
+    strategy_family: str = ""
+    take_profit_mode: str = "none"
+    take_profit_rule: str = "未定义主动盈利退出，仅使用止损或时间退出"
 
     def generate_orders(
         self, df: pd.DataFrame, context: StrategyContext
@@ -191,6 +204,12 @@ class BaseExecutionStrategy(ABC):
         order = next((o for o in orders if o.shares > 0), None)
         if order:
             price = _latest_close(df)
+            fixed_take_profit = (
+                float(order.take_profit)
+                if np.isfinite(order.take_profit) and order.take_profit > 0 else
+                price * (1 + float(order.take_profit_pct or 0.0))
+                if price > 0 and order.take_profit_pct > 0 else 0.0
+            )
             position_value = order.shares * price if price > 0 else 0.0
             position_pct = position_value / context.equity if context.equity > 0 else 0.0
             loss_amount = 0.0
@@ -203,7 +222,15 @@ class BaseExecutionStrategy(ABC):
                 price_type=order.price_type,
                 trigger_price=price,
                 stop_loss=order.stop_loss,
-                take_profit=order.take_profit if np.isfinite(order.take_profit) else 0.0,
+                take_profit=fixed_take_profit,
+                take_profit_pct=float(order.take_profit_pct or 0.0),
+                take_profit_mode="fixed" if fixed_take_profit > price > 0 else self.take_profit_mode,
+                take_profit_rule=(
+                    f"达到入场价上方 {order.take_profit_pct:.0%} 的固定目标"
+                    if order.take_profit_pct > 0 else
+                    f"固定目标价 {fixed_take_profit:.2f}"
+                    if fixed_take_profit > price > 0 else self.take_profit_rule
+                ),
                 max_loss_amount=loss_amount,
                 position_pct=position_pct,
                 invalidation=(
@@ -234,6 +261,9 @@ class BaseExecutionStrategy(ABC):
         shares: int,
         stop_loss: float = 0.0,
         take_profit: float = 0.0,
+        take_profit_pct: float = 0.0,
+        take_profit_mode: str = "",
+        take_profit_rule: str = "",
         reason: str = "",
         execution_level: str = "A",
         time_stop_days: int = 0,
@@ -246,13 +276,28 @@ class BaseExecutionStrategy(ABC):
         max_loss = 0.0
         if action == "buy" and price > 0 and stop_loss > 0:
             max_loss = max(price - stop_loss, 0.0) * shares
+        resolved_take_profit = float(take_profit or 0.0)
+        if action == "buy" and resolved_take_profit <= 0 and take_profit_pct > 0 and price > 0:
+            resolved_take_profit = price * (1 + take_profit_pct)
+        resolved_mode = take_profit_mode or self.take_profit_mode
+        resolved_rule = take_profit_rule or self.take_profit_rule
+        if action == "buy" and resolved_take_profit > price > 0:
+            resolved_mode = "fixed"
+            if not take_profit_rule:
+                resolved_rule = (
+                    f"达到入场价上方 {take_profit_pct:.0%} 的固定目标"
+                    if take_profit_pct > 0 else f"固定目标价 {resolved_take_profit:.2f}"
+                )
         return StrategyDecision(
             action=action,
             execution_level=execution_level,
             shares=shares,
             trigger_price=price,
             stop_loss=stop_loss,
-            take_profit=take_profit if np.isfinite(take_profit) else 0.0,
+            take_profit=resolved_take_profit if np.isfinite(resolved_take_profit) else 0.0,
+            take_profit_pct=max(float(take_profit_pct or 0.0), 0.0),
+            take_profit_mode=resolved_mode if action == "buy" else "none",
+            take_profit_rule=resolved_rule if action == "buy" else "",
             max_loss_amount=max_loss,
             position_pct=position_pct,
             invalidation=(
@@ -322,6 +367,7 @@ def decision_to_orders(decision: StrategyDecision, context: StrategyContext) -> 
         price_type=decision.price_type or "open",
         stop_loss=float(decision.stop_loss or 0.0),
         take_profit=float(decision.take_profit or float("inf")) if decision.take_profit else float("inf"),
+        take_profit_pct=float(decision.take_profit_pct or 0.0),
         reason=decision.reason,
         time_stop_days=int(decision.time_stop_days or 0),
         hard_stop_pct=float(decision.hard_stop_pct or 0.0),

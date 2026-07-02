@@ -200,6 +200,35 @@ class TestBroker:
         assert "硬止损" in fills[0].reason
         assert self.account.position is None
 
+    def test_fixed_take_profit_uses_actual_fill_price_and_executes(self):
+        self.broker = Broker(BrokerConfig(slippage=0.0))
+        buy_bar = pd.Series({
+            "date": "2024-01-02", "open": 100.0, "high": 101.0,
+            "low": 99.0, "close": 100.0, "volume": 10000000,
+        })
+        order = Order(
+            date="2024-01-01", action="buy", shares=500,
+            stop_loss=92.0, take_profit_pct=0.10,
+        )
+        self.broker.execute_buy(order, buy_bar, self.account, prev_close=99.0)
+
+        assert self.account.position is not None
+        assert is_close(self.account.position.take_profit, 110.0, rel=0.0001)
+
+        target_bar = pd.Series({
+            "date": "2024-01-03", "open": 105.0, "high": 112.0,
+            "low": 103.0, "close": 111.0, "volume": 10000000,
+        })
+        fills = self.broker.check_intraday_stops(
+            target_bar, self.account, prev_close=100.0,
+            current_date="2024-01-03",
+        )
+
+        assert len(fills) == 1
+        assert fills[0].price == 110.0
+        assert "固定止盈触发" in fills[0].reason
+        assert self.account.position is None
+
     def test_gap_down_stop_fills_at_open_not_stop_price(self):
         """跳空跌破止损时不能乐观地按止损线成交。"""
         self.account.position = Position(

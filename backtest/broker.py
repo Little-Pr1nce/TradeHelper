@@ -173,6 +173,12 @@ class Broker:
             highest_close=fill_price,
             stop_loss=order.stop_loss if order.stop_loss > 0
                        else fill_price * (1 - cfg.hard_stop_pct),
+            take_profit=(
+                fill_price * (1 + order.take_profit_pct)
+                if order.take_profit_pct > 0 else
+                float(order.take_profit)
+                if np.isfinite(order.take_profit) and order.take_profit > fill_price else 0.0
+            ),
             added_position=False,
             time_stop_days=pos_time_stop,
             hard_stop_pct=pos_hard_stop,
@@ -312,6 +318,13 @@ class Broker:
             exit_price = min(open_price, pos.stop_loss)
             if open_price < pos.stop_loss:
                 exit_reason += f"；跳空按开盘价({open_price:.2f})成交"
+
+        # 固定止盈：同一根日K同时触及止损和止盈时，前面的止损优先，采用保守口径。
+        elif pos.take_profit > 0 and high >= pos.take_profit:
+            exit_reason = (
+                f"固定止盈触发 high({high:.2f}) >= take_profit({pos.take_profit:.2f})"
+            )
+            exit_price = max(open_price, pos.take_profit)
 
         # 时间止损：优先使用策略级配置，否则用 Broker 默认 10 天
         elif pos.entry_date:

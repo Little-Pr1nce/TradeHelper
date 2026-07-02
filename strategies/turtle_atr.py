@@ -41,6 +41,9 @@ class TurtleATRStrategy(DecisionFirstStrategy):
 
 
     suitable_regimes = ["trending_volatile"]
+    take_profit_mode = "conditional"
+    take_profit_rule = "收盘跌破退出通道低点或Score跌破退出阈值时平仓"
+    strategy_family = "channel_breakout"
 
     def tunable_params(self) -> list[dict]:
         return [

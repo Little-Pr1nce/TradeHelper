@@ -474,6 +474,31 @@ def test_prediction_event_migration_dedupes_before_recreating_unique_index():
     assert remaining["validated"] == 1
 
 
+def test_legacy_regex_entry_is_quarantined_on_reopen():
+    db = _fresh_db()
+    db_path = db._db_path
+    pred_id = db.insert_prediction(PredictionLog(
+        code="MU", market="US", mode="eod",
+        predict_time="2026-06-23T16:04:00", reference_date="2026-06-23",
+        direction="bearish", actual_direction="bearish",
+        predicted_price=1211.38, conservative_entry=12.0,
+        entry_mode="reference", actual_return=-0.06,
+        validated=1, validation_status="verified", validation_version=2,
+    ))
+    db.conn.close()
+    db._conn = None
+
+    reopened = Database.init(db_path)
+    row = reopened.execute(
+        "SELECT validated, validation_status FROM prediction_log WHERE id=?",
+        (pred_id,),
+    ).fetchone()
+
+    assert row["validated"] == -1
+    assert row["validation_status"] == "legacy_unverifiable"
+    assert reopened.get_prediction_stats("MU").total_predictions == 0
+
+
 if __name__ == "__main__":
     test_prediction_trade_levels_come_from_signal_check()
     test_prediction_signals_follow_current_action_not_backtest_trade()
@@ -493,4 +518,5 @@ if __name__ == "__main__":
     test_strategy_health_feedback_marks_demoted_params()
     test_sell_health_does_not_demote_entry_parameters()
     test_prediction_event_migration_dedupes_before_recreating_unique_index()
-    print("18/18 passed")
+    test_legacy_regex_entry_is_quarantined_on_reopen()
+    print("19/19 passed")

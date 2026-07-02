@@ -42,6 +42,10 @@ class TrendRiderStrategy(DecisionFirstStrategy):
     """
 
     suitable_regimes = ["trending", "trending_steady", "trending_volatile"]
+    live_signal_enabled = False
+    take_profit_mode = "dynamic"
+    take_profit_rule = "趋势基准按MA60破坏、均线死叉或高点回撤退出"
+    strategy_family = "benchmark"
 
     def __init__(
         self,

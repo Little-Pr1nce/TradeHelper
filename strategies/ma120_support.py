@@ -19,6 +19,7 @@ class MA120SupportReboundStrategy(BaseExecutionStrategy):
 
     suitable_regimes = ["ranging", "transitional"]
     overlay_scope = "always"
+    strategy_family = "support_rebound"
 
     def __init__(
         self,
@@ -109,6 +110,8 @@ class MA120SupportReboundStrategy(BaseExecutionStrategy):
                 shares=shares,
                 trigger_price=close,
                 stop_loss=stop,
+                take_profit_mode="none",
+                take_profit_rule="MA120支撑策略当前仅定义止损和20日时间退出，未定义主动止盈",
                 max_loss_amount=max_loss,
                 position_pct=position_pct,
                 invalidation=f"收盘跌破MA120的{1-self.stop_buffer:.0%}（{stop:.2f}）",

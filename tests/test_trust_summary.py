@@ -7,7 +7,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from report.prompts import build_trust_hard_summary
+from report.prompts import (
+    INTRADAY_SYSTEM_PROMPT,
+    PORTFOLIO_SYSTEM_PROMPT,
+    PREMARKET_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    build_trust_hard_summary,
+)
+from report.generator import _enforce_llm_compliance
 
 
 def test_trust_summary_blocks_on_data_quality():
@@ -80,12 +87,55 @@ def test_related_demoted_strategy_blocks_current_signal():
     assert "当前信号关联的 1 个策略已降级" in md
 
 
+def test_trust_summary_labels_current_opportunity_history_scope():
+    md = build_trust_hard_summary(
+        signal_checks=[{"signal": "buy", "execution_level": "B"}],
+        evaluation_panel={"overall": {"count": 0, "expectancy": "insufficient"}},
+        scope="美股组合",
+    )
+
+    assert "当前机会关联历史验证：0 次" in md
+    assert "- 历史验证：0 次" not in md
+
+
+def test_portfolio_prompt_forbids_unquantified_risk_reward_claims():
+    assert "风险收益比必须可计算" in PORTFOLIO_SYSTEM_PROMPT
+    assert "止损距离较近不等于风险收益比优秀" in PORTFOLIO_SYSTEM_PROMPT
+    for prompt in (SYSTEM_PROMPT, INTRADAY_SYSTEM_PROMPT, PREMARKET_SYSTEM_PROMPT):
+        assert "严格区分止盈类型" in prompt
+        assert "固定风险收益比不可量化" in prompt
+
+
+def test_llm_postprocessor_removes_duplicate_heading_and_unsupported_claims():
+    raw = """
+### 6. 研究员观察候选
+以下为候选观察。
+### 研究员观察候选
+| 股票 | LLM观察 | 依据 |
+|------|------|------|
+| NVDA | 风险收益比极佳，系统比值为 1:2.00；模型另算 1:9 | 止损较近 |
+"""
+    plan = "| 风险收益比 | 1:2.00 |"
+
+    cleaned = _enforce_llm_compliance(raw, plan)
+
+    assert cleaned.count("### 研究员观察候选") == 1
+    assert "风险收益比极佳" not in cleaned
+    assert "固定风险收益比须以代码方案" in cleaned
+    assert "1:2.00" not in cleaned
+    assert "1:9" not in cleaned
+    assert "见代码方案的确定性计算" in cleaned
+
+
 if __name__ == "__main__":
     tests = [
         test_trust_summary_blocks_on_data_quality,
         test_trust_summary_demotes_negative_expectancy,
         test_unrelated_demoted_strategy_does_not_block_current_signal,
         test_related_demoted_strategy_blocks_current_signal,
+        test_trust_summary_labels_current_opportunity_history_scope,
+        test_portfolio_prompt_forbids_unquantified_risk_reward_claims,
+        test_llm_postprocessor_removes_duplicate_heading_and_unsupported_claims,
     ]
     for test in tests:
         test()

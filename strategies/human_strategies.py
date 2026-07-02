@@ -29,6 +29,9 @@ class ChaseMomentumStrategy(DecisionFirstStrategy):
     """I: 追涨杀跌 — 新手最常见的操作：金叉就追、死叉就跑。"""
 
     suitable_regimes: list[str] = []   # 始终活跃
+    take_profit_mode = "dynamic"
+    take_profit_rule = "最高收盘价减3倍ATR；MA5下穿MA20也会退出"
+    strategy_family = "trend_following"
 
     def __init__(self):
         pass
@@ -130,6 +133,9 @@ class PickBottomStrategy(DecisionFirstStrategy):
     """J: 抄底摸顶 — 新手觉得超卖就该反弹，小赚就跑。"""
 
     suitable_regimes: list[str] = []
+    take_profit_mode = "dynamic"
+    take_profit_rule = "最高收盘价减2倍ATR；RSI进入超买区也会退出"
+    strategy_family = "mean_reversion"
 
     def __init__(self, rsi_oversold: float = 30.0, rsi_overbought: float = 70.0,
                  take_profit_pct: float = 0.10):
@@ -232,6 +238,9 @@ class HoldUntilBreakevenStrategy(DecisionFirstStrategy):
     """K: 死扛回本 — 大跌抄底，回本即卖，跌太多扛不住割肉。"""
 
     suitable_regimes: list[str] = []
+    take_profit_mode = "dynamic"
+    take_profit_rule = "盈利超过3%后启用最高收盘价减2倍ATR的移动止盈"
+    strategy_family = "mean_reversion"
 
     def __init__(self, dip_pct: float = 0.03, cut_loss_pct: float = 0.15):
         self.dip_pct = dip_pct
@@ -337,6 +346,8 @@ class TrendPullbackStrategy(DecisionFirstStrategy):
     """L: 趋势回调买入 — 老手等 MA60 上行中回踩 MA20 缩量企稳时进场。"""
 
     suitable_regimes: list[str] = []
+    take_profit_mode = "fixed"
+    strategy_family = "trend_pullback"
 
     def __init__(self, risk_budget: float = 0.50, take_profit_pct: float = 1.00):
         self.risk_budget = risk_budget
@@ -429,6 +440,7 @@ class TrendPullbackStrategy(DecisionFirstStrategy):
                     df, context, action="buy",
                     shares=shares,
                     stop_loss=round(latest_close - stop_distance, 2),
+                    take_profit_pct=self.take_profit_pct,
                     reason=(
                         f"趋势回调: MA60↑ close({latest_close:.2f})回踩MA20({latest_ma20:.2f}) "
                         f"放量企稳 vol={latest_vol:.0f}"
@@ -475,6 +487,8 @@ class KeyReversalStrategy(DecisionFirstStrategy):
     """M: 关键位反转 — 价格触及支撑位时出现放量弹簧形态，紧止损博弈反转。"""
 
     suitable_regimes: list[str] = []
+    take_profit_mode = "fixed"
+    strategy_family = "mean_reversion"
 
     def __init__(self, risk_budget: float = 0.40, atr_stop_mult: float = 1.5,
                  take_profit_pct: float = 0.50, max_hold_days: int = 30):
@@ -580,6 +594,7 @@ class KeyReversalStrategy(DecisionFirstStrategy):
                     df, context, action="buy",
                     shares=shares,
                     stop_loss=round(latest_close - stop_distance, 2),
+                    take_profit_pct=self.take_profit_pct,
                     reason=(
                         f"关键反转: 支撑{support_level:.2f}附近 弹簧阳线 "
                         f"vol={latest_vol:.0f}>{avg_vol_20:.0f}"
@@ -624,6 +639,9 @@ class MACompressionBreakoutStrategy(DecisionFirstStrategy):
     """N: 均线粘合突破 — 识别低波动压缩区，放量突破时进场预判大波动。"""
 
     suitable_regimes: list[str] = []
+    take_profit_mode = "dynamic"
+    take_profit_rule = "最高收盘价减策略ATR倍数；跌破MA20或到期也会退出"
+    strategy_family = "volatility_breakout"
 
     def __init__(self, risk_budget: float = 0.50, atr_trail_mult: float = 3.0,
                  max_hold_days: int = 60):

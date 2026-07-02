@@ -11,6 +11,62 @@ from datetime import datetime
 import pandas as pd
 
 
+def evaluate_extended_liquidity_proxy(quote: dict | None, mode: str) -> dict:
+    """在没有 Level 2 深度时，用可验证的延伸时段字段约束仓位。
+
+    买一/卖一只能代表 top-of-book，不能冒充完整深度；若连最优报价也
+    不可得，则退化为成交量代理或纯价格代理，并进一步压缩新开仓。
+    """
+    if mode != "pre":
+        return {
+            "applied": False,
+            "proxy": "not_required",
+            "position_multiplier": 1.0,
+            "spread_pct": None,
+            "warning": "",
+        }
+
+    data = quote or {}
+    bid = float(data.get("bid", 0.0) or 0.0)
+    ask = float(data.get("ask", 0.0) or 0.0)
+    volume = float(data.get("volume", 0.0) or 0.0)
+    if bid > 0 and ask >= bid:
+        mid = (bid + ask) / 2
+        spread_pct = (ask - bid) / mid if mid > 0 else None
+        if spread_pct is not None and spread_pct <= 0.002:
+            multiplier = 0.75
+        elif spread_pct is not None and spread_pct <= 0.005:
+            multiplier = 0.50
+        else:
+            multiplier = 0.25
+        return {
+            "applied": True,
+            "proxy": "top_of_book",
+            "position_multiplier": multiplier,
+            "spread_pct": spread_pct,
+            "warning": (
+                f"延伸时段仅有买一/卖一，非完整盘口深度；当前价差"
+                f"{float(spread_pct or 0):.2%}，新开仓按{multiplier:.0%}上限处理"
+            ),
+        }
+
+    if volume > 0:
+        return {
+            "applied": True,
+            "proxy": "volume",
+            "position_multiplier": 0.50,
+            "spread_pct": None,
+            "warning": "延伸时段无盘口深度和买卖价差，使用报价新鲜度/成交量代理，新开仓按50%上限处理",
+        }
+    return {
+        "applied": True,
+        "proxy": "price_only",
+        "position_multiplier": 0.25,
+        "spread_pct": None,
+        "warning": "延伸时段仅有最新价，无盘口深度、价差和有效成交量，新开仓按25%上限处理",
+    }
+
+
 @dataclass
 class DataQualityReport:
     score: float = 100.0
@@ -144,15 +200,32 @@ def evaluate_data_quality(
         report.missing.append("新闻数据缺失")
     if not fundamental_data:
         report.missing.append("基本面数据缺失")
-    if market == "US" and not depth_available:
-        report.missing.append("盘口/深度数据缺失")
-
     quote_quality = realtime_quote_quality or {}
+    if market == "US" and not depth_available:
+        if quote_quality.get("liquidity_proxy"):
+            report.missing.append("Level 2盘口深度缺失（已启用延伸时段流动性代理）")
+        else:
+            report.missing.append("盘口/深度数据缺失")
     if quote_quality.get("required"):
         report.issues.extend(str(x) for x in (quote_quality.get("issues") or []))
         report.warnings.extend(str(x) for x in (quote_quality.get("warnings") or []))
 
-    return _finalize(report)
+    finalized = _finalize(report)
+    proxy_multiplier = quote_quality.get("liquidity_position_multiplier")
+    if (
+        proxy_multiplier is not None
+        and not finalized.block_new_entries
+        and float(proxy_multiplier) < finalized.max_position_multiplier
+    ):
+        finalized.max_position_multiplier = max(0.0, float(proxy_multiplier))
+        finalized.status = "degraded"
+        finalized.action = "reduce_position"
+        proxy_name = str(quote_quality.get("liquidity_proxy") or "unknown")
+        finalized.notes.append(
+            f"延伸时段流动性代理={proxy_name}，仓位上限按"
+            f"{finalized.max_position_multiplier:.0%}执行"
+        )
+    return finalized
 
 
 def _finalize(report: DataQualityReport) -> DataQualityReport:

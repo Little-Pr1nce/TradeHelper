@@ -14,7 +14,9 @@ from core.pipeline import run_pipeline
 from core.strategy_pool import StrategyVariant
 from indicators.technical import calc_all_indicators
 from strategies import get_available_strategies, get_execution_strategy
-from strategies.base import BaseExecutionStrategy, Position, StrategyContext
+from strategies.base import (
+    BaseExecutionStrategy, Position, StrategyContext, decision_to_orders,
+)
 
 
 def _df_for_support() -> pd.DataFrame:
@@ -199,6 +201,26 @@ def test_decision_first_strategy_uses_default_order_conversion():
     assert orders[0].stop_loss == decision.stop_loss
 
 
+def test_fixed_take_profit_survives_decision_to_order_conversion():
+    strategy = get_execution_strategy("M", take_profit_pct=0.50)
+    df = _df_for_support()
+    ctx = StrategyContext(
+        date="2026-01-28", equity=100000, cash=100000,
+        position=Position(), market="US",
+    )
+    decision = strategy._execution_decision(
+        df, ctx, action="buy", shares=10, stop_loss=90.0,
+        take_profit_pct=strategy.take_profit_pct,
+    )
+    orders = decision_to_orders(decision, ctx)
+
+    assert decision.take_profit_mode == "fixed"
+    assert decision.take_profit == float(df["close"].iloc[-1]) * 1.50
+    assert decision.take_profit_rule == "达到入场价上方 50% 的固定目标"
+    assert orders[0].take_profit_pct == 0.50
+    assert orders[0].take_profit == decision.take_profit
+
+
 def test_signal_check_carries_decision_level_and_conditions():
     df = _df_for_profit_lock()
     strategy = get_execution_strategy("Q")
@@ -318,6 +340,24 @@ def test_all_registered_strategies_use_decision_first_public_path():
         assert strategy_type.diagnose_no_signal is not BaseExecutionStrategy.diagnose_no_signal, key
 
 
+def test_benchmark_strategy_is_kept_out_of_live_signal_path():
+    strategy = get_execution_strategy("O")
+    variant = StrategyVariant(
+        base_key="O", variant_label="O", strategy=strategy,
+        params={}, is_default=True,
+    )
+
+    ranked, plan = run_signal_check(
+        _df_for_support(), [variant], "US",
+        account_equity=100000,
+        current_position=Position(),
+    )
+
+    assert strategy.live_signal_enabled is False
+    assert ranked == []
+    assert plan is None
+
+
 def test_human_strategies_expose_native_missing_conditions():
     df = _df_for_support()
     df.loc[:, "open"] = 100.0
@@ -357,11 +397,13 @@ if __name__ == "__main__":
         test_pullback_failed_exit_generates_sell_decision,
         test_conditional_trigger_strategy_outputs_plan_without_order,
         test_decision_first_strategy_uses_default_order_conversion,
+        test_fixed_take_profit_survives_decision_to_order_conversion,
         test_signal_check_carries_decision_level_and_conditions,
         test_pipeline_injects_current_position_overlay_strategies,
         test_factor_only_pipeline_skips_backtests_and_signals,
         test_pipeline_future_mutation_does_not_change_past_scores,
         test_all_registered_strategies_use_decision_first_public_path,
+        test_benchmark_strategy_is_kept_out_of_live_signal_path,
         test_human_strategies_expose_native_missing_conditions,
         test_overlay_strategies_expose_diagnostic_interface,
     ]

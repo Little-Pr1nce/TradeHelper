@@ -24,6 +24,7 @@ class ProfitLockAfterHighStrategy(BaseExecutionStrategy):
 
     suitable_regimes: list[str] = []
     overlay_scope = "position"
+    strategy_family = "profit_lock"
 
     def __init__(
         self,

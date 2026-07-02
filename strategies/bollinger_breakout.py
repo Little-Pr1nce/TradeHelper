@@ -35,6 +35,9 @@ class BollingerBreakoutStrategy(DecisionFirstStrategy):
 
 
     suitable_regimes = ["ranging"]
+    take_profit_mode = "conditional"
+    take_profit_rule = "收盘跌破布林中轨或Score跌破退出阈值时平仓"
+    strategy_family = "volatility_breakout"
 
     def tunable_params(self) -> list[dict]:
         return [

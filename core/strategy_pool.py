@@ -469,8 +469,10 @@ def _run_walk_forward_selection(
             "base_key": v.base_key,
             "selected_windows": 0,
             "oos_returns": [],
+            "oos_excess_returns": [],
             "oos_sharpes": [],
             "oos_trades": 0,
+            "positive_excess_windows": 0,
             "pass_oos": False,
         }
         for v in variants
@@ -508,6 +510,16 @@ def _run_walk_forward_selection(
                 st = stats[selected.variant_label]
                 st["selected_windows"] += 1
                 st["oos_returns"].append(float(oos.total_return))
+                benchmark_return = 0.0
+                if len(test_df) >= 2:
+                    first_price = float(test_df["open"].iloc[0] or 0.0)
+                    last_price = float(test_df["close"].iloc[-1] or 0.0)
+                    if first_price > 0 and last_price > 0:
+                        benchmark_return = last_price / first_price - 1.0
+                excess_return = float(oos.total_return) - benchmark_return
+                st["oos_excess_returns"].append(excess_return)
+                if excess_return > 0:
+                    st["positive_excess_windows"] += 1
                 st["oos_sharpes"].append(float(oos.sharpe_ratio))
                 st["oos_trades"] += int(oos.total_trades)
             except Exception as e:
@@ -522,16 +534,28 @@ def _run_walk_forward_selection(
     for label, st in stats.items():
         selected = int(st["selected_windows"])
         returns = st["oos_returns"]
+        excess_returns = st["oos_excess_returns"]
         sharpes = st["oos_sharpes"]
         avg_return = float(np.mean(returns)) if returns else 0.0
+        avg_excess_return = float(np.mean(excess_returns)) if excess_returns else 0.0
         avg_sharpe = float(np.mean(sharpes)) if sharpes else 0.0
-        pass_oos = selected > 0 and st["oos_trades"] > 0 and avg_return > 0 and avg_sharpe >= 0
+        required_positive = max(1, (selected + 1) // 2)
+        pass_oos = (
+            selected > 0
+            and st["oos_trades"] > 0
+            and avg_return > 0
+            and avg_excess_return > 0
+            and st["positive_excess_windows"] >= required_positive
+            and avg_sharpe >= 0
+        )
         result[label] = {
             "base_key": st["base_key"],
             "selected_windows": selected,
             "avg_oos_return": avg_return,
+            "avg_oos_excess_return": avg_excess_return,
             "avg_oos_sharpe": avg_sharpe,
             "oos_trades": st["oos_trades"],
+            "positive_excess_windows": st["positive_excess_windows"],
             "pass_oos": pass_oos,
         }
 

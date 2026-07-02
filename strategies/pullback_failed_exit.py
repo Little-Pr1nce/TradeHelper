@@ -20,6 +20,7 @@ class PullbackFailedExitStrategy(BaseExecutionStrategy):
 
     suitable_regimes: list[str] = []
     overlay_scope = "position"
+    strategy_family = "pullback_exit"
 
     def __init__(
         self,

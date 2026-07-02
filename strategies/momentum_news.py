@@ -27,7 +27,10 @@ logger = logging.getLogger(__name__)
 class MomentumNewsStrategy(DecisionFirstStrategy):
     """动量突破+新闻共振确认。"""
 
+    strategy_family = "momentum_breakout"
     suitable_regimes = []  # 全行情通用
+    take_profit_mode = "dynamic"
+    take_profit_rule = "最高收盘价减去策略ATR倍数；Score转弱也会退出"
 
     def tunable_params(self) -> list[dict]:
         return [

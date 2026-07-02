@@ -43,7 +43,8 @@ orders = decision_to_orders(decision, context)
 | `action` | `buy/sell/hold/watch/invalid` |
 | `execution_level` | A 可执行、B 小仓、C 观察、D 驳回 |
 | `trigger_price` | 触发或参考价格 |
-| `stop_loss/take_profit` | 止损和止盈；没有止盈时不伪造风险收益比 |
+| `stop_loss/take_profit` | 止损和固定止盈目标 |
+| `take_profit_mode/rule` | `fixed/dynamic/conditional/none` 及对应的真实退出规则 |
 | `max_loss_amount` | 按账户权益与持股计算的计划最大亏损 |
 | `position_pct` | 建议仓位占真实账户权益比例 |
 | `invalidation` | 计划失效条件 |
@@ -160,12 +161,14 @@ open < stop                  -> open 成交
 
 ```text
 candidate
-  -> confirmed across different data_end windows
+  -> positive absolute and benchmark-excess OOS return
+  -> confirmed across 3 different data_end windows
+  -> paper (at least 20 calendar days)
   -> promoted
   -> replaced / rolled_back
 ```
 
-晋升要求同时满足样本外收益、样本外夏普、交易次数和跨窗口确认。正式参数存入 `per_stock_params`。
+晋升要求同时满足正样本外绝对收益、正买入持有基准超额收益、至少半数窗口跑赢基准、样本外夏普、交易次数、3 个不同截止日确认和至少 20 天影子观察。候选中途失效会清零确认次数和观察时钟；正式参数存入 `per_stock_params`。
 
 当历史健康度转为负期望时：
 
@@ -206,7 +209,7 @@ venv/bin/python tests/test_scoring.py
 venv/bin/python -m pytest tests/ -q
 ```
 
-当前全项目基线为 187 个测试通过。回测相关回归覆盖：
+当前全项目基线为 204 个测试通过。回测相关回归覆盖：
 
 - T/T+1 时序和无未来函数。
 - Decision 到 Order 的统一转换。

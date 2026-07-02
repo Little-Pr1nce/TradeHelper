@@ -257,10 +257,13 @@ CREATE TABLE IF NOT EXISTS strategy_param_candidates (
     params_json TEXT NOT NULL DEFAULT '{}',
     test_sharpe REAL DEFAULT 0.0,
     avg_oos_return REAL DEFAULT 0.0,
+    avg_oos_excess_return REAL DEFAULT 0.0,
     avg_oos_sharpe REAL DEFAULT 0.0,
     oos_trades INTEGER DEFAULT 0,
     selected_windows INTEGER DEFAULT 0,
+    positive_excess_windows INTEGER DEFAULT 0,
     confirmations INTEGER DEFAULT 0,
+    first_eligible_data_end TEXT DEFAULT '',
     last_data_end TEXT DEFAULT '',
     status TEXT NOT NULL DEFAULT 'candidate',
     reason TEXT DEFAULT '',
@@ -528,6 +531,20 @@ class Database:
                WHERE signal_action='sell'
                  AND (exit_review_status IS NULL OR exit_review_status='not_applicable')"""
         )
+        # 旧版会从自由文本中正则提取任意数字作为“入场价”，同时仍把
+        # entry_mode 标为 reference。这类记录无法证明真实入场条件，必须
+        # 保留审计痕迹但退出正确率、收益和策略健康度学习。
+        conn.execute(
+            """UPDATE prediction_log
+               SET validated=-1,
+                   validation_status='legacy_unverifiable',
+                   exit_review_status=CASE
+                       WHEN signal_action='sell' THEN 'unsupported'
+                       ELSE exit_review_status END
+               WHERE validated=1 AND entry_mode='reference'
+                 AND (COALESCE(conservative_entry, 0)>0
+                      OR COALESCE(aggressive_entry, 0)>0)"""
+        )
         _prepare_prediction_events(conn)
         _ensure_column(conn, "research_observation_log", "event_key", "TEXT", "''")
         _ensure_column(conn, "research_observation_log", "trigger_operator", "TEXT", "''")
@@ -536,6 +553,9 @@ class Database:
         # 旧记录没有触发语义，必须隔离，不能自动参与新版学习。
         _ensure_column(conn, "research_observation_log", "validation_status", "TEXT", "'unsupported'")
         _prepare_research_observation_events(conn)
+        _ensure_column(conn, "strategy_param_candidates", "avg_oos_excess_return", "REAL", "0.0")
+        _ensure_column(conn, "strategy_param_candidates", "positive_excess_windows", "INTEGER", "0")
+        _ensure_column(conn, "strategy_param_candidates", "first_eligible_data_end", "TEXT", "''")
         # 索引必须在列迁移完成后创建（旧库没有 strategy_name 列，不能放在 DDL 里）
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_prediction_strategy "
@@ -2190,36 +2210,68 @@ class Database:
         test_sharpe: float,
         walk_forward: dict,
         data_end: str,
-        min_confirmations: int = 2,
+        min_confirmations: int = 3,
+        min_paper_days: int = 20,
     ) -> dict:
         """记录候选并在跨窗口重复通过后晋升，禁止单次回测直接覆盖冠军。"""
         now = datetime.now().isoformat()
         avg_oos_return = float(walk_forward.get("avg_oos_return", 0.0) or 0.0)
+        avg_oos_excess_return = float(
+            walk_forward.get("avg_oos_excess_return", 0.0) or 0.0
+        )
         avg_oos_sharpe = float(walk_forward.get("avg_oos_sharpe", 0.0) or 0.0)
         oos_trades = int(walk_forward.get("oos_trades", 0) or 0)
         selected_windows = int(walk_forward.get("selected_windows", 0) or 0)
+        positive_excess_windows = int(
+            walk_forward.get("positive_excess_windows", 0) or 0
+        )
+        required_positive_windows = max(1, (selected_windows + 1) // 2)
         eligible = (
             bool(walk_forward.get("pass_oos"))
             and avg_oos_return > 0
+            and avg_oos_excess_return > 0
             and avg_oos_sharpe >= 0
             and oos_trades >= 3
             and selected_windows >= 1
+            and positive_excess_windows >= required_positive_windows
         )
         row = self.execute(
-            """SELECT confirmations, last_data_end, status FROM strategy_param_candidates
+            """SELECT confirmations, last_data_end, status, first_eligible_data_end
+               FROM strategy_param_candidates
                WHERE stock_code=? AND strategy_key=? AND params_json=?""",
             (stock_code, strategy_key, params_json),
         ).fetchone()
         confirmations = int(row["confirmations"] or 0) if row else 0
         if eligible and (not row or row["last_data_end"] != data_end):
             confirmations += 1
-        status = "candidate" if eligible else "rejected"
-        reason = (
-            "等待不同数据截止日再次确认"
-            if eligible and confirmations < min_confirmations
-            else "样本外收益/夏普/交易数未同时达标"
-            if not eligible else "达到晋升复核门槛"
+        first_eligible_data_end = str(
+            (row["first_eligible_data_end"] if row else "") or ""
         )
+        if not eligible:
+            confirmations = 0
+            first_eligible_data_end = ""
+        elif not first_eligible_data_end:
+            first_eligible_data_end = data_end
+        paper_days = 0
+        try:
+            first_day = datetime.fromisoformat(first_eligible_data_end[:10]).date()
+            current_day = datetime.fromisoformat(data_end[:10]).date()
+            paper_days = max((current_day - first_day).days, 0)
+        except (TypeError, ValueError):
+            paper_days = 0
+        paper_complete = paper_days >= max(int(min_paper_days), 0)
+        if not eligible:
+            status = "rejected"
+            reason = "样本外绝对收益、基准超额收益、夏普或交易数未同时达标"
+        elif confirmations < min_confirmations:
+            status = "candidate"
+            reason = f"等待不同数据截止日确认（{confirmations}/{min_confirmations}）"
+        elif not paper_complete:
+            status = "paper"
+            reason = f"影子观察期{paper_days}/{min_paper_days}天，暂不晋升"
+        else:
+            status = "candidate"
+            reason = "达到超额收益和影子观察晋升门槛"
         created_at = now
         if row:
             old = self.execute(
@@ -2231,13 +2283,17 @@ class Database:
         self._execute_write(
             """INSERT OR REPLACE INTO strategy_param_candidates
                (stock_code, strategy_key, params_json, test_sharpe,
-                avg_oos_return, avg_oos_sharpe, oos_trades, selected_windows,
-                confirmations, last_data_end, status, reason, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                avg_oos_return, avg_oos_excess_return, avg_oos_sharpe,
+                oos_trades, selected_windows, positive_excess_windows,
+                confirmations, first_eligible_data_end, last_data_end,
+                status, reason, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 stock_code, strategy_key, params_json, float(test_sharpe),
-                avg_oos_return, avg_oos_sharpe, oos_trades, selected_windows,
-                confirmations, data_end, status, reason, created_at, now,
+                avg_oos_return, avg_oos_excess_return, avg_oos_sharpe,
+                oos_trades, selected_windows, positive_excess_windows,
+                confirmations, first_eligible_data_end, data_end,
+                status, reason, created_at, now,
             ),
         )
 
@@ -2245,7 +2301,7 @@ class Database:
         current_sharpe = float(current.get("sharpe", -999.0)) if current else -999.0
         current_source = str(current.get("source", "")) if current else ""
         improves_champion = test_sharpe >= current_sharpe + 0.15
-        can_promote = eligible and confirmations >= min_confirmations and (
+        can_promote = eligible and confirmations >= min_confirmations and paper_complete and (
             current is None or current_source == "demoted" or improves_champion
         )
         if can_promote:
@@ -2270,6 +2326,8 @@ class Database:
         return {
             "status": status,
             "confirmations": confirmations,
+            "paper_days": paper_days,
+            "avg_oos_excess_return": avg_oos_excess_return,
             "eligible": eligible,
             "promoted": status == "champion",
         }

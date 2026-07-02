@@ -644,8 +644,9 @@ class MainPage(ft.Container):
 
         # Markdown → HTML
         from markdown_it import MarkdownIt
+        from report.html_enhancer import REPORT_TABLE_FOLD_CSS, fold_long_html_tables
         md = MarkdownIt().enable(["table", "strikethrough"])
-        body_html = md.render(self._report_content)
+        body_html = fold_long_html_tables(md.render(self._report_content))
 
         html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -669,6 +670,7 @@ class MainPage(ft.Container):
   code {{ background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }}
   pre {{ background: #f5f5f5; padding: 16px; border-radius: 6px; overflow-x: auto; }}
   img {{ max-width: 100%; border: 1px solid #dfe5ec; border-radius: 6px; background: #fff; }}
+{REPORT_TABLE_FOLD_CSS}
 </style>
 </head>
 <body>

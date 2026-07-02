@@ -26,6 +26,7 @@ from indicators.technical import calc_all_indicators, summarize
 from indicators.sentiment import aggregate
 from core.pipeline import run_pipeline, AnalysisResult as PipelineResult
 from core.pipeline import compute_intraday_snapshot, compute_premarket_snapshot
+from core.data_quality import evaluate_extended_liquidity_proxy
 from strategies import get_execution_strategy
 from report.chart import generate_kline_chart
 from report.generator import generate_report, generate_intraday_report, generate_premarket_report
@@ -1650,6 +1651,38 @@ class AnalysisService:
             market=request.market,
             stock_quote=stock_quote,
         )
+        liquidity_note = ""
+        if request.market == "US" and stock_quote:
+            liquidity = evaluate_extended_liquidity_proxy(stock_quote, "pre")
+            if liquidity.get("applied"):
+                quality = dict(getattr(t1_pipeline_result, "data_quality", None) or {})
+                quality["warnings"] = list(quality.get("warnings") or [])
+                warning = str(liquidity.get("warning") or "")
+                if warning and warning not in quality["warnings"]:
+                    quality["warnings"].append(warning)
+                current_cap = float(quality.get("max_position_multiplier", 1.0) or 0.0)
+                proxy_cap = float(liquidity.get("position_multiplier", 1.0) or 0.0)
+                quality["max_position_multiplier"] = min(current_cap, proxy_cap)
+                if not quality.get("block_new_entries"):
+                    quality["status"] = "degraded"
+                    quality["action"] = "reduce_position"
+                t1_pipeline_result.data_quality = quality
+                try:
+                    from core.signal_check import refresh_realtime_signal_plan
+                    refresh_realtime_signal_plan(
+                        t1_pipeline_result,
+                        market=request.market,
+                        current_quote=stock_quote,
+                        account_equity=100000.0,
+                        stock_code=code,
+                    )
+                except Exception as e:
+                    logger.warning(f"盘前流动性约束重算失败: {e}")
+                liquidity_note = (
+                    "\n\n### 延伸时段流动性约束\n"
+                    f"- {warning}\n"
+                    "- 该约束只压缩新开仓，不阻止已有持仓执行止损或减仓。"
+                )
         if _stop(): return self._empty_response(code)
 
         # ---- 6.5. SWOT + 同板块 ----
@@ -1676,7 +1709,7 @@ class AnalysisService:
 
         report_content = generate_premarket_report(
             t1_report_content=t1_report_content,
-            snapshot_text=snapshot.markdown,
+            snapshot_text=snapshot.markdown + liquidity_note,
             stock_info=info.to_dict(),
             swot_data=swot_data,
             peer_data=peer_data,

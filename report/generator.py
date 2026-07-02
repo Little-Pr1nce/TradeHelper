@@ -54,6 +54,67 @@ def _clean_llm_output(text: str) -> str:
     return text.strip()
 
 
+_RESEARCH_HEADING_RE = re.compile(
+    r"^#{2,4}\s*(?:\d+\s*[.、]\s*)?\**研究员观察候选\**\s*$",
+    flags=re.MULTILINE,
+)
+_RISK_REWARD_TERM_RE = re.compile(r"风险(?:收益|回报)比")
+_RISK_REWARD_PRAISE_RE = re.compile(
+    r"风险(?:收益|回报)比\s*(?:极佳|优秀|很好|良好|较好|理想|可观|很高|较高|(?:非常)?有吸引力)"
+)
+_RISK_REWARD_RATIO_RE = re.compile(r"1\s*[:：]\s*(\d+(?:\.\d+)?)")
+
+
+def _normalize_research_candidate_heading(text: str) -> tuple[str, int]:
+    """统一研究员候选标题并删除模型生成的重复标题。"""
+    seen = False
+    removed = 0
+
+    def replace(_match: re.Match) -> str:
+        nonlocal seen, removed
+        if seen:
+            removed += 1
+            return ""
+        seen = True
+        return "### 研究员观察候选"
+
+    normalized = _RESEARCH_HEADING_RE.sub(replace, text or "")
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip(), removed
+
+
+def _enforce_llm_compliance(text: str, operation_plan: str = "") -> str:
+    """对 LLM 交易表述做确定性后验校验。"""
+    normalized, duplicate_headings = _normalize_research_candidate_heading(text)
+    code_has_fixed_ratio = bool(_RISK_REWARD_RATIO_RE.search(operation_plan or ""))
+    correction_count = duplicate_headings
+    output_lines = []
+
+    for line in normalized.splitlines():
+        if _RISK_REWARD_TERM_RE.search(line):
+            line, praise_count = _RISK_REWARD_PRAISE_RE.subn(
+                "固定风险收益比须以代码方案中的固定止盈目标和止损计算",
+                line,
+            )
+            correction_count += praise_count
+
+            def validate_ratio(match: re.Match) -> str:
+                nonlocal correction_count
+                correction_count += 1
+                return (
+                    "见代码方案的确定性计算"
+                    if code_has_fixed_ratio else
+                    "固定风险收益比不可量化"
+                )
+
+            line = _RISK_REWARD_RATIO_RE.sub(validate_ratio, line)
+        output_lines.append(line)
+
+    if correction_count:
+        logger.warning(f"LLM 报告合规校验修正 {correction_count} 处")
+    return "\n".join(output_lines).strip()
+
+
 def _build_backtest_summary(
     bt_results: dict,
     benchmark_return: float = 0.0,
@@ -418,7 +479,9 @@ def generate_report(
             logger.warning(f"LLM 输出提前结束，finish_reason={finish}，报告可能不完整")
         else:
             logger.info(f"LLM 输出完成，finish_reason={finish}")
-        report = _clean_llm_output(choice.message.content)
+        report = _enforce_llm_compliance(
+            _clean_llm_output(choice.message.content), operation_plan or ""
+        )
         if not report:
             logger.warning("LLM returned empty response, falling back to template")
             return _generate_fallback_report(
@@ -900,7 +963,9 @@ def generate_intraday_report(
             finish = choice.finish_reason
             if finish and finish != "stop":
                 logger.warning(f"LLM 盘中报告输出提前结束，finish_reason={finish}")
-            chapter_8 = _clean_llm_output(choice.message.content)
+            chapter_8 = _enforce_llm_compliance(
+                _clean_llm_output(choice.message.content), operation_plan or ""
+            )
             if chapter_8:
                 logger.info(f"LLM 盘中第 8 章: {len(chapter_8)} chars")
         except Exception as e:
@@ -1037,7 +1102,9 @@ def generate_premarket_report(
             finish = choice.finish_reason
             if finish and finish != "stop":
                 logger.warning(f"LLM 盘前报告输出提前结束，finish_reason={finish}")
-            chapter_8 = _clean_llm_output(choice.message.content)
+            chapter_8 = _enforce_llm_compliance(
+                _clean_llm_output(choice.message.content), operation_plan or ""
+            )
             if chapter_8:
                 logger.info(f"LLM 盘前第 8 章: {len(chapter_8)} chars")
         except Exception as e:
@@ -1170,7 +1237,9 @@ def generate_portfolio_report(
             logger.warning(f"LLM 输出提前结束，finish_reason={finish}，报告可能不完整")
         else:
             logger.info(f"LLM 输出完成，finish_reason={finish}")
-        report = _clean_llm_output(choice.message.content)
+        report = _enforce_llm_compliance(
+            _clean_llm_output(choice.message.content), portfolio_operation_plan or ""
+        )
         if not report:
             logger.warning("LLM returned empty portfolio report, falling back")
             return _generate_fallback_portfolio_report(

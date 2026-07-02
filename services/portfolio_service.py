@@ -9,6 +9,7 @@
 
 import logging
 import math
+import re
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from typing import Any
 import pandas as pd
 
 from config.settings import Settings
+from core.data_quality import evaluate_extended_liquidity_proxy
 from core.pipeline import run_pipeline
 from core.signal_check import select_actionable_sell_signals
 from data.database import Database
@@ -103,6 +105,9 @@ def _evaluate_realtime_quote_quality(
             issues.append(f"实时报价已过期（约{max(age_seconds or 0, 0)/60:.0f}分钟）")
     if required and price > 0 and fresh and not ohlc_complete:
         warnings.append("实时价可用，但盘中OHLC不完整，不确认冲高回落/日内触线形态")
+    liquidity = evaluate_extended_liquidity_proxy(quote, mode)
+    if required and liquidity.get("applied") and liquidity.get("warning"):
+        warnings.append(str(liquidity["warning"]))
     return {
         "required": required,
         "available": price > 0,
@@ -111,6 +116,11 @@ def _evaluate_realtime_quote_quality(
         "age_seconds": age_seconds,
         "issues": issues,
         "warnings": warnings,
+        "liquidity_proxy": (
+            liquidity.get("proxy") if liquidity.get("applied") else ""
+        ),
+        "liquidity_position_multiplier": liquidity.get("position_multiplier", 1.0),
+        "spread_pct": liquidity.get("spread_pct"),
     }
 
 
@@ -132,6 +142,10 @@ def _quote_payload(
         "low": float(source_bar.get("low", 0.0) or 0.0),
         "volume": float(source_bar.get("volume", 0.0) or 0.0),
         "prev_close": float(source_bar.get("prev_close", 0.0) or 0.0),
+        "bid": float(source_bar.get("bid", 0.0) or 0.0),
+        "ask": float(source_bar.get("ask", 0.0) or 0.0),
+        "bid_size": float(source_bar.get("bid_size", 0.0) or 0.0),
+        "ask_size": float(source_bar.get("ask_size", 0.0) or 0.0),
         "timestamp": timestamp or source_bar.get("timestamp", 0),
         "source": source,
         "session": session,
@@ -490,7 +504,12 @@ def _mode_trigger_label(mode: str) -> str:
     return "盘后触发交易计划（基于收盘数据，下一交易日盘中确认执行）"
 
 
-def _build_trigger_plan_row(item: dict, account_equity: float, currency: str) -> dict:
+def _build_trigger_plan_row(
+    item: dict,
+    account_equity: float,
+    currency: str,
+    allow_new_positions: bool = True,
+) -> dict:
     """为单只股票生成买/卖/持有的条件触发表。"""
     obj = item.get("holding") or item.get("watch_item")
     code = obj.code if obj else "?"
@@ -534,6 +553,15 @@ def _build_trigger_plan_row(item: dict, account_equity: float, currency: str) ->
             invalidation = f"跌破策略止损 {currency}{stop:.2f} 失效"
         conservative = "按策略仓位执行"
         aggressive = "可按策略上限执行，但不得超过账户风控上限"
+        if not allow_new_positions:
+            buy_trigger = (
+                f"策略买入信号已触发（参考价 {currency}{entry:.2f}），"
+                "但组合新增容量或可用资金为0，仅保留观察"
+                if entry > 0 else
+                "策略买入信号已触发，但组合新增容量或可用资金为0，仅保留观察"
+            )
+            conservative = "禁止新增仓位"
+            aggressive = "禁止新增仓位"
     elif support:
         buy_trigger = support["trigger"]
         if support.get("confirmed"):
@@ -580,7 +608,7 @@ def _build_trigger_plan_row(item: dict, account_equity: float, currency: str) ->
             trail = high - 1.5 * atr14
             sell_trigger += f"；若从阶段高点回落至 {currency}{trail:.2f} 以下，上移止损"
 
-    if is_holding and price > 0 and ma60 > 0 and ma120 > 0:
+    if is_holding and price > 0 and ma60 > 0 and ma120 > 0 and not buy_signal:
         if price > ma60 > ma120 and not risk:
             conservative = "趋势未破，继续持有"
             aggressive = "回踩MA20/MA60不破可加少量"
@@ -611,6 +639,7 @@ def _build_conditional_trigger_plan(
     mode: str,
     currency: str,
     account_equity: float,
+    allow_new_positions: bool = True,
 ) -> str:
     """组合级条件触发计划：盘中/盘前/盘后都输出可执行条件。"""
     if not all_data:
@@ -621,7 +650,10 @@ def _build_conditional_trigger_plan(
         "|------|------|------:|------|------|------|------|------|",
     ]
     for item in all_data:
-        row = _build_trigger_plan_row(item, account_equity, currency)
+        row = _build_trigger_plan_row(
+            item, account_equity, currency,
+            allow_new_positions=allow_new_positions,
+        )
         price_str = f"{currency}{row['price']:.2f}" if row["price"] > 0 else "—"
         if not row.get("price_reliable", True) and price_str != "—":
             price_str += "（待复核）"
@@ -864,6 +896,12 @@ def _build_portfolio_operation_summary(
     portfolio_risk = _compute_portfolio_risk_snapshot(
         holdings_data, price_frames, account_equity
     )
+    available = balance.us_balance if market == "US" else balance.a_balance
+    allow_new_positions = bool(
+        account_equity > 0
+        and float(available or 0.0) > 0
+        and float(portfolio_risk.get("new_position_capacity_pct", 0.0) or 0.0) > 0
+    )
 
     # ── 分类：策略信号 + 组合风控 ──
     sell_stocks = []  # 持仓退出/减仓信号
@@ -926,7 +964,8 @@ def _build_portfolio_operation_summary(
             })
 
     total = len(all_data)
-    buy_count = len(buy_stocks)
+    buy_candidate_count = len(buy_stocks)
+    buy_count = buy_candidate_count if allow_new_positions else 0
     sell_count = len(sell_stocks)
     risk_count = len(risk_stocks)
     support_count = len(support_stocks)
@@ -944,7 +983,12 @@ def _build_portfolio_operation_summary(
         "|:---:|------|------:|------|",
         f"| 1 | 持仓退出/减仓 | {sell_count} | 有策略卖出信号时优先复核实时价和止损线 |",
         f"| 2 | 持仓风控 | {risk_count} | 即使策略未卖出，也要检查浮亏、集中度和锁利线 |",
-        f"| 3 | 买入/加仓 | {buy_count} | 只在触发价、止损、仓位和历史验证同时成立时执行 |",
+        f"| 3 | 买入/加仓 | {buy_count} | "
+        + (
+            "只在触发价、止损、仓位和历史验证同时成立时执行 |"
+            if allow_new_positions else
+            f"{buy_candidate_count} 个策略候选被组合容量/可用资金闸门阻断 |"
+        ),
         f"| 4 | 支撑/反弹观察 | {support_count} | 到达关键线只代表值得盯盘，重新站回后再确认 |",
         f"| 5 | 暂不操作 | {hold_count} | 记录缺失条件，等待下一次触发 |",
         "",
@@ -974,6 +1018,18 @@ def _build_portfolio_operation_summary(
                 nl = md.find("\n")
                 if nl != -1:
                     md = md[nl+1:].strip()
+        # 组合报告已有汇总视图，不为每只股票重复附带完整策略状态长表。
+        compact_lines = []
+        skipping_repeated_section = False
+        for line in md.splitlines():
+            if re.match(r"^#{2,6}\s+.*全策略信号状态", line.strip()):
+                skipping_repeated_section = True
+                continue
+            if skipping_repeated_section and re.match(r"^#{2,4}\s+", line.strip()):
+                skipping_repeated_section = False
+            if not skipping_repeated_section and not line.startswith("*以上方案由系统自动生成"):
+                compact_lines.append(line)
+        md = "\n".join(compact_lines).strip()
         demoted = []
         for line in md.splitlines():
             if line.startswith("### "):
@@ -984,7 +1040,10 @@ def _build_portfolio_operation_summary(
                 demoted.append(line)
         return "\n".join(demoted).strip()
 
-    trigger_plan = _build_conditional_trigger_plan(all_data, mode, currency, account_equity)
+    trigger_plan = _build_conditional_trigger_plan(
+        all_data, mode, currency, account_equity,
+        allow_new_positions=allow_new_positions,
+    )
     if trigger_plan:
         lines.append(trigger_plan)
 
@@ -1033,11 +1092,21 @@ def _build_portfolio_operation_summary(
 
     # ── 有买入信号的股票：直接嵌入各自的保守/激进方案 ──
     if buy_stocks:
-        lines.append(f"### 🟢 有买入信号的股票（{len(buy_stocks)} 只）\n")
+        heading = (
+            "有买入信号的股票"
+            if allow_new_positions else
+            "买入信号候选（组合风控禁止执行）"
+        )
+        lines.append(f"### 🟢 {heading}（{len(buy_stocks)} 只）\n")
         for bs in buy_stocks:
             lines.append(f"#### {bs['name']}（{bs['code']}）— 现价 {currency}{bs['price']:.2f}\n")
             plan_md = bs["op_plan"]
-            if isinstance(plan_md, str) and plan_md.strip():
+            if not allow_new_positions:
+                lines.append(
+                    "> 策略条件成立，但当前新增容量或可用资金为0；"
+                    "本次不得买入/加仓，待释放风险容量后重新分析。\n"
+                )
+            elif isinstance(plan_md, str) and plan_md.strip():
                 lines.append(_clean_plan_md(plan_md))
             else:
                 lines.append(f"> {bs['buy_count']} 个策略发出买入信号，但系统未生成详细操作方案。\n")
@@ -1061,13 +1130,11 @@ def _build_portfolio_operation_summary(
     lines.append(
         f"**组合信号统计**: {sell_count} 只持仓有策略退出/减仓信号，"
         f"{risk_count} 只触发组合风控提示，{support_count} 只触及关键支撑候选，"
-        f"{buy_count}/{total} 只股票有买入信号\n"
+        f"{buy_candidate_count}/{total} 只股票有买入候选，"
+        f"其中 {buy_count} 只当前允许执行\n"
     )
 
     if buy_stocks:
-        available = (
-            balance.us_balance if market == "US" else balance.a_balance
-        )
         lines.append(f"**可用资金**: {currency}{available:,.2f}\n")
 
         sizing_rows = []

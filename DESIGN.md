@@ -164,6 +164,9 @@ StrategyDecision(
     trigger_price=0.0,
     stop_loss=0.0,
     take_profit=0.0,
+    take_profit_pct=0.0,
+    take_profit_mode="fixed | dynamic | conditional | none",
+    take_profit_rule="",
     max_loss_amount=0.0,
     position_pct=0.0,
     invalidation="",
@@ -212,7 +215,8 @@ StrategyDecision(
 参数变体
   -> walk-forward 样本外筛选
   -> strategy_param_candidates(candidate)
-  -> 跨数据截止日连续确认
+  -> 正绝对收益 + 正基准超额收益
+  -> 跨 3 个数据截止日确认 + 20 天影子观察
   -> promoted / replaced
   -> 实盘健康度转负
   -> rolled_back / demoted
@@ -266,7 +270,7 @@ SQLite WAL，当前 14 张表：
 5. 持仓风控与组合风险。
 6. 研究员观察 vs 系统确认。
 7. 样本外审计、历史预测、退出复盘和参数健康度。
-8. 保守/激进方案；没有止盈目标时风险收益比明确标为不可量化。
+8. 保守/激进方案；固定止盈计算真实风险收益比，动态/条件止盈展示规则并标记固定比值不可量化，没有主动止盈时明确提示。
 
 ## 15. 扩展约定
 
@@ -283,7 +287,7 @@ SQLite WAL，当前 14 张表：
 
 ## 16. 测试与发布
 
-当前 13 个测试文件、187 个测试。除 pytest 外，每个测试文件都有直接执行入口：
+当前 13 个测试文件、204 个测试。除 pytest 外，每个测试文件都有直接执行入口：
 
 ```bash
 venv/bin/python -m pytest tests/ -q

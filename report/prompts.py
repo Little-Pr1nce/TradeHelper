@@ -56,6 +56,7 @@ Prompt 中会包含「## 🎯 系统操作方案（代码生成）」章节，�
 6. **每个价位必须是精确数字，不是区间** — 入场价、止损价、止盈价、关键点位，全部给精确到小数点后两位的单一数字，不要给「$935-$950 区域」这种区间。每条价位后面注明它是怎么算出来的。
 7. **禁忌词必须替换为数值描述** — 以下词汇禁止单独出现（必须写出数值标准）：「企稳」「放量」「缩量」「阳线」「阴线」「强势」「弱势」「恐慌性抛售」「探底回升」「回调到位」「确认支撑」。例如不能说「放量阳线企稳后入场」，必须说「当日涨幅 +2.3%、成交量较前5日均量放大40%、价格连续3日未创新低后，在 $935.01 入场」。
 8. **同板块必须独立成章** — 如果用户 prompt 中提供了「同板块 Alpha 快速评分」数据，你必须输出独立的「## 九、同板块关注」章节（含 Markdown 表格逐条展示所有标的），**不得**将同板块内容合并到第十章综合建议中。就算同板块标的很少，也要单独成章。
+9. **严格区分止盈类型** — 固定止盈可展示目标价并计算传统风险收益比；动态止盈必须原样解释移动公式，条件止盈必须原样解释退出条件，二者均注明“固定风险收益比不可量化”。系统没有主动止盈时要明确提示，严禁自行补造目标价或声称风险收益比优秀。
 
 | 时间 | 标题 | 正文概述 | 情感标签 |
 |------|------|---------|---------|
@@ -390,7 +391,7 @@ def build_trust_hard_summary(
         f"PASS {audit_summary['pass']}、COND {audit_summary['conditional']}、"
         f"FAIL {audit_summary['fail']}、OVERFIT {audit_summary['overfit']}"
     )
-    history_text = f"- 历史验证：{history_count} 次，结论：**{expectancy}**"
+    history_text = f"- 当前机会关联历史验证：{history_count} 次，结论：**{expectancy}**"
     if avg_return is not None and history_count > 0:
         history_text += f"，平均方向净收益 {avg_return:+.2%}"
     lines.append(history_text)
@@ -432,30 +433,74 @@ def build_prediction_footer(code: str, prediction_stats,
         lines.append("")
 
     if validated_predictions:
-        lines.append("| 预测时间 | 方向 | 预测价 | 建议入场 | 入场触发 | 方向净收益 | 正确 |")
-        lines.append("|---------|------|--------|---------|---------|---------|-----|")
+        lines.append(
+            "| 股票 | 策略/动作 | 预测生成时间 | 依据日 | 方向 | "
+            "预测时参考价 | 入场口径 | 是否触发 | 验证日/验证价 | 方向净收益 | 结论 |"
+        )
+        lines.append(
+            "|------|------|------|------|------|------:|------|:---:|------|------:|------|"
+        )
         for p in validated_predictions[:5]:
             d = p.to_dict() if hasattr(p, 'to_dict') else p
             direction_map = {"bullish": "偏多", "bearish": "偏空", "neutral": "中性"}
             direction_str = direction_map.get(d.get("direction", ""), d.get("direction", ""))
-            if d.get("direction") == d.get("actual_direction") and d.get("actual_direction"):
-                correct = "✅"
-            elif d.get("actual_direction"):
-                correct = "❌"
+            direction = str(d.get("direction") or "")
+            actual_direction = str(d.get("actual_direction") or "")
+            actual_return = float(d.get("actual_return", 0) or 0)
+            if direction not in ("bullish", "bearish"):
+                conclusion = "中性记录，不判对错"
+            elif direction == actual_direction and actual_return > 0:
+                conclusion = "方向正确，净盈利"
+            elif direction == actual_direction:
+                conclusion = "方向正确，但净亏损"
+            elif actual_return > 0:
+                conclusion = "方向偏差，但净盈利"
+            elif actual_direction:
+                conclusion = "方向错误，净亏损"
             else:
-                correct = "—"
-            entry = d.get('conservative_entry', 0) or d.get('aggressive_entry', 0)
-            entry_str = f"${entry:.2f}" if entry > 0 else "—"
-            triggered = "✅" if d.get('entry_triggered', 0) else ("—" if entry > 0 else "—")
-            time_str = d.get('predict_time', '')[:16] if d.get('predict_time', '') else ''
+                conclusion = "尚无实际方向"
+
+            currency = "¥" if d.get("market") == "A" else "$"
+            entry = float(d.get('conservative_entry', 0) or d.get('aggressive_entry', 0) or 0)
+            entry_mode = str(d.get("entry_mode") or "reference")
+            if entry_mode == "next_open":
+                entry_text = "下一交易日开盘"
+                triggered = "是" if d.get("entry_triggered", 0) else "否"
+            elif entry_mode == "signal_price":
+                entry_text = f"盘中信号价 {currency}{entry:.2f}" if entry > 0 else "盘中信号价"
+                triggered = "是" if d.get("entry_triggered", 0) else "否"
+            elif entry_mode == "conditional":
+                entry_text = f"条件价 {currency}{entry:.2f}" if entry > 0 else "条件价缺失"
+                triggered = "是" if d.get("entry_triggered", 0) else "否"
+            else:
+                # 旧版 reference 记录中的非零入场值来自正文正则，不能作为交易事实。
+                entry_text = "仅方向参考，不适用"
+                triggered = "不适用"
+
+            strategy = str(d.get("strategy_name") or "整体判断")
+            action = {"buy": "买入", "sell": "卖出"}.get(
+                str(d.get("signal_action") or ""), "观察"
+            )
+            time_str = str(d.get('predict_time') or '')[:16].replace("T", " ")
+            reference_date = str(d.get("reference_date") or "—")[:10]
+            validation_date = str(d.get("validation_end_date") or "—")[:10]
+            validation_price = float(d.get("validation_price", 0) or 0)
+            validation_text = (
+                f"{validation_date} / {currency}{validation_price:.2f}"
+                if validation_price > 0 else validation_date
+            )
             lines.append(
+                f"| {d.get('code', '')} "
+                f"| {strategy} / {action} "
                 f"| {time_str} "
+                f"| {reference_date} "
                 f"| {direction_str} "
-                f"| {d.get('predicted_price', 0):.2f} "
-                f"| {entry_str} "
+                f"| {currency}{float(d.get('predicted_price', 0) or 0):.2f} "
+                f"| {entry_text} "
                 f"| {triggered} "
-                f"| {d.get('actual_return', 0):+.2%} "
-                f"| {correct} |"
+                f"| {validation_text} "
+                f"| {actual_return:+.2%} "
+                f"| {conclusion} |"
             )
         lines.append("")
 
@@ -690,6 +735,7 @@ def build_strategy_health_section(
         import json
         status_labels = {
             "candidate": "观察中",
+            "paper": "影子观察",
             "champion": "已晋升",
             "superseded": "已替代",
             "rolled_back": "已回滚",
@@ -698,8 +744,8 @@ def build_strategy_health_section(
         lines.extend([
             "### 参数候选生命周期\n",
             "> 参数必须在不同数据截止日重复通过 walk-forward，才会替换正式参数。\n",
-            "| 股票 | 策略 | 参数 | 确认 | OOS收益 | OOS夏普 | 交易数 | 状态 |",
-            "|------|------|------|:---:|------:|------:|------:|------|",
+            "| 股票 | 策略 | 参数 | 确认 | OOS收益 | 超额收益 | 正超额窗口 | OOS夏普 | 交易数 | 状态 |",
+            "|------|------|------|:---:|------:|------:|:---:|------:|------:|------|",
         ])
         for row in param_candidates[:20]:
             try:
@@ -711,6 +757,9 @@ def build_strategy_health_section(
                 f"| {row.get('stock_code', '—')} | {row.get('strategy_key', '—')} | "
                 f"{params_text[:32]} | {int(row.get('confirmations', 0) or 0)} | "
                 f"{float(row.get('avg_oos_return', 0) or 0):+.2%} | "
+                f"{float(row.get('avg_oos_excess_return', 0) or 0):+.2%} | "
+                f"{int(row.get('positive_excess_windows', 0) or 0)}/"
+                f"{int(row.get('selected_windows', 0) or 0)} | "
                 f"{float(row.get('avg_oos_sharpe', 0) or 0):.2f} | "
                 f"{int(row.get('oos_trades', 0) or 0)} | "
                 f"{status_labels.get(row.get('status'), row.get('status', '—'))} |"
@@ -909,6 +958,7 @@ INTRADAY_SYSTEM_PROMPT = """你是一个专业的量化分析师，正在为一�
 7. **禁忌词必须替换为数值描述** — 以下词汇禁止单独出现（必须写出数值标准）：「企稳」「放量」「缩量」「阳线」「阴线」「强势」「弱势」「恐慌性抛售」「探底回升」「回调到位」「确认支撑」。
 8. **盘中数据时效声明** — 所有点位基于快照时刻的实时价格计算，会随行情变化。
 9. **翻译系统操作方案** — prompt 中会包含「## 🎯 系统操作方案（代码生成）」章节（量化模型原始判断）。你的 8.2 节改为输出保守和激进两套方案，把量化条件翻译成交易员能看懂的 K 线图语言：看什么信号、什么价位、概率多大；有信号时选最稳/最优策略，无信号时指出最接近触发的策略和轻仓试探的可能。所有价位必须来自系统方案或技术指标，不得自编。
+10. **严格区分止盈类型** — 固定止盈可展示目标价和传统风险收益比；动态/条件止盈只解释系统给出的公式或退出条件，并注明固定风险收益比不可量化。不得自行补造止盈价或评价风险收益比优秀。
 
 ## 第八章结构要求
 
@@ -1113,6 +1163,7 @@ PREMARKET_SYSTEM_PROMPT = """你是一个专业的量化分析师，正在为一
 7. **禁忌词必须替换为数值描述** — 以下词汇禁止单独出现（必须写出数值标准）：「企稳」「放量」「缩量」「阳线」「阴线」「强势」「弱势」「恐慌性抛售」「探底回升」「回调到位」「确认支撑」。
 8. **盘前数据时效声明** — 所有分析基于盘前数据，开盘后可能因流动性变化而改变。
 9. **翻译系统操作方案** — prompt 中会包含「## 🎯 系统操作方案（代码生成）」章节（量化模型原始判断）。你的操作建议部分应输出保守和激进两套方案，把量化条件翻译成交易员能看懂的 K 线图语言。所有价位必须来自系统方案或技术指标，不得自编。
+10. **严格区分止盈类型** — 固定止盈可展示目标价和传统风险收益比；动态/条件止盈只解释系统给出的公式或退出条件，并注明固定风险收益比不可量化。不得自行补造止盈价或评价风险收益比优秀。
 
 ## 第八章结构要求
 
@@ -1309,6 +1360,7 @@ PORTFOLIO_SYSTEM_PROMPT = """你是一个专业的全持仓分析师和资产配
 9. **执行表限制** — 只有当系统方案明确给出买入/卖出/减仓动作和股数时，才允许输出「调整后持仓结构」表格。没有明确动作时，只能输出「待观察清单」和「触发后再执行」，不得自行假设清仓、减仓 50%、买入几股等。
 10. **研究员观察候选** — 你可以在报告末尾提出“观察候选”，但这些不是交易指令。必须使用固定标题 `### 研究员观察候选`，并输出 Markdown 表格，表头必须是：`| 股票 | LLM观察 | 依据 |`。每条观察只描述值得系统复核的事实或机会，不写买入股数/卖出股数/调仓比例。
 11. **历史回测不是资产质量排名** — 横向表只表示某策略在该股票历史区间的拟合表现。严禁仅因最高历史收益/夏普就称某股票为“最优质资产”或推导当前持有结论；当前操作必须服从数据质量、持仓风控和当前信号共识。如二者冲突，必须明确写成“历史策略适配较好，但当前条件转弱/存在分歧”。
+12. **风险收益比必须可计算** — 只有系统同时提供有效入场价、止损价和固定止盈价时，才能评价传统风险收益比。若系统采用动态止盈或条件退出，必须解释真实规则并注明“固定风险收益比不可量化”；若没有主动止盈，则明确说明仅有止损/时间退出。严禁使用“风险收益比/风险回报比极佳、优秀、有吸引力”等无数据判断。止损距离较近不等于风险收益比优秀。
 
 ## 报告结构
 1. **账户概览** — 账户总资产（现金 + 持仓市值）、各市场持仓结构、行业分布、现金比例、集中度风险
@@ -1610,6 +1662,10 @@ def build_portfolio_user_prompt(
     lines.append(
         "- 保守/激进差异必须服从系统方案。若二者来自同一触发策略，价格和止损可以相同，"
         "此时只解释仓位、账户风险预算和最大亏损的差异，不虚构第二套价位。"
+    )
+    lines.append(
+        "- 系统只有固定止盈目标时才能计算传统风险收益比；动态止盈/条件退出必须解释规则并注明"
+        "固定风险收益比不可量化，不得把止损距离较近解释为风险收益比优秀。"
     )
 
     return "\n".join(lines)

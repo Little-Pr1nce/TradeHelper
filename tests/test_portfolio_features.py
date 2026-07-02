@@ -27,6 +27,7 @@ from data.models import (
     ResearchObservationLog,
 )
 from core.pipeline import AnalysisResult
+from core.data_quality import evaluate_data_quality
 from indicators.technical import calc_all_indicators
 from services.analysis_service import _single_stock_research_item
 from services.portfolio_service import (
@@ -47,6 +48,7 @@ from services.research_observations import (
     ResearchObservation,
 )
 from report.prompts import build_prediction_footer
+from report.html_enhancer import fold_long_html_tables
 from services.signal_stabilizer import SignalStabilizer
 
 
@@ -132,11 +134,62 @@ def test_premarket_quote_uses_extended_source_without_touching_tickflow():
         quote = _fetch_portfolio_realtime_quote(
             "AAPL", "US", FailIfCalledFetcher(), mode="pre"
         )
-
     assert quote["price"] == 281.60
     assert quote["source"] == "Nasdaq.com延伸时段"
     assert quote["session"] == "pre"
 
+
+def test_extended_quote_without_depth_uses_conservative_liquidity_proxy():
+    now = 1_800_000_000.0
+    quote = _quote_payload(
+        price=100.0,
+        source="Nasdaq.com延伸时段",
+        session="pre",
+        timestamp=int((now - 60) * 1000),
+        bar={"volume": 120_000, "prev_close": 99.0},
+    )
+    quality = _evaluate_realtime_quote_quality(quote, "pre", now_epoch=now)
+
+    assert quality["liquidity_proxy"] == "volume"
+    assert quality["liquidity_position_multiplier"] == 0.5
+    assert any("无盘口深度" in item for item in quality["warnings"])
+
+    dates = pd.date_range("2025-01-01", periods=80, freq="B")
+    df = pd.DataFrame({
+        "date": dates,
+        "open": [100.0] * 80,
+        "high": [101.0] * 80,
+        "low": [99.0] * 80,
+        "close": [100.0] * 80,
+        "volume": [1_000_000.0] * 80,
+    })
+    report = evaluate_data_quality(
+        df,
+        current_price=100.0,
+        news_df=pd.DataFrame({"sentiment": [0.0]}),
+        fundamental_data={"pe": 20.0},
+        market="US",
+        realtime_quote_quality=quality,
+    )
+    assert report.max_position_multiplier == 0.5
+    assert report.action == "reduce_position"
+    assert any("流动性代理=volume" in item for item in report.notes)
+
+
+def test_extended_top_of_book_spread_controls_position_cap():
+    now = 1_800_000_000.0
+    tight = _quote_payload(
+        price=100.0, source="paid top-of-book", session="pre",
+        timestamp=int((now - 30) * 1000),
+        bar={"bid": 99.95, "ask": 100.05, "volume": 1},
+    )
+    wide = dict(tight, bid=99.0, ask=101.0)
+
+    tight_quality = _evaluate_realtime_quote_quality(tight, "pre", now_epoch=now)
+    wide_quality = _evaluate_realtime_quote_quality(wide, "pre", now_epoch=now)
+    assert tight_quality["liquidity_proxy"] == "top_of_book"
+    assert tight_quality["liquidity_position_multiplier"] == 0.75
+    assert wide_quality["liquidity_position_multiplier"] == 0.25
 
 def test_missing_batch_quote_does_not_fall_back_to_individual_request():
     class FailIfCalledFetcher:
@@ -370,6 +423,85 @@ def test_portfolio_risk_snapshot_limits_concentration_and_correlation():
     assert "高相关持仓已达到组合上限" in md
 
 
+def test_portfolio_zero_capacity_blocks_buy_signal_everywhere():
+    holding = Holding(
+        code="FULL", name="FullPosition", market="US",
+        shares=100, cost_price=100.0,
+    )
+    watch = WatchItem(code="NEW", name="NewCandidate", market="US")
+    md = _build_portfolio_operation_summary(
+        [{
+            "holding": holding,
+            "current_price": 100.0,
+            "position_value": 10000.0,
+            "signal_check": [],
+        }],
+        [{
+            "watch_item": watch,
+            "current_price": 50.0,
+            "position_value": 0.0,
+            "signal_check": [{
+                "signal": "buy", "position_pct": 0.40,
+                "entry_price": 50.0, "stop_loss": 45.0,
+                "execution_level": "A", "name": "测试策略",
+            }],
+            "operation_plan": "RAW_EXECUTION_SHOULD_NOT_APPEAR",
+        }],
+        "US",
+        AccountBalance(us_balance=100.0),
+        10000.0,
+        mode="intraday",
+    )
+
+    assert "剩余新增容量 | 0.0%" in md
+    assert "| 3 | 买入/加仓 | 0 | 1 个策略候选被组合容量/可用资金闸门阻断 |" in md
+    assert "禁止新增仓位" in md
+    assert "买入信号候选（组合风控禁止执行）" in md
+    assert "其中 0 只当前允许执行" in md
+    assert "RAW_EXECUTION_SHOULD_NOT_APPEAR" not in md
+
+
+def test_html_export_folds_only_long_tables():
+    short = "<table><tr><th>A</th></tr><tr><td>1</td></tr></table>"
+    rows = "".join(f"<tr><td>{i}</td></tr>" for i in range(9))
+    long_table = f"<table><tr><th>A</th></tr>{rows}</table>"
+
+    rendered = fold_long_html_tables(short + long_table, min_data_rows=8)
+
+    assert rendered.count('class="report-table-fold"') == 1
+    assert "展开完整表格（9 行）" in rendered
+    assert short in rendered
+
+
+def test_portfolio_summary_removes_repeated_per_stock_signal_table():
+    watch = WatchItem(code="NEW", name="NewCandidate", market="US")
+    md = _build_portfolio_operation_summary(
+        [],
+        [{
+            "watch_item": watch,
+            "current_price": 50.0,
+            "position_value": 0.0,
+            "signal_check": [{
+                "signal": "buy", "position_pct": 0.05,
+                "entry_price": 50.0, "stop_loss": 45.0,
+                "execution_level": "B", "name": "测试策略",
+            }],
+            "operation_plan": (
+                "## 🎯 系统操作方案（代码生成）\n\n"
+                "### 🛡️ 保守方案\n\n保留内容\n\n"
+                "### 📡 全策略信号状态\n\nSHOULD_BE_REMOVED\n"
+            ),
+        }],
+        "US",
+        AccountBalance(us_balance=10000.0),
+        10000.0,
+        mode="intraday",
+    )
+
+    assert "保留内容" in md
+    assert "SHOULD_BE_REMOVED" not in md
+
+
 def test_account_equity_and_exposure_use_same_frozen_prices():
     holding = Holding(
         code="FCX", name="Freeport", market="US", shares=55, cost_price=54.788
@@ -396,7 +528,7 @@ def test_research_observations_parse_and_confirm_llm_candidates():
 |------|------|------|
 | Corning（GLW） | 冲高后回落，适合锁利观察 | 当日高点接近阶段高点 |
 | Freeport（FCX） | 多次触碰 MA120 后反弹 | 当前接近半年线 |
-| SNDK | 动量很强可追 | 短线价格强 |
+| **SNDK** | 动量很强可追 | 短线价格强 |
 """
     parsed = parse_llm_observations(llm_report)
     assert [p.code for p in parsed] == ["GLW", "FCX", "SNDK"]
@@ -782,6 +914,10 @@ def test_portfolio_tracking_counts_component_predictions_after_write():
     assert "累计已验证预测：1 次" in footer
     assert "待验证预测：2 条" in footer
     assert "统计范围：当前组合成分股，盘前模式" in footer
+    assert "| 股票 | 策略/动作 | 预测生成时间 | 依据日 |" in footer
+    assert "| AAPL | A / 买入 |" in footer
+    assert "预测时参考价" in footer
+    assert "仅方向参考，不适用" in footer
 
     report_id = db.insert_report(AnalysisReport(
         code="PORTFOLIO_US", name="US", market="US", backtest_period="1y",
@@ -799,6 +935,8 @@ if __name__ == "__main__":
         test_signal_stabilizer_reuses_small_move,
         test_realtime_quote_keeps_ohlcv_and_checks_each_stock_freshness,
         test_premarket_quote_uses_extended_source_without_touching_tickflow,
+        test_extended_quote_without_depth_uses_conservative_liquidity_proxy,
+        test_extended_top_of_book_spread_controls_position_cap,
         test_missing_batch_quote_does_not_fall_back_to_individual_request,
         test_holdings_watchlist_balance_crud,
         test_database_uses_independent_connections_for_parallel_reads,
@@ -806,6 +944,9 @@ if __name__ == "__main__":
         test_portfolio_summary_shows_data_quality_gate,
         test_portfolio_summary_flags_profit_lock_and_ma120_support,
         test_portfolio_risk_snapshot_limits_concentration_and_correlation,
+        test_portfolio_zero_capacity_blocks_buy_signal_everywhere,
+        test_html_export_folds_only_long_tables,
+        test_portfolio_summary_removes_repeated_per_stock_signal_table,
         test_account_equity_and_exposure_use_same_frozen_prices,
         test_research_observations_parse_and_confirm_llm_candidates,
         test_research_observation_log_verifies_future_returns,

@@ -528,7 +528,8 @@ def _dedupe_observations(observations: list[ResearchObservation]) -> list[Resear
 
 
 def _split_symbol(value: str) -> tuple[str, str]:
-    value = value.strip()
+    # LLM 常把股票代码写成 **NVDA** / `NVDA`；Markdown 装饰不属于代码。
+    value = re.sub(r"[*_`]", "", value).strip()
     match = re.match(r"(.+?)（([A-Za-z0-9.\-]+)）", value)
     if match:
         return match.group(2).strip(), match.group(1).strip()

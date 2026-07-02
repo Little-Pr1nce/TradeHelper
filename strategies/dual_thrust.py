@@ -38,6 +38,9 @@ class DualThrustStrategy(DecisionFirstStrategy):
 
 
     suitable_regimes = ["trending_volatile"]
+    take_profit_mode = "conditional"
+    take_profit_rule = "收盘跌破Dual Thrust下轨或Score跌破退出阈值时平仓"
+    strategy_family = "channel_breakout"
 
     def tunable_params(self) -> list[dict]:
         return [

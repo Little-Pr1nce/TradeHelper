@@ -20,7 +20,7 @@
 | 风控官 | A/B/C/D 执行等级，结合事实一致性、数据质量、账户风险、样本外审计和历史期望 |
 | 20 个策略 | A-H、O、I-N，以及 P-T 条件触发与持仓风控覆盖策略 |
 | 回测可信度 | `StrategyDecision -> Order` 统一实盘/回测路径，T+1 撮合、动态滑点、跳空止损、市场规则和 Bootstrap 区间 |
-| 自动优化 | walk-forward 参数候选、跨窗口确认、晋升、回滚、负期望恢复候选和后台深度优化 |
+| 自动优化 | walk-forward 参数候选、基准超额收益、跨窗口确认、20天影子观察、晋升、回滚、负期望恢复候选和后台深度优化 |
 | 历史学习 | 买入与退出信号分开复盘，记录 1/3/5/10/20 日表现、MFE/MAE、策略健康度和形态表现 |
 | 数据质量 | OHLC、样本量、上市日期、实时价新鲜度、新闻时效和因子验证覆盖率共同形成交易闸门 |
 | 跨平台打包 | macOS `.app`、Windows 目录版 `.exe`，Windows 构建包含运行时烟雾测试 |
@@ -83,6 +83,7 @@ Tab3 不是 Tab1 的简单批量版。它额外考虑成本价、浮盈亏、现
 
 ```text
 action + execution_level + trigger_price + stop_loss + take_profit
++ take_profit_mode + take_profit_rule
 + max_loss_amount + position_pct + invalidation + missing_conditions
 ```
 
@@ -96,6 +97,8 @@ action + execution_level + trigger_price + stop_loss + take_profit
 | P-T | MA120 支撑、冲高锁利、持仓风险、反抽失败退出、统一条件触发计划 |
 
 P/T 对所有分析追加条件观察；Q/R/S 只在用户存在真实持仓时加载。覆盖策略由类的 `overlay_scope` 元数据自动发现。
+
+止盈分为三类：L/M 使用固定百分比目标并在回测中真实撮合；趋势/动量类可使用移动止盈；其余策略按反向信号或技术条件退出。只有固定目标计算传统风险收益比，动态/条件退出展示真实规则但不伪造比值。
 
 ## 执行等级
 
@@ -170,7 +173,7 @@ for f in tests/test_*.py; do venv/bin/python "$f" || exit 1; done
 
 Tab3 历史评估提供独立的美股/A股切换，并纳入该市场全部 Tab1/Tab3 预测；即使股票尚未录入组合，也会展示已验证、待验证和不可验证数量。
 
-当前基线为 **187 个测试通过**，覆盖数据源边界、新闻缓存、Alpha 因果性、20 个策略、Decision-first 路径、撮合、策略审计、参数生命周期、预测追踪、组合功能和可信度摘要。
+当前基线为 **204 个测试通过**，覆盖数据源边界、延伸时段流动性降级、新闻缓存、Alpha 因果性、20 个策略、Decision-first 路径、撮合、策略审计、参数生命周期、预测追踪、组合功能和可信度摘要。
 
 ## 打包
 
@@ -196,8 +199,8 @@ Windows GitHub Actions 使用 `.github/workflows/build-windows.yml`。本地 Win
 
 - LLM 观察候选的更多形态模板、命中率图表和 UI 明细查询。
 - 历史预测评估面板的全局筛选、钻取和图表化。
-- 更长模拟盘观察期和相对基准超额收益门槛。
-- 可靠的停复牌/ST 数据，以及美股延伸时段流动性细化。
+- 参数影子观察已落地；仍需让真实样本持续覆盖更多股票和市场状态。
+- 可靠的停复牌/ST 数据，以及用户具备订阅时可选的美股授权 Level 2 适配器。
 - Web 版完善和打包体积优化。
 
 详细完成度以 [UPGRADE_PLAN.md](./UPGRADE_PLAN.md) 为准。

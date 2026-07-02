@@ -44,6 +44,9 @@ class MA60TrendStrategy(DecisionFirstStrategy):
 
     # 只适合趋势行情，震荡市不触发
     suitable_regimes = ["trending", "trending_steady", "trending_volatile"]
+    take_profit_mode = "dynamic"
+    take_profit_rule = "最高收盘价减去策略ATR倍数；趋势破坏或到期也会退出"
+    strategy_family = "trend_following"
 
     def __init__(
         self,
