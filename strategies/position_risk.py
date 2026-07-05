@@ -24,6 +24,7 @@ class PositionRiskManagementStrategy(BaseExecutionStrategy):
 
     suitable_regimes: list[str] = []
     overlay_scope = "position"
+    signal_intent = "risk_exit"
     strategy_family = "position_risk"
 
     def __init__(

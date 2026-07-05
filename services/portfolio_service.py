@@ -724,23 +724,271 @@ def _pattern_label(pattern_type: str) -> str:
         "ma120_support": "MA120支撑",
         "momentum_chase": "动量追高",
         "position_risk": "持仓风控",
+        "failed_breakout": "假突破/突破失败",
+        "oversold_reversal": "超卖反转",
+        "trend_pullback": "趋势回调",
     }.get(pattern_type or "", pattern_type or "未知形态")
 
 
 def _build_historical_evaluation_markdown(
+    forecast_rows: list[dict],
+    plan_rows: list[dict],
     prediction_rows: list[dict],
     observation_rows: list[dict],
     market: str,
     exit_rows: list[dict] | None = None,
+    forecast_summary: dict | None = None,
+    joint_rows: list[dict] | None = None,
+    minute_rows: list[dict] | None = None,
+    context_rows: list[dict] | None = None,
 ) -> str:
     """构建历史预测评估面板 Markdown，用于 Tab3 UI 和报告复用。"""
     market_label = "美股" if market == "US" else "A股"
     lines = [
-        f"### 📈 {market_label}历史预测评估面板\n",
-        "> 只统计已到验证窗口并完成验证的记录；样本不足时不能作为可执行依据。\n",
+        f"### {market_label}历史预测评估面板：预测与策略分账\n",
+        "> 预测准不准与方案赚不赚钱分开统计；样本不足时不能作为可执行依据。\n",
     ]
 
+    lines.append("#### 新版独立概率预测\n")
+    if forecast_rows:
+        lines.extend([
+            "| 标的 | 周期 | 已验证 | 待验证 | 方向正确率 | Brier | Log Loss | ECE | 80%区间命中 |",
+            "|------|------:|------:|------:|------:|------:|------:|------:|------:|",
+        ])
+        for row in forecast_rows:
+            verified = int(row["verified"])
+            accuracy = f"{row['accuracy']:.0%}" if verified else "—"
+            brier = f"{row['brier_score']:.3f}" if verified else "—"
+            log_loss = f"{row['log_loss']:.3f}" if verified else "—"
+            ece = f"{row['ece']:.1%}" if verified else "—"
+            coverage = f"{row['interval_coverage']:.0%}" if verified else "—"
+            lines.append(
+                f"| {row['label']} | {row['horizon']}日 "
+                f"| {row['verified']} | {row['pending']} "
+                f"| {accuracy} | {brier} | {log_loss} | {ece} | {coverage} |"
+            )
+        lines.append("\n> Brier、Log Loss 和 ECE 都是越低越好；没有已验证样本时显示“—”，不把 0 当成完美预测。\n")
+    else:
+        lines.append("- 暂无新版独立预测。生成报告后会产生明确目标交易日的预测并自动验证。\n")
+
+    summary = forecast_summary or {}
+    calibration = summary.get("calibration_bins") or []
+    if calibration:
+        lines.extend([
+            "#### 预测校准曲线（置信度分箱）\n",
+            "| 预测置信度区间 | 样本 | 平均置信度 | 实际命中率 | 校准偏差 |",
+            "|------|------:|------:|------:|------:|",
+        ])
+        for item in calibration:
+            lines.append(
+                f"| {float(item.get('lower', 0)):.0%}–{float(item.get('upper', 0)):.0%} "
+                f"| {int(item.get('count', 0))} "
+                f"| {float(item.get('mean_confidence', 0)):.1%} "
+                f"| {float(item.get('accuracy', 0)):.1%} "
+                f"| {float(item.get('gap', 0)):.1%} |"
+            )
+        lines.append("")
+
+    regime_metrics = summary.get("regime_metrics") or {}
+    if regime_metrics:
+        regime_labels = {
+            "trending_volatile": "趋势高波", "trending_steady": "趋势平稳",
+            "ranging": "震荡", "transitional": "过渡", "unknown": "未知",
+        }
+        lines.extend([
+            "#### 不同市场状态下的预测表现\n",
+            "| 市场状态 | 样本 | 方向正确率 | Brier | Log Loss | ECE |",
+            "|------|------:|------:|------:|------:|------:|",
+        ])
+        for regime, item in sorted(regime_metrics.items()):
+            lines.append(
+                f"| {regime_labels.get(regime, regime)} "
+                f"| {int(item.get('samples', 0))} "
+                f"| {float(item.get('accuracy', 0)):.0%} "
+                f"| {float(item.get('brier_score', 0)):.3f} "
+                f"| {float(item.get('log_loss', 0)):.3f} "
+                f"| {float(item.get('ece', 0)):.1%} |"
+            )
+        lines.append("")
+
+    lines.append("#### 最终联合策略OOF：预测 + 策略 + 风控官\n")
+    if joint_rows:
+        lines.extend([
+            "| 标的 | 测试区间 | 决策点 | 交易 | 扣成本收益 | 基准收益 | 超额收益 | 夏普 | 最大回撤 | 漂移 | 结论 |",
+            "|------|------|------:|------:|------:|------:|------:|------:|------:|------|------|",
+        ])
+        for row in joint_rows[:20]:
+            stock = str(row.get("label") or row.get("code") or "")
+            trades = int(row.get("total_trades", 0))
+            excess = float(row.get("excess_return", 0) or 0)
+            conclusion = (
+                "样本不足" if trades < 3
+                else "正超额" if excess > 0
+                else "未跑赢基准"
+            )
+            drift_status = str(row.get("drift_status") or "stable")
+            drift_label = {
+                "stable": "稳定", "warning": "预警", "critical": "严重",
+            }.get(drift_status, drift_status)
+            lines.append(
+                f"| {stock} | {row.get('data_start', '')} 至 {row.get('data_end', '')} "
+                f"| {int(row.get('samples', 0))} | {int(row.get('total_trades', 0))} "
+                f"| {float(row.get('total_return', 0)):+.2%} "
+                f"| {float(row.get('benchmark_return', 0)):+.2%} "
+                f"| {float(row.get('excess_return', 0)):+.2%} "
+                f"| {float(row.get('sharpe_ratio', 0)):.2f} "
+                f"| {float(row.get('max_drawdown', 0)):.2%} | {drift_label} | {conclusion} |"
+            )
+        lines.append(
+            "\n> 该表只使用每个测试折之前的数据选择预测参数和策略；"
+            "它评价的是最终建议链，而不是单个策略的全样本回测。\n"
+        )
+        drift_rows = [
+            row for row in joint_rows
+            if str(row.get("drift_status") or "stable") in ("warning", "critical")
+        ]
+        for row in drift_rows[:8]:
+            reasons = "；".join(row.get("drift_reasons") or []) or "近期指标恶化"
+            lines.append(
+                f"> **漂移提醒 {row.get('label') or row.get('code')}**：{reasons}。"
+                "该提醒只会降低新开仓，不会阻止止损或锁利。\n"
+            )
+        horizon_lines = []
+        for row in joint_rows[:12]:
+            stock = str(row.get("label") or row.get("code") or "")
+            for horizon, metrics in sorted(
+                (row.get("horizon_metrics") or {}).items(), key=lambda item: int(item[0])
+            ):
+                horizon_lines.append(
+                    f"| {stock} | {horizon}日 | {int(metrics.get('samples', 0))} "
+                    f"| {float(metrics.get('brier_score', 0)):.3f} "
+                    f"| {float(metrics.get('log_loss', 0)):.3f} "
+                    f"| {float(metrics.get('ece', 0)):.1%} |"
+                )
+        if horizon_lines:
+            lines.extend([
+                "#### 联合OOF内的分周期预测质量\n",
+                "| 标的 | 周期 | 样本 | Brier | Log Loss | ECE |",
+                "|------|------:|------:|------:|------:|------:|",
+                *horizon_lines,
+                "",
+            ])
+        trace_lines = []
+        for row in joint_rows[:8]:
+            stock = str(row.get("label") or row.get("code") or "")
+            for event in (row.get("trace") or [])[-8:]:
+                for horizon, forecast in sorted(
+                    (event.get("forecasts") or {}).items(), key=lambda item: int(item[0])
+                ):
+                    actual = str(forecast.get("actual_direction") or "—")
+                    correct = forecast.get("correct")
+                    broker_status = str(event.get("broker_status") or "")
+                    if broker_status == "filled":
+                        broker_text = (
+                            f"成交{event.get('executed_action', '')} "
+                            f"{int(event.get('executed_shares', 0) or 0)}股"
+                            f"@{float(event.get('fill_price', 0) or 0):.2f}"
+                        )
+                    elif broker_status == "rejected":
+                        broker_text = "Broker拒绝/未成交"
+                    else:
+                        broker_text = "未提交订单"
+                    trace_lines.append(
+                        f"| {stock} | {event.get('date', '')} | {forecast.get('target_date') or horizon + '日后'} "
+                        f"| {horizon}日{forecast.get('direction', '—')} | {actual} "
+                        f"| {'正确' if correct == 1 else '错误' if correct == 0 else '待核'} "
+                        f"| {event.get('action', 'watch')}/{event.get('execution_level', 'C')} "
+                        f"| {broker_text} |"
+                    )
+        if trace_lines:
+            lines.extend([
+                "#### 联合OOF逐事件审计（最近记录）\n",
+                "| 标的 | 预测发生日 | 目标日 | 当时预测 | 实际结果 | 对错 | 策略决策 | Broker结果 |",
+                "|------|------|------|------|------|------|------|------|",
+                *trace_lines[:40],
+                "",
+            ])
+    else:
+        lines.append("- 暂无联合OOF结果；下一次后台预测优化完成后生成。\n")
+
+    lines.append("#### 盘中分钟K前瞻证据\n")
+    if minute_rows:
+        lines.extend([
+            "| 标的 | 分钟K | 交易日 | 来源 | 待验证方案 | 已验证方案 | 覆盖截止 |",
+            "|------|------:|------:|------|------:|------:|------|",
+        ])
+        for row in minute_rows[:20]:
+            lines.append(
+                f"| {row.get('label') or row.get('code', '')} "
+                f"| {int(row.get('bar_count', 0))} | {int(row.get('sessions', 0))} "
+                f"| {row.get('sources') or '—'} | {int(row.get('pending', 0))} "
+                f"| {int(row.get('evaluated', 0))} | {row.get('last_session') or '—'} |"
+            )
+        lines.append(
+            "\n> 分钟K只验证采集之后的盘中方案，并与正式日K隔离；"
+            "缺少信号后分钟路径时继续等待，不使用整日最高/最低价推断顺序。\n"
+        )
+    else:
+        lines.append("- 尚无分钟K前瞻证据；首次盘中分析后由后台开始积累。\n")
+
+    lines.append("#### 新闻/基本面历史时点快照\n")
+    if context_rows:
+        lines.extend([
+            "| 标的 | 快照 | 含新闻 | 含基本面 | 基本面来源 | 首次冻结 | 最近冻结 |",
+            "|------|------:|------:|------:|------|------|------|",
+        ])
+        for row in context_rows[:20]:
+            lines.append(
+                f"| {row.get('label') or row.get('code', '')} "
+                f"| {int(row.get('snapshot_count', 0))} "
+                f"| {int(row.get('news_snapshots', 0))} "
+                f"| {int(row.get('fundamental_snapshots', 0))} "
+                f"| {row.get('fundamental_sources') or '—'} "
+                f"| {str(row.get('first_captured_at') or '')[:10]} "
+                f"| {str(row.get('last_captured_at') or '')[:10]} |"
+            )
+        lines.append(
+            "\n> 快照只从应用真实抓取时间开始积累，不把今天看到的数据回填到过去；"
+            "覆盖不足前，新闻和基本面不会进入历史预测 OOF。\n"
+        )
+    else:
+        lines.append("- 尚无历史时点上下文；下一次 Tab1/Tab3 分析会开始冻结。\n")
+
+    lines.append("#### 新版交易方案表现\n")
+    if plan_rows:
+        intent_labels = {
+            "alpha_entry": "策略建仓", "alpha_exit": "策略退出",
+            "risk_exit": "风险退出", "profit_lock": "锁利",
+        }
+        lines.extend([
+            "| 股票/策略 | 意图 | 记录/独立日 | 扣成本平均表现 | 正收益率 | 平均有利波动 | 平均不利波动 | 验证证据 |",
+            "|------|------|------:|------:|------:|------:|------:|------|",
+        ])
+        for row in plan_rows[:20]:
+            if int(row.get("intraday_count", 0) or 0) > 0:
+                provider_count = int(row.get("provider_evidence_count", 0) or 0)
+                supplemental_count = int(row.get("supplemental_evidence_count", 0) or 0)
+                evidence = (
+                    f"分钟K：供应商{provider_count}，补充源{supplemental_count}"
+                    f"（{row.get('evidence_sources') or '来源未知'}）"
+                )
+            else:
+                evidence = "正式日K"
+            lines.append(
+                f"| {row.get('code', '')}/{row.get('strategy_key', '')} "
+                f"| {intent_labels.get(row.get('signal_intent', ''), row.get('signal_intent', ''))} "
+                f"| {int(row.get('count', 0))}/{int(row.get('independent_days', 0))} "
+                f"| {float(row.get('avg_net_return', 0) or 0):+.2%} "
+                f"| {float(row.get('positive_rate', 0) or 0):.0%} "
+                f"| {float(row.get('avg_mfe', 0) or 0):+.2%} "
+                f"| {float(row.get('avg_mae', 0) or 0):+.2%} | {evidence} |"
+            )
+        lines.append("")
+    else:
+        lines.append("- 暂无完成 5 个交易日复盘的新版交易方案。\n")
+
     if prediction_rows:
+        lines.append("#### 旧版动作派生记录（仅兼容参考）\n")
         lines.extend([
             "| 标的 | 已验证 | 待验证 | 不可验证 | 方向正确率 | 平均方向净收益 | 期望 |",
             "|------|------:|------:|------:|------:|------:|------|",
@@ -756,8 +1004,6 @@ def _build_historical_evaluation_markdown(
                 f"| {_expectancy_label(str(row.get('expectancy', 'insufficient')))} |"
             )
         lines.append("")
-    else:
-        lines.append("- 暂无已验证预测记录。继续生成报告后，系统会自动积累并验证。\n")
 
     if exit_rows:
         lines.extend([
@@ -781,8 +1027,8 @@ def _build_historical_evaluation_markdown(
     if observation_rows:
         lines.extend([
             "#### 观察形态表现\n",
-            "| 股票 | 形态 | 等级 | 样本 | 5日胜率 | 5日均值 | 10日均值 | 最大不利 | 期望 |",
-            "|------|------|------|------:|------:|------:|------:|------:|------|",
+            "| 股票 | 形态 | 等级 | 总样本 | LLM样本/胜率 | 5日胜率 | 5日均值 | 10日均值 | 最大不利 | 期望 |",
+            "|------|------|------|------:|------:|------:|------:|------:|------:|------|",
         ])
         for row in observation_rows:
             symbol = f"{row.get('name') or row.get('code')}（{row.get('code')}）"
@@ -791,6 +1037,8 @@ def _build_historical_evaluation_markdown(
                 f"| {_pattern_label(str(row.get('pattern_type', '')))} "
                 f"| {row.get('execution_level', '') or '—'} "
                 f"| {int(row.get('count', 0))} "
+                f"| {int(row.get('llm_count', 0))}/"
+                f"{float(row.get('llm_win_rate_5d', 0)):.0%} "
                 f"| {float(row.get('win_rate_5d', 0)):.0%} "
                 f"| {float(row.get('avg_return_5d', 0)):+.2%} "
                 f"| {float(row.get('avg_return_10d', 0)):+.2%} "
@@ -1303,6 +1551,12 @@ class PortfolioService:
         except Exception as e:
             logger.warning(f"预测追踪验证失败: {e}")
         try:
+            self.db.verify_due_forecasts()
+            self.db.verify_due_trade_plans()
+            self.db.verify_due_intraday_trade_plans()
+        except Exception as e:
+            logger.warning(f"新版独立预测验证失败: {e}")
+        try:
             self.db.batch_verify_research_observations()
         except Exception as e:
             logger.warning(f"研究员观察验证失败: {e}")
@@ -1321,6 +1575,30 @@ class PortfolioService:
                 label = stock.name if stock and stock.name else code
                 codes.append((code, f"{label}（{code}）"))
                 seen.add(code)
+
+        grouped_forecasts: dict[tuple[str, int], list] = {}
+        for forecast in self.db.get_forecasts(market=market, limit=5000):
+            grouped_forecasts.setdefault((forecast.code, forecast.horizon), []).append(forecast)
+        forecast_rows = []
+        for (code, horizon), items in sorted(grouped_forecasts.items()):
+            verified = [item for item in items if item.status == "verified"]
+            stock = self.db.get_stock(code)
+            label = f"{stock.name}（{code}）" if stock and stock.name else code
+            count = len(verified)
+            metrics = self.db.get_forecast_metrics(
+                market=market, code=code, horizon=horizon,
+            )
+            forecast_rows.append({
+                "label": label,
+                "horizon": horizon,
+                "verified": count,
+                "pending": sum(item.status == "pending" for item in items),
+                "accuracy": float(metrics.get("accuracy", 0.0)),
+                "brier_score": float(metrics.get("brier_score", 0.0)),
+                "log_loss": float(metrics.get("log_loss", 0.0)),
+                "ece": float(metrics.get("ece", 0.0)),
+                "interval_coverage": float(metrics.get("interval_coverage", 0.0)),
+            })
 
         prediction_rows: list[dict] = []
         exit_rows: list[dict] = []
@@ -1346,9 +1624,76 @@ class PortfolioService:
                 exit_rows.append({"label": label, **exit_row})
 
         observation_rows = self.db.get_research_observation_overview(market=market, limit=12)
+        plan_rows = self.db.get_trade_plan_metrics(market=market)
+        forecast_summary = self.db.get_forecast_metrics(market=market)
+        raw_joint_rows = self.db.get_joint_oof_runs(market=market, limit=200)
+        joint_rows = []
+        seen_joint_codes = set()
+        for row in raw_joint_rows:
+            code = str(row.get("code") or "")
+            if code in seen_joint_codes:
+                continue
+            seen_joint_codes.add(code)
+            row = self.db.get_joint_oof_health(code) or row
+            stock = self.db.get_stock(code)
+            row["label"] = f"{stock.name}（{code}）" if stock and stock.name else code
+            joint_rows.append(row)
+        minute_rows = self.db.get_intraday_evidence_overview(market)
+        for row in minute_rows:
+            code = str(row.get("code") or "")
+            stock = self.db.get_stock(code)
+            row["label"] = f"{stock.name}（{code}）" if stock and stock.name else code
+        context_rows = self.db.get_feature_context_overview(market)
+        for row in context_rows:
+            code = str(row.get("code") or "")
+            stock = self.db.get_stock(code)
+            row["label"] = f"{stock.name}（{code}）" if stock and stock.name else code
         return _build_historical_evaluation_markdown(
-            prediction_rows, observation_rows, market, exit_rows=exit_rows
+            forecast_rows, plan_rows, prediction_rows, observation_rows, market,
+            exit_rows=exit_rows,
+            forecast_summary=forecast_summary,
+            joint_rows=joint_rows,
+            minute_rows=minute_rows,
+            context_rows=context_rows,
         )
+
+    def generate_forecast_calibration_chart(self, market: str = "US") -> str:
+        """Render a reliability diagram for verified forecasts in one market."""
+        metrics = self.db.get_forecast_metrics(market=market or "US")
+        bins = metrics.get("calibration_bins") or []
+        if not bins:
+            return ""
+        try:
+            import os
+            from config.settings import Settings
+
+            chart_dir = Settings().chart_dir
+            os.environ.setdefault("MPLCONFIGDIR", chart_dir)
+            os.environ.setdefault("XDG_CACHE_HOME", chart_dir)
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            x = [float(item["mean_confidence"]) for item in bins]
+            y = [float(item["accuracy"]) for item in bins]
+            counts = [int(item["count"]) for item in bins]
+            figure, axis = plt.subplots(figsize=(6.8, 3.6), dpi=140)
+            axis.plot([0, 1], [0, 1], linestyle="--", color="#7b8794", label="Ideal")
+            axis.plot(x, y, marker="o", linewidth=2, color="#1976d2", label="Observed")
+            for px, py, count in zip(x, y, counts):
+                axis.annotate(f"n={count}", (px, py), xytext=(5, 5), textcoords="offset points", fontsize=8)
+            axis.set(xlim=(0, 1), ylim=(0, 1), xlabel="Mean predicted confidence", ylabel="Observed accuracy")
+            axis.set_title(f"{'US' if market == 'US' else 'A-share'} forecast calibration")
+            axis.grid(alpha=0.2)
+            axis.legend(loc="upper left")
+            figure.tight_layout()
+            path = os.path.join(chart_dir, f"forecast_calibration_{market}.png")
+            figure.savefig(path, bbox_inches="tight")
+            plt.close(figure)
+            return path
+        except Exception as exc:
+            logger.warning(f"预测校准图生成失败: {exc}")
+            return ""
 
     # ======================== 核心：持仓综合分析 ========================
 
@@ -1637,6 +1982,7 @@ class PortfolioService:
                 # 跑量化管道（跳过度参数，加速）
                 if on_progress:
                     on_progress(f"正在分析 {code}（{i+1}/{len(all_codes)}）：策略回测与信号检查...")
+                from services.forecast_service import get_forecast_configs
                 result = run_pipeline(
                     df, news_df=news_df, market=market,
                     initial_capital=backtest_capital,
@@ -1652,6 +1998,8 @@ class PortfolioService:
                     realtime_quote_quality=quote_quality,
                     listing_date=listing_date_map.get(code, ""),
                     requested_history_start=start,
+                    validation_mode=mode,
+                    forecast_configs=get_forecast_configs(self.db, market, code),
                 )
                 optimization_jobs.append({
                     "stock_code": code,
@@ -1739,6 +2087,8 @@ class PortfolioService:
                     "backtest": result.backtest,
                     "alpha_score": latest_score,
                     "news_summary": news_summary,
+                    "_context_news_df": news_df,
+                    "_context_fundamental_data": fundamental_data,
                     "market_regime": regime_label,
                     "market_regime_key": market_regime,
                     "rank_ic_info": rank_ic_info,
@@ -1749,6 +2099,7 @@ class PortfolioService:
                     # 新架构字段
                     "operation_plan": getattr(result, "operation_plan", None),
                     "signal_check": getattr(result, "signal_check", None),
+                    "forecasts": getattr(result, "forecasts", None) or [],
                     "strategy_audit": (
                         result.strategy_audit.summary
                         if getattr(result, "strategy_audit", None) else None
@@ -1811,10 +2162,24 @@ class PortfolioService:
         market_label = "美股" if market == "US" else "A股"
         report_content = ""
 
+        portfolio_forecast_section = ""
+        try:
+            from report.prompts import build_forecast_section
+            portfolio_forecasts = [
+                forecast
+                for data in all_items
+                for forecast in (data.get("forecasts") or [])
+            ]
+            portfolio_forecast_section = build_forecast_section(
+                portfolio_forecasts,
+                title="## 组合独立市场预测（代码生成）",
+            )
+            report_content += portfolio_forecast_section + "\n"
+        except Exception as e:
+            logger.warning(f"组合独立预测章节构建失败: {e}")
+
         try:
             from report.prompts import build_trust_hard_summary
-            portfolio_eval = self.db.get_prediction_evaluation_panel(portfolio_code)
-            portfolio_stats = self.db.get_prediction_stats(portfolio_code)
             scoped_data_quality = []
             scoped_signals = []
             for data in all_items:
@@ -1836,8 +2201,9 @@ class PortfolioService:
                     if d.get("strategy_audit")
                 ],
                 signal_checks=scoped_signals,
-                prediction_stats=portfolio_stats,
-                evaluation_panel=portfolio_eval,
+                prediction_stats=None,
+                evaluation_panel=None,
+                forecast_metrics=self.db.get_forecast_metrics(market=market),
                 health_reports=all_health,
                 scope=f"{market_label}组合：{len(holdings)}只持仓 + {len(watchlist)}只关注",
             )
@@ -1859,7 +2225,9 @@ class PortfolioService:
             market=market,
             period=period,
             mode=mode,
-            portfolio_operation_plan=portfolio_plan,
+            portfolio_operation_plan=(
+                portfolio_forecast_section + "\n" + (portfolio_plan or "")
+            ),
         )
         report_content += llm_report
 
@@ -1919,6 +2287,38 @@ class PortfolioService:
             mode=mode,
         )
         report_id = self.db.insert_report(report)
+
+        try:
+            from services.forecast_service import persist_forecasts_and_plans
+            for item in holdings_data + watchlist_data:
+                obj = item.get("holding") or item.get("watch_item")
+                if not obj:
+                    continue
+                persist_forecasts_and_plans(
+                    self.db,
+                    forecasts=item.get("forecasts") or [],
+                    signals=item.get("signal_check") or [],
+                    code=obj.code,
+                    market=market,
+                    mode=mode,
+                    reference_date=str(item.get("reference_date") or "")[:10],
+                    news_data=item.get("_context_news_df"),
+                    fundamental_data=item.get("_context_fundamental_data"),
+                    account_snapshot={
+                        "account_equity": account_equity,
+                        "cash": float(balance.us_balance if market == "US" else balance.a_balance),
+                        "shares": float(getattr(obj, "shares", 0) or 0),
+                        "cost_price": float(getattr(obj, "cost_price", 0) or 0),
+                    },
+                )
+                self.db.verify_due_forecasts(code=obj.code)
+                self.db.verify_due_trade_plans(code=obj.code)
+                self.db.verify_due_intraday_trade_plans(code=obj.code)
+            if mode == "intraday":
+                from services.intraday_data_service import schedule_intraday_capture
+                schedule_intraday_capture(all_codes, market)
+        except Exception as e:
+            logger.warning(f"Tab3 新版预测/交易方案入库失败: {e}")
 
         # Tab3 也要按单股+策略记录本次真实信号，否则策略健康度
         # 只会学到 Tab1，且无法评估组合报告中的减仓/退出建议。
@@ -2006,14 +2406,31 @@ class PortfolioService:
                     ],
                 }, ensure_ascii=False, sort_keys=True),
             )
-            self.db.insert_prediction(pred)
+            from services.analysis_service import LEGACY_PREDICTION_WRITES_ENABLED
+            if LEGACY_PREDICTION_WRITES_ENABLED:
+                self.db.insert_prediction(pred)
         except Exception as e:
             logger.warning(f"组合预测写入失败: {e}")
 
         # 依赖本次逐股预测写入的真实统计必须最后生成；旧逻辑在写入前只查
         # PORTFOLIO_US，并把“存在记录”硬编码成 1，导致组合报告严重少计。
         try:
-            from report.prompts import build_prediction_footer
+            from report.prompts import (
+                build_forecast_tracking_section,
+                build_prediction_footer,
+            )
+            verified_forecasts = [
+                forecast
+                for stock_code in all_codes
+                for forecast in self.db.get_forecasts(
+                    code=stock_code, status="verified", limit=5,
+                )
+            ]
+            report_content += build_forecast_tracking_section(
+                verified_forecasts,
+                self.db.get_forecast_metrics(market=market),
+                title="## 组合成分股独立预测验证",
+            )
             component_stats = self.db.get_prediction_stats_for_codes(
                 all_codes, mode=mode,
             )
@@ -2026,13 +2443,18 @@ class PortfolioService:
             tracking_mode_label = {
                 "pre": "盘前", "intraday": "盘中", "eod": "盘后",
             }.get(mode, mode)
-            report_content += build_prediction_footer(
-                portfolio_code,
-                component_stats,
-                component_validated,
-                unverified_count=pending_count,
-                scope_label=f"当前组合成分股，{tracking_mode_label}模式",
-            )
+            if (
+                int(getattr(component_stats, "total_predictions", 0) or 0) > 0
+                or component_validated
+                or pending_count > 0
+            ):
+                report_content += build_prediction_footer(
+                    portfolio_code,
+                    component_stats,
+                    component_validated,
+                    unverified_count=pending_count,
+                    scope_label=f"当前组合成分股，{tracking_mode_label}模式",
+                )
             self.db.update_report_content(report_id, report_content)
         except Exception as e:
             logger.warning(f"组合预测 footer 构建失败: {e}")

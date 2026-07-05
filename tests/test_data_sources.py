@@ -4,8 +4,10 @@
 
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -24,6 +26,7 @@ from alpha.fundamental import _extract_financials_from_finnhub
 from core.data_quality import evaluate_data_quality
 from core.pipeline import run_pipeline
 from data.database import Database
+from services.intraday_data_service import normalize_intraday_frame
 
 
 class DummyFetcher:
@@ -45,8 +48,8 @@ class RecordingFetcher:
 
     def fetch_price_history(self, code, start, end):
         self.calls.append((start, end))
-        if start == "2026-01-01":
-            return [PriceData(code=code, date="2026-01-01", open=1, high=2, low=1, close=2, volume=100)]
+        if start == "2026-01-02":
+            return [PriceData(code=code, date="2026-01-02", open=1, high=2, low=1, close=2, volume=100)]
         if end == "2026-01-15":
             return [PriceData(code=code, date="2026-01-15", open=3, high=4, low=3, close=4, volume=100)]
         return []
@@ -55,7 +58,7 @@ class RecordingFetcher:
 class MemoryPriceDB:
     def __init__(self):
         self.prices = [
-            PriceData(code="AAPL", date="2026-01-10", open=2, high=3, low=2, close=3, volume=100),
+            PriceData(code="AAPL", date="2026-01-09", open=2, high=3, low=2, close=3, volume=100),
             PriceData(code="AAPL", date="2026-01-12", open=2, high=3, low=2, close=3, volume=100),
         ]
 
@@ -73,8 +76,8 @@ class DirtyTailDB:
     def __init__(self):
         self.prices = [
             PriceData(code="MU", date="2026-01-02", open=100, high=102, low=98, close=100, volume=100),
-            PriceData(code="MU", date="2026-01-03", open=101, high=104, low=99, close=103, volume=100),
-            PriceData(code="MU", date="2026-01-04", open=1000, high=1010, low=990, close=1005, volume=100),
+            PriceData(code="MU", date="2026-01-05", open=101, high=104, low=99, close=103, volume=100),
+            PriceData(code="MU", date="2026-01-06", open=1000, high=1010, low=990, close=1005, volume=100),
         ]
 
     def get_prices(self, code, start_date="", end_date=""):
@@ -113,6 +116,14 @@ class IpoFetcher:
             PriceData(code=code, date="2026-06-11", open=145, high=160, low=140, close=155, volume=1000),
             PriceData(code=code, date="2026-06-12", open=155, high=162, low=150, close=158, volume=1200),
             PriceData(code=code, date="2026-06-15", open=158, high=165, low=154, close=161, volume=900),
+        ]
+
+
+class CleanRebuildFetcher:
+    def fetch_price_history(self, code, start, end):
+        return [
+            PriceData(code=code, date="2026-01-02", open=100, high=102, low=99, close=101, volume=1000),
+            PriceData(code=code, date="2026-01-05", open=101, high=103, low=100, close=102, volume=1200),
         ]
 
 
@@ -216,11 +227,11 @@ def test_fetch_cached_prices_backfills_head_and_tail():
     fetcher = RecordingFetcher()
     db = MemoryPriceDB()
     with patch("data.stock_fetcher.get_stock_fetcher", return_value=fetcher):
-        df = fetch_cached_prices("AAPL", "US", "2026-01-01", "2026-01-15", db=db)
+        df = fetch_cached_prices("AAPL", "US", "2026-01-02", "2026-01-15", db=db)
 
-    assert ("2026-01-01", "2026-01-09") in fetcher.calls
+    assert ("2026-01-02", "2026-01-08") in fetcher.calls
     assert ("2026-01-13", "2026-01-15") in fetcher.calls
-    assert df["date"].min().strftime("%Y-%m-%d") == "2026-01-01"
+    assert df["date"].min().strftime("%Y-%m-%d") == "2026-01-02"
     assert df["date"].max().strftime("%Y-%m-%d") == "2026-01-15"
 
 
@@ -240,11 +251,29 @@ def test_filter_prices_for_cache_drops_unfinished_and_invalid_bars():
     assert [p.date for p in filtered] == ["2026-01-02"]
 
 
+def test_dirty_persistent_cache_is_cleared_and_rebuilt_as_a_whole():
+    Database._instance = None
+    db = Database.init(tempfile.mktemp(suffix=".db"))
+    db.insert_prices([
+        PriceData("AAPL", "2026-01-02", 100, 102, 99, 101, 1000),
+        PriceData("AAPL", "2026-01-04", 101, 103, 100, 102, 1000),
+    ])
+    with patch("data.stock_fetcher.get_stock_fetcher", return_value=CleanRebuildFetcher()):
+        df = fetch_cached_prices(
+            "AAPL", "US", "2026-01-02", "2026-01-05",
+            db=db, listing_date="2020-01-01",
+        )
+
+    dates = [p.date for p in db.get_prices("AAPL")]
+    assert dates == ["2026-01-02", "2026-01-05"]
+    assert df["date"].dt.strftime("%Y-%m-%d").tolist() == dates
+
+
 def test_filter_prices_for_cache_quarantines_jump_tail():
     prices = [
         PriceData(code="MU", date="2026-01-02", open=100, high=102, low=98, close=100, volume=100),
-        PriceData(code="MU", date="2026-01-03", open=101, high=104, low=99, close=103, volume=100),
-        PriceData(code="MU", date="2026-01-04", open=1000, high=1010, low=990, close=1005, volume=100),
+        PriceData(code="MU", date="2026-01-05", open=101, high=104, low=99, close=103, volume=100),
+        PriceData(code="MU", date="2026-01-06", open=1000, high=1010, low=990, close=1005, volume=100),
         PriceData(code="MU", date="2026-01-05", open=1006, high=1020, low=1000, close=1015, volume=100),
     ]
 
@@ -254,7 +283,7 @@ def test_filter_prices_for_cache_quarantines_jump_tail():
         latest_completed_date="2026-01-05",
     )
 
-    assert [p.date for p in filtered] == ["2026-01-02", "2026-01-03"]
+    assert [p.date for p in filtered] == ["2026-01-02", "2026-01-05"]
 
 
 def test_fetch_cached_prices_ignores_dirty_cached_tail():
@@ -262,10 +291,10 @@ def test_fetch_cached_prices_ignores_dirty_cached_tail():
     fetcher = RecordingFetcher()
 
     with patch("data.stock_fetcher.get_stock_fetcher", return_value=fetcher):
-        df = fetch_cached_prices("MU", "US", "2026-01-02", "2026-01-04", db=db)
+        df = fetch_cached_prices("MU", "US", "2026-01-02", "2026-01-06", db=db)
 
-    assert df["date"].max().strftime("%Y-%m-%d") == "2026-01-03"
-    assert ("2026-01-04", "2026-01-04") in fetcher.calls
+    assert df["date"].max().strftime("%Y-%m-%d") == "2026-01-05"
+    assert ("2026-01-06", "2026-01-06") in fetcher.calls
 
 
 def test_fetch_cached_prices_clamps_window_to_ipo_and_allows_short_history():
@@ -390,11 +419,33 @@ def test_nasdaq_timestamp_is_parsed_as_eastern_time():
     assert ts == 1782116340000
 
 
+def test_minute_normalizer_keeps_only_valid_regular_session_bars():
+    frame = pd.DataFrame({
+        "时间": [
+            "2026-07-01 09:30:00", "2026-07-01 12:00:00",
+            "2026-07-01 13:00:00", "2026-07-01 15:01:00",
+        ],
+        "开盘": [100, 100, 101, 102], "最高": [101, 101, 102, 103],
+        "最低": [99, 99, 100, 101], "收盘": [100, 100, 101, 102],
+        "成交量": [10, 20, 30, 40],
+    }, index=[10, 20, 30, 40])
+    bars = normalize_intraday_frame(
+        frame, code="600000", market="A", source="test",
+        quality_status="supplemental",
+    )
+
+    assert [bar.session_date for bar in bars] == ["2026-07-01", "2026-07-01"]
+    assert [datetime.fromtimestamp(
+        bar.timestamp_ms / 1000, ZoneInfo("Asia/Shanghai")
+    ).strftime("%H:%M") for bar in bars] == ["09:30", "13:00"]
+
+
 if __name__ == "__main__":
     test_tickflow_availability_ok()
     test_extended_quote_availability_ok()
     test_fetch_cached_prices_backfills_head_and_tail()
     test_filter_prices_for_cache_drops_unfinished_and_invalid_bars()
+    test_dirty_persistent_cache_is_cleared_and_rebuilt_as_a_whole()
     test_filter_prices_for_cache_quarantines_jump_tail()
     test_fetch_cached_prices_ignores_dirty_cached_tail()
     test_fetch_cached_prices_clamps_window_to_ipo_and_allows_short_history()
@@ -406,4 +457,5 @@ if __name__ == "__main__":
     test_tickflow_fetch_quotes_respects_five_symbol_batch_limit()
     test_finnhub_debt_ratio_uses_normalized_metric()
     test_nasdaq_timestamp_is_parsed_as_eastern_time()
-    print("15/15 passed")
+    test_minute_normalizer_keeps_only_valid_regular_session_bars()
+    print("17/17 passed")

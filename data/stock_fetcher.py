@@ -714,6 +714,22 @@ def _is_cacheable_daily_price(price: PriceData) -> bool:
     return True
 
 
+def _is_market_session(day_text: str, market: str) -> bool:
+    """日K只能落在对应交易所会话日；依赖缺失时至少严格排除周末。"""
+    try:
+        day = dt_date.fromisoformat(str(day_text)[:10])
+    except (TypeError, ValueError):
+        return False
+    if day.weekday() >= 5:
+        return False
+    try:
+        import exchange_calendars as xcals
+        calendar = xcals.get_calendar("XSHG" if (market or "").upper() == "A" else "XNYS")
+        return bool(calendar.is_session(day.isoformat()))
+    except Exception:
+        return True
+
+
 def _filter_prices_for_cache(
     prices: list[PriceData],
     market: str,
@@ -729,12 +745,16 @@ def _filter_prices_for_cache(
     filtered: list[PriceData] = []
     dropped_unfinished = 0
     dropped_bad_ohlc = 0
+    dropped_non_session = 0
     for price in prices:
         if str(price.date) > safe_latest:
             dropped_unfinished += 1
             continue
         if not _is_cacheable_daily_price(price):
             dropped_bad_ohlc += 1
+            continue
+        if not _is_market_session(str(price.date), market):
+            dropped_non_session += 1
             continue
         filtered.append(price)
     if dropped_unfinished:
@@ -743,6 +763,10 @@ def _filter_prices_for_cache(
         )
     if dropped_bad_ohlc:
         logger.warning(f"跳过 {dropped_bad_ohlc} 条异常OHLC日K，不使用/不写入缓存（market={market}）")
+    if dropped_non_session:
+        logger.warning(
+            f"跳过 {dropped_non_session} 条非交易日日K，不使用/不写入缓存（market={market}）"
+        )
     filtered = sorted(filtered, key=lambda p: str(p.date))
     stable: list[PriceData] = []
     prev_close = previous_close
@@ -930,7 +954,14 @@ def fetch_cached_prices(
     if start > end:
         return None
 
-    prices = _sanitize_cached_prices_for_use(db.get_prices(code, start, end), market, code)
+    raw_cached_prices = db.get_prices(code, start, end)
+    prices = _sanitize_cached_prices_for_use(raw_cached_prices, market, code)
+    if len(prices) != len(raw_cached_prices) and hasattr(db, "clear_price_history"):
+        removed = db.clear_price_history(code)
+        logger.warning(
+            f"{code} 缓存存在不可信日K，已清除整段 {removed} 条并准备从当前数据源重建"
+        )
+        prices = []
     fetcher = get_stock_fetcher(market)
 
     if not prices:

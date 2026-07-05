@@ -19,6 +19,7 @@ from core.strategy_pool import (
     _make_cache_key,
     _select_representative_variants,
     _update_per_stock_params,
+    _passes_risk_adjusted_benchmark,
 )
 from strategies import get_execution_strategy
 from data.database import Database
@@ -269,7 +270,49 @@ def test_positive_absolute_return_cannot_promote_when_losing_to_benchmark():
     assert lifecycle["promoted"] is False
     row = db.get_strategy_param_candidates("AAPL", "A")[0]
     assert row["status"] == "rejected"
-    assert "基准超额收益" in row["reason"]
+    assert "超额/风险调整优势" in row["reason"]
+
+
+def test_risk_adjusted_path_can_qualify_in_bull_market():
+    assert _passes_risk_adjusted_benchmark(
+        strategy_return=0.085,
+        strategy_sharpe=1.40,
+        strategy_drawdown=0.07,
+        benchmark_return=0.10,
+        benchmark_sharpe=1.10,
+        benchmark_drawdown=0.12,
+    ) is True
+    assert _passes_risk_adjusted_benchmark(
+        strategy_return=0.06,
+        strategy_sharpe=1.40,
+        strategy_drawdown=0.07,
+        benchmark_return=0.10,
+        benchmark_sharpe=1.10,
+        benchmark_drawdown=0.12,
+    ) is False
+
+    db = _fresh_db()
+    lifecycle = db.record_strategy_param_candidate(
+        stock_code="AAPL",
+        strategy_key="A",
+        params_json='{"entry_pct": 0.75}',
+        test_sharpe=1.3,
+        walk_forward={
+            "pass_oos": True,
+            "avg_oos_return": 0.08,
+            "avg_oos_excess_return": -0.02,
+            "avg_oos_sharpe": 1.3,
+            "oos_trades": 8,
+            "selected_windows": 3,
+            "positive_excess_windows": 0,
+            "risk_adjusted_windows": 2,
+            "qualified_windows": 2,
+            "promotion_path": "risk_adjusted",
+        },
+        data_end="2026-03-31",
+    )
+    assert lifecycle["eligible"] is True
+    assert lifecycle["promotion_path"] == "risk_adjusted"
 
 
 def test_candidate_failure_resets_shadow_confirmations():
@@ -317,5 +360,6 @@ if __name__ == "__main__":
     test_deep_optimization_run_state_prevents_duplicate_jobs()
     test_demoted_strategy_gets_conservative_recovery_variants()
     test_positive_absolute_return_cannot_promote_when_losing_to_benchmark()
+    test_risk_adjusted_path_can_qualify_in_bull_market()
     test_candidate_failure_resets_shadow_confirmations()
-    print("10/10 passed")
+    print("11/11 passed")

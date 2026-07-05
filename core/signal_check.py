@@ -27,6 +27,8 @@ from utils.market_rules import estimate_planned_loss_with_cost, get_market_rules
 
 logger = logging.getLogger(__name__)
 
+FORECAST_HORIZON_WEIGHTS = {1: 0.50, 3: 0.30, 5: 0.20}
+
 
 # ══════════════════════════════════════════════════════════════════
 # 数据结构
@@ -39,6 +41,7 @@ class SignalResult:
     strategy_name: str             # 策略可读名
     base_key: str                  # "A", "B", ...
     signal: str                    # "buy" | "sell" | "no_signal"
+    signal_intent: str = ""        # 预测方向与交易/风控意图严格分离
     strategy_family: str = ""      # 同逻辑家族只允许一个代表进入执行方案
     entry_price: float = 0.0       # 建议入场价
     stop_loss: float = 0.0         # 止损价
@@ -46,6 +49,7 @@ class SignalResult:
     take_profit_mode: str = "none" # fixed / dynamic / conditional / none
     take_profit_rule: str = ""     # 动态公式或条件退出说明
     position_pct: float = 0.0      # 建议仓位比例
+    max_loss_amount: float = 0.0   # 按真实/参考权益计算的计划最大亏损
     reason: str = ""               # 入场理由（来自 Order.reason）
     audit_verdict: str = ""        # PASS / CONDITIONAL
     test_sharpe: float = 0.0       # 验证期夏普
@@ -62,6 +66,7 @@ class SignalResult:
             "name": self.strategy_name,
             "strategy_family": self.strategy_family,
             "signal": self.signal,
+            "signal_intent": self.signal_intent,
             "no_signal_reason": self.no_signal_reason,
             "entry_price": self.entry_price,
             "stop_loss": self.stop_loss,
@@ -69,6 +74,7 @@ class SignalResult:
             "take_profit_mode": self.take_profit_mode,
             "take_profit_rule": self.take_profit_rule,
             "position_pct": self.position_pct,
+            "max_loss_amount": round(self.max_loss_amount, 2),
             "reason": self.reason,
             "audit": self.audit_verdict,
             "test_sharpe": round(self.test_sharpe, 4),
@@ -100,10 +106,14 @@ def check_signals(
     market: str,
     initial_capital: float = 100000.0,
     account_equity: float | None = None,
+    account_cash: float | None = None,
     current_position: Position | None = None,
+    holding_days: int = 0,
     current_price: float | None = None,
     current_bar: dict | None = None,
     data_quality: dict | None = None,
+    forecasts: list | None = None,
+    policy_health: dict | None = None,
 ) -> list[SignalResult]:
     """
     对每个策略变体检查当前是否满足入场条件。
@@ -131,17 +141,26 @@ def check_signals(
     sizing_equity = initial_capital if account_equity is None else max(float(account_equity), 0.0)
 
     results: list[SignalResult] = []
+    forecast_map = {
+        int(getattr(item, "horizon", 0) or 0): item
+        for item in (forecasts or [])
+        if int(getattr(item, "horizon", 0) or 0) > 0
+    }
     for v in variants:
         try:
             context = StrategyContext(
                 date=date_str,
                 equity=sizing_equity,
-                cash=sizing_equity,
+                cash=(
+                    sizing_equity if account_cash is None
+                    else max(float(account_cash), 0.0)
+                ),
                 position=current_position or Position(),
                 market=market,
                 cooldown_until=-1,     # 无冷却
-                holding_days=0,
+                holding_days=max(int(holding_days or 0), 0),
                 market_median_volatility=med_vol,
+                forecasts=forecast_map,
             )
             decision = v.strategy.generate_decision(df, context)
             orders = decision_to_orders(decision, context)
@@ -156,6 +175,11 @@ def check_signals(
                 strategy_name=v.strategy.name,
                 base_key=v.base_key,
                 signal=signal,
+                signal_intent=(
+                    getattr(decision, "signal_intent", "")
+                    or getattr(v.strategy, "signal_intent", "")
+                    or ("alpha_entry" if signal == "buy" else "alpha_exit" if signal == "sell" else "")
+                ),
                 strategy_family=(
                     getattr(v.strategy, "strategy_family", "")
                     or v.strategy.__class__.__name__
@@ -167,6 +191,7 @@ def check_signals(
                 sr.invalidation = getattr(decision, "invalidation", "") or ""
                 sr.take_profit_mode = getattr(decision, "take_profit_mode", "none") or "none"
                 sr.take_profit_rule = getattr(decision, "take_profit_rule", "") or ""
+                sr.max_loss_amount = float(getattr(decision, "max_loss_amount", 0) or 0)
 
             if buy_orders:
                 o = buy_orders[0]
@@ -203,6 +228,8 @@ def check_signals(
                 sr.no_signal_reason = "真实账户权益为0，禁止新开仓；请先录入可用现金或有效持仓"
 
             _apply_data_quality_to_signal(sr, data_quality)
+            _apply_forecast_to_signal(sr, forecast_map)
+            _apply_joint_oof_to_signal(sr, policy_health)
             results.append(sr)
         except Exception as e:
             logger.debug(f"信号检查失败 {v.variant_label}: {e}")
@@ -217,6 +244,131 @@ def check_signals(
     buy_count = sum(1 for r in results if r.signal == "buy")
     logger.info(f"信号检查: {len(results)} 策略, {buy_count} 个发出买入信号")
     return results
+
+
+def build_forecast_consensus(forecasts) -> dict:
+    """Aggregate validated 1/3/5-session probabilities without upgrading risk."""
+    if isinstance(forecasts, dict):
+        forecast_map = forecasts
+    else:
+        forecast_map = {
+            int(getattr(item, "horizon", 0) or 0): item
+            for item in (forecasts or [])
+        }
+    used = []
+    weighted_score = 0.0
+    total_weight = 0.0
+    signs = []
+    for horizon, base_weight in FORECAST_HORIZON_WEIGHTS.items():
+        item = forecast_map.get(horizon)
+        confidence = float(getattr(item, "confidence", 0.0) or 0.0) if item else 0.0
+        if item is None or confidence <= 0:
+            continue
+        up = float(getattr(item, "prob_up", 0.0) or 0.0)
+        down = float(getattr(item, "prob_down", 0.0) or 0.0)
+        score = up - down
+        weighted_score += base_weight * score
+        total_weight += base_weight
+        sign = 1 if score >= 0.05 else -1 if score <= -0.05 else 0
+        signs.append(sign)
+        used.append({
+            "horizon": horizon, "direction": str(getattr(item, "direction", "neutral")),
+            "score": score, "confidence": confidence,
+        })
+    if total_weight <= 0:
+        return {
+            "direction": "unknown", "score": 0.0, "confidence": 0.0,
+            "validated_horizons": [], "conflict": False, "detail": "无已验证预测周期",
+        }
+    score = weighted_score / total_weight
+    direction = "bullish" if score >= 0.06 else "bearish" if score <= -0.06 else "neutral"
+    nonzero = {value for value in signs if value != 0}
+    conflict = len(nonzero) > 1
+    detail = "，".join(
+        f"{item['horizon']}日{item['direction']}({item['score']:+.2f})" for item in used
+    )
+    return {
+        "direction": direction,
+        "score": float(score),
+        "confidence": float(abs(score)),
+        "validated_horizons": [item["horizon"] for item in used],
+        "conflict": conflict,
+        "detail": detail,
+    }
+
+
+def _apply_forecast_to_signal(signal: SignalResult, forecasts) -> None:
+    """多周期军师层只降低新开仓风险；风险退出与锁利不受阻拦。"""
+    if signal.signal != "buy":
+        return
+    if signal.signal_intent != "alpha_entry":
+        return
+    consensus = build_forecast_consensus(forecasts)
+    direction = consensus["direction"]
+    confidence = float(consensus["confidence"])
+    if consensus["conflict"]:
+        if signal.execution_level == "A":
+            signal.execution_level = "B"
+        signal.position_pct *= 0.75
+        signal.max_loss_amount *= 0.75
+        note = f"1/3/5日预测存在方向冲突（{consensus['detail']}），新开仓仓位降至75%"
+        signal.reason = f"{signal.reason}；{note}" if signal.reason else note
+        return
+    if direction != "bearish" or confidence < 0.06:
+        return
+    levels = {"A": "B", "B": "C", "C": "C", "D": "D"}
+    signal.execution_level = levels.get(signal.execution_level, "C")
+    multiplier = 0.5 if len(consensus["validated_horizons"]) >= 2 else 0.7
+    signal.position_pct *= multiplier
+    signal.max_loss_amount *= multiplier
+    note = (
+        f"多周期预测共识偏空（{consensus['detail']}），军师层降低新开仓等级"
+        f"并将仓位调整为{multiplier:.0%}"
+    )
+    signal.reason = f"{signal.reason}；{note}" if signal.reason else note
+
+
+def _apply_joint_oof_to_signal(signal: SignalResult, policy_health: dict | None) -> None:
+    """Allow mature combined-policy OOF evidence to reduce new-entry risk only."""
+    if not policy_health or signal.signal != "buy" or signal.signal_intent != "alpha_entry":
+        return
+    samples = int(policy_health.get("samples", 0) or 0)
+    trades = int(policy_health.get("total_trades", 0) or 0)
+    total_return = float(policy_health.get("total_return", 0.0) or 0.0)
+    excess_return = float(policy_health.get("excess_return", 0.0) or 0.0)
+    sharpe = float(policy_health.get("sharpe_ratio", 0.0) or 0.0)
+    if samples < 40 or trades < 5:
+        return
+    drift_status = str(policy_health.get("drift_status") or "stable")
+    if drift_status == "warning" and (total_return >= 0 or excess_return >= 0):
+        if signal.execution_level == "A":
+            signal.execution_level = "B"
+        signal.position_pct *= 0.75
+        signal.max_loss_amount *= 0.75
+        reasons = "；".join(policy_health.get("drift_reasons") or [])
+        note = f"联合OOF出现性能漂移（{reasons or '近期表现下降'}），新开仓仓位降至75%"
+        signal.reason = f"{signal.reason}；{note}" if signal.reason else note
+        return
+    if total_return >= 0 or excess_return >= 0:
+        return
+
+    note = (
+        f"联合OOF历史表现偏弱（{trades}笔，收益{total_return:+.1%}，"
+        f"超额{excess_return:+.1%}），新开仓降级"
+    )
+    if trades >= 8 and total_return <= -0.03 and excess_return <= -0.03 and sharpe < 0:
+        signal.signal = "no_signal"
+        signal.execution_level = "C"
+        signal.position_pct = 0.0
+        signal.max_loss_amount = 0.0
+        signal.no_signal_reason = note + "，仅保留观察"
+        signal.reason = f"{signal.reason}；{note}" if signal.reason else note
+        return
+    levels = {"A": "B", "B": "C", "C": "C", "D": "D"}
+    signal.execution_level = levels.get(signal.execution_level, "C")
+    signal.position_pct *= 0.5
+    signal.max_loss_amount *= 0.5
+    signal.reason = f"{signal.reason}；{note}" if signal.reason else note
 
 
 def _compute_market_volatility(df: pd.DataFrame) -> float:
@@ -1250,9 +1402,13 @@ def run_signal_check(
     current_bar: dict | None = None,
     final_score: float = 0.0,
     account_equity: float | None = None,
+    account_cash: float | None = None,
     current_position: Position | None = None,
+    holding_days: int = 0,
     health_data: list[dict] | None = None,  # 策略健康度数据
     data_quality: dict | None = None,
+    forecasts: list | None = None,
+    policy_health: dict | None = None,
 ) -> tuple[list[SignalResult], OperationPlan | None]:
     """
     一步完成：信号检查 → 排序 → 操作方案生成。
@@ -1273,10 +1429,14 @@ def run_signal_check(
     signals = check_signals(
         analysis_df, variants, market,
         account_equity=account_equity,
+        account_cash=account_cash,
         current_position=current_position,
+        holding_days=holding_days,
         current_price=current_price,
         current_bar=current_bar,
         data_quality=data_quality,
+        forecasts=forecasts,
+        policy_health=policy_health,
     )
 
     # ⑤ 策略排序（含健康度数据）
@@ -1287,7 +1447,14 @@ def run_signal_check(
         float(analysis_df["close"].iloc[-1])
         if "close" in analysis_df.columns and len(analysis_df) > 0 else 0.0
     )
-    bias = "bullish" if final_score > 0.05 else ("bearish" if final_score < -0.05 else "neutral")
+    forecast_consensus = build_forecast_consensus(forecasts)
+    bias = (
+        forecast_consensus["direction"]
+        if forecast_consensus["direction"] in ("bullish", "bearish", "neutral")
+        else "bullish" if final_score > 0.05
+        else "bearish" if final_score < -0.05
+        else "neutral"
+    )
     plan = generate_operation_plan(
         ranked, price, bias, analysis_df,
         account_equity=account_equity,
@@ -1307,6 +1474,7 @@ def refresh_realtime_signal_plan(
     account_equity: float | None = None,
     current_position: Position | None = None,
     stock_code: str = "",
+    mode: str = "intraday",
 ) -> pd.DataFrame:
     """用实时 OHLC 重算当前决策，不重复执行回测和参数搜索。"""
     current_price = float(
@@ -1355,6 +1523,24 @@ def refresh_realtime_signal_plan(
     analysis_df = _apply_current_price_snapshot(
         pipeline_result.df, current_price, market, current_quote
     )
+    if stock_code:
+        try:
+            from core.forecast_engine import generate_forecasts
+            from data.database import Database
+            from services.forecast_service import get_forecast_configs
+
+            pipeline_result.forecasts = generate_forecasts(
+                analysis_df,
+                code=stock_code,
+                market=market,
+                mode=mode,
+                market_regime=getattr(pipeline_result, "market_regime", "unknown"),
+                configs_by_horizon=get_forecast_configs(
+                    Database(), market, stock_code,
+                ),
+            )
+        except Exception as exc:
+            logger.warning(f"实时独立预测未刷新（非致命）: {exc}")
     latest_score = 0.0
     if "Final_Score" in analysis_df.columns:
         valid_scores = analysis_df["Final_Score"].dropna()
@@ -1362,10 +1548,14 @@ def refresh_realtime_signal_plan(
             latest_score = float(valid_scores.iloc[-1])
 
     health_data = []
+    policy_health = {}
     if stock_code:
         try:
             from data.database import Database
-            health_data = Database().get_strategy_health_report(stock_code)
+            database = Database()
+            health_data = database.get_strategy_health_report(stock_code)
+            joint_runs = database.get_joint_oof_runs(code=stock_code, limit=1)
+            policy_health = joint_runs[0] if joint_runs else {}
         except Exception as exc:
             logger.warning(f"实时策略健康度读取失败（非致命）: {exc}")
 
@@ -1391,6 +1581,8 @@ def refresh_realtime_signal_plan(
         current_position=current_position,
         health_data=health_data,
         data_quality=getattr(pipeline_result, "data_quality", None),
+        forecasts=getattr(pipeline_result, "forecasts", None),
+        policy_health=policy_health,
     )
     pipeline_result.signal_check = [item.to_dict() for item in ranked]
     pipeline_result.operation_plan = plan.markdown if plan else None

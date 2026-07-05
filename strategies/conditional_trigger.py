@@ -16,6 +16,7 @@ class ConditionalTriggerStrategy(BaseExecutionStrategy):
 
     suitable_regimes: list[str] = []
     overlay_scope = "always"
+    signal_intent = "plan"
     strategy_family = "conditional_planner"
 
     @property

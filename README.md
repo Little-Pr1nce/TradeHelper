@@ -20,7 +20,7 @@
 | 风控官 | A/B/C/D 执行等级，结合事实一致性、数据质量、账户风险、样本外审计和历史期望 |
 | 20 个策略 | A-H、O、I-N，以及 P-T 条件触发与持仓风控覆盖策略 |
 | 回测可信度 | `StrategyDecision -> Order` 统一实盘/回测路径，T+1 撮合、动态滑点、跳空止损、市场规则和 Bootstrap 区间 |
-| 自动优化 | walk-forward 参数候选、基准超额收益、跨窗口确认、20天影子观察、晋升、回滚、负期望恢复候选和后台深度优化 |
+| 自动优化 | walk-forward 参数候选、超额收益/风险调整双通道、跨窗口确认、20天影子观察、晋升、回滚、负期望恢复候选和后台深度优化 |
 | 历史学习 | 买入与退出信号分开复盘，记录 1/3/5/10/20 日表现、MFE/MAE、策略健康度和形态表现 |
 | 数据质量 | OHLC、样本量、上市日期、实时价新鲜度、新闻时效和因子验证覆盖率共同形成交易闸门 |
 | 跨平台打包 | macOS `.app`、Windows 目录版 `.exe`，Windows 构建包含运行时烟雾测试 |
@@ -154,9 +154,9 @@ UI (ui/)
 
 ## 数据库
 
-SQLite 使用 WAL 模式，当前 14 张表：
+SQLite 使用 WAL 模式，当前 20 张表：
 
-`stocks`、`price_history`、`reports`、`news_sentiment`、`news_refresh_state`、`holdings`、`watchlist`、`account_balance`、`prediction_log`、`bt_variant_cache`、`per_stock_params`、`strategy_param_candidates`、`deep_optimization_runs`、`research_observation_log`。
+`stocks`、`price_history`、`intraday_price_history`、`reports`、`news_sentiment`、`news_refresh_state`、`holdings`、`watchlist`、`account_balance`、`forecast_log`、`feature_context_snapshots`、`forecast_model_versions`、`trade_plan_log`、`joint_oof_runs`、`prediction_log`、`bt_variant_cache`、`per_stock_params`、`strategy_param_candidates`、`deep_optimization_runs`、`research_observation_log`。
 
 数据库初始化会自动建表和执行兼容迁移。预测与研究员观察使用稳定 `event_key` 去重，重复运行同一事件不会虚增学习样本。
 
@@ -173,7 +173,7 @@ for f in tests/test_*.py; do venv/bin/python "$f" || exit 1; done
 
 Tab3 历史评估提供独立的美股/A股切换，并纳入该市场全部 Tab1/Tab3 预测；即使股票尚未录入组合，也会展示已验证、待验证和不可验证数量。
 
-当前基线为 **204 个测试通过**，覆盖数据源边界、延伸时段流动性降级、新闻缓存、Alpha 因果性、20 个策略、Decision-first 路径、撮合、策略审计、参数生命周期、预测追踪、组合功能和可信度摘要。
+当前基线为 **14 个测试文件、249 个测试通过**，覆盖数据源边界、交易所会话日、污染缓存整段重建、新闻/基本面历史时点快照、Alpha 因果性、四类受控预测 Challenger、标签成熟隔离、双窗口 OOF、配对时间块 Bootstrap/ECE/区间覆盖晋升、概率收益同源分布、多周期联合策略嵌套 OOF、同版本漂移、Decision/Broker 成交分账、逐股 Champion 与在线回滚、证据质量跨日加权置信区间、薄样本闸门、分钟证据来源优先级、旧库迁移和A股盘中T+1、20 个策略、Decision-first 路径、LLM形态命中率分账、撮合、策略审计、组合功能和 PDF 报告排版。
 
 ## 打包
 
@@ -197,6 +197,7 @@ Windows GitHub Actions 使用 `.github/workflows/build-windows.yml`。本地 Win
 
 ## 当前未完成重点
 
+- **P0/P1 可信度升级已落地**：新闻/基本面按真实抓取时点冻结，策略样本按独立交易日和证据质量折算；预测 Challenger 已包含相似行情、正则化多分类、平滑浅层概率树和集成模型，只有双窗口 OOF 优于基准才晋升。联合 OOF 提供逐事件审计和漂移降级，LLM 形态命中率与系统规则分账。快照和分钟证据仍需随真实运行自然积累，覆盖不足时不会强行参与训练。详见 [UPGRADE_PLAN.md](./UPGRADE_PLAN.md)。
 - LLM 观察候选的更多形态模板、命中率图表和 UI 明细查询。
 - 历史预测评估面板的全局筛选、钻取和图表化。
 - 参数影子观察已落地；仍需让真实样本持续覆盖更多股票和市场状态。

@@ -32,6 +32,7 @@ from indicators.technical import calc_all_indicators
 from services.analysis_service import _single_stock_research_item
 from services.portfolio_service import (
     PortfolioService,
+    _build_historical_evaluation_markdown,
     _build_portfolio_operation_summary,
     _compute_portfolio_risk_snapshot,
     _estimate_account_equity,
@@ -49,6 +50,7 @@ from services.research_observations import (
 )
 from report.prompts import build_prediction_footer
 from report.html_enhancer import fold_long_html_tables
+from report.pdf_exporter import _build_pdf_table, _get_styles, _inline_md_to_html
 from services.signal_stabilizer import SignalStabilizer
 
 
@@ -473,6 +475,19 @@ def test_html_export_folds_only_long_tables():
     assert short in rendered
 
 
+def test_pdf_tables_wrap_cells_and_normalize_literal_bold_tags():
+    rows = [
+        ["股票", "研究员观察", "系统理由", "下一步", "执行级别", "备注"],
+        ["AAPL", "很长的观察说明" * 8, "<b>我存疑</b>：需要继续验证" * 4,
+         "等待条件", "C", "非交易指令"],
+    ]
+    table = _build_pdf_table(rows, _get_styles())
+
+    assert abs(sum(table._colWidths) - 460.0) < 0.01
+    assert all(hasattr(cell, "wrap") for row in table._cellvalues for cell in row)
+    assert _inline_md_to_html("<b>我存疑</b>") == "<b>我存疑</b>"
+
+
 def test_portfolio_summary_removes_repeated_per_stock_signal_table():
     watch = WatchItem(code="NEW", name="NewCandidate", market="US")
     md = _build_portfolio_operation_summary(
@@ -586,6 +601,74 @@ def test_research_observations_parse_and_confirm_llm_candidates():
     assert "待验证 | C" in section
     assert "SanDisk（SNDK）" in section
     assert "系统反驳 | D" in section
+
+
+def test_llm_observation_templates_are_canonical_and_scored_separately():
+    parsed = parse_llm_observations("""
+### 研究员观察候选
+| 股票 | LLM观察 |
+|------|------|
+| AAPL | 创新高后假突破并回落 |
+| AMD | RSI超卖并触碰布林下轨 |
+| MSFT | 上升趋势回踩MA20 |
+""")
+    assert [item.pattern_type for item in parsed] == [
+        "failed_breakout", "oversold_reversal", "trend_pullback",
+    ]
+
+    observation = ResearchObservation(
+        code="AAPL", name="Apple", observation="创新高后假突破并回落",
+        pattern_type="failed_breakout", system_status="已确认",
+        execution_level="B", reason="事实成立", llm_proposed=1,
+    )
+    [updated] = apply_history_feedback([observation], lambda code, pattern: {
+        "count": 10, "expectancy": "positive", "win_rate_5d": 0.8,
+        "avg_return_5d": 0.04,
+        "llm_count": 4, "llm_expectancy": "negative",
+        "llm_win_rate_5d": 0.25, "llm_avg_directional_5d": -0.03,
+    })
+    assert updated.execution_level == "C"
+    assert updated.system_status == "历史负期望降级"
+    assert "LLM" not in updated.reason or "风控官降级" in updated.reason
+
+
+def test_history_cannot_upgrade_an_observation_without_confirmed_risk():
+    observation = ResearchObservation(
+        code="AMD", name="AMD", observation="上升趋势回落到MA20附近",
+        pattern_type="trend_pullback", system_status="待验证",
+        execution_level="C", trigger_price=100.0, stop_loss=0.0,
+        expected_direction="bullish", reason="缺少明确止损",
+    )
+    [updated] = apply_history_feedback([observation], lambda code, pattern: {
+        "count": 12, "expectancy": "positive", "win_rate_5d": 0.75,
+        "avg_return_5d": 0.03,
+    })
+
+    assert updated.execution_level == "C"
+    assert "保持观察级别" in updated.reason
+    parsed = parse_llm_observations("""
+### 研究员观察候选
+| 股票 | LLM观察 |
+|------|------|
+| AMD | 上升趋势回落到MA20附近 |
+""")
+    assert parsed[0].pattern_type == "trend_pullback"
+
+
+def test_negative_history_never_upgrades_a_d_level_data_conflict():
+    observation = ResearchObservation(
+        code="AMD", name="AMD", observation="缺少当前价格",
+        pattern_type="momentum", system_status="数据冲突",
+        execution_level="D", reason="缺少价格",
+    )
+    [updated] = apply_history_feedback([observation], lambda code, pattern: {
+        "count": 8, "expectancy": "negative", "win_rate_5d": 0.25,
+        "avg_return_5d": -0.04,
+    })
+
+    assert updated.execution_level == "D"
+    assert updated.system_status == "数据冲突"
+    assert "维持D级驳回" in updated.reason
 
 
 def test_research_observation_log_verifies_future_returns():
@@ -744,6 +827,58 @@ def test_historical_evaluation_panel_summarizes_predictions_and_patterns():
     assert "MA120支撑" in md
 
 
+def test_probability_calibration_and_joint_oof_are_explained_without_fake_zero_score():
+    markdown = _build_historical_evaluation_markdown(
+        forecast_rows=[{
+            "label": "Apple（AAPL）", "horizon": 1,
+            "verified": 0, "pending": 2, "accuracy": 0.0,
+            "brier_score": 0.0, "log_loss": 0.0, "ece": 0.0,
+            "interval_coverage": 0.0,
+        }],
+        plan_rows=[], prediction_rows=[], observation_rows=[], market="US",
+        forecast_summary={
+            "calibration_bins": [{
+                "lower": 0.4, "upper": 0.6, "count": 8,
+                "mean_confidence": 0.52, "accuracy": 0.50, "gap": 0.02,
+            }],
+            "regime_metrics": {"ranging": {
+                "samples": 8, "accuracy": 0.5, "brier_score": 0.6,
+                "log_loss": 1.0, "ece": 0.02,
+            }},
+        },
+        joint_rows=[{
+            "code": "AAPL", "data_start": "2026-01-01", "data_end": "2026-03-31",
+            "samples": 60, "total_trades": 1, "total_return": 0.01,
+            "benchmark_return": 0.03, "excess_return": -0.02,
+            "sharpe_ratio": 0.2, "max_drawdown": 0.01,
+            "drift_status": "warning",
+            "trace": [{
+                "date": "2026-03-20", "action": "watch", "execution_level": "C",
+                "forecasts": {"1": {
+                    "direction": "bullish", "actual_direction": "bearish",
+                    "target_date": "2026-03-23", "correct": 0,
+                }},
+            }],
+        }],
+        context_rows=[{
+            "code": "AAPL", "snapshot_count": 3, "news_snapshots": 3,
+            "fundamental_snapshots": 2, "fundamental_sources": "finnhub",
+            "first_captured_at": "2026-03-01T10:00:00",
+            "last_captured_at": "2026-03-20T10:00:00",
+        }],
+    )
+
+    assert "Log Loss" in markdown
+    assert "预测校准曲线" in markdown
+    assert "不同市场状态" in markdown
+    assert "最终联合策略OOF" in markdown
+    assert "联合OOF逐事件审计" in markdown
+    assert "2026-03-23" in markdown
+    assert "新闻/基本面历史时点快照" in markdown
+    assert "样本不足" in markdown
+    assert "| — | — | — | — | — |" in markdown
+
+
 def test_a_share_evaluation_includes_tab1_predictions_without_holdings():
     db = fresh_db()
     db.upsert_stock(StockInfo(code="600519", name="贵州茅台", market="A"))
@@ -875,6 +1010,21 @@ def test_portfolio_tracking_counts_component_predictions_after_write():
             signal_action="buy", predict_time="2026-06-20T08:00:00",
             reference_date="2026-06-19", direction="bullish",
             actual_direction="bullish", actual_return=0.03,
+            underlying_return=0.04, predicted_price=100.0,
+            actual_entry_price=101.0, validation_price=104.0,
+            actual_exit_type="window_close", actual_exit_date="2026-06-22",
+            validation_end_date="2026-06-22",
+            validated=1, validation_status="verified", validation_version=2,
+        ),
+        PredictionLog(
+            code="AAPL", market="US", mode="pre", strategy_name="H",
+            signal_action="buy", predict_time="2026-06-20T08:01:00",
+            reference_date="2026-06-19", direction="bullish",
+            actual_direction="bullish", actual_return=0.025,
+            underlying_return=0.04, predicted_price=100.0,
+            actual_entry_price=101.0, validation_price=103.5,
+            actual_exit_type="take_profit", actual_exit_date="2026-06-22",
+            validation_end_date="2026-06-22",
             validated=1, validation_status="verified", validation_version=2,
         ),
         PredictionLog(
@@ -909,15 +1059,15 @@ def test_portfolio_tracking_counts_component_predictions_after_write():
     )
 
     assert stats.total_predictions == 1
+    assert stats.strategy_sample_count == 2
     assert pending == 2
     assert len(validated) == 1
-    assert "累计已验证预测：1 次" in footer
-    assert "待验证预测：2 条" in footer
+    assert "累计已验证独立事件：1 次" in footer
+    assert "待验证独立事件：2 个" in footer
     assert "统计范围：当前组合成分股，盘前模式" in footer
-    assert "| 股票 | 策略/动作 | 预测生成时间 | 依据日 |" in footer
-    assert "| AAPL | A / 买入 |" in footer
-    assert "预测时参考价" in footer
-    assert "仅方向参考，不适用" in footer
+    assert "历史方向预测结果（非本次交易建议）" in footer
+    assert "预测指定目标交易日的收盘方向，不预测精确目标价" in footer
+    assert "| AAPL | 2026-06-20 08:01 | 预测2026-06-22收盘价将高于$100.00 | 2026-06-22实际收盘$104.00（+4.00%，上涨） | 对 |" in footer
 
     report_id = db.insert_report(AnalysisReport(
         code="PORTFOLIO_US", name="US", market="US", backtest_period="1y",
@@ -946,12 +1096,17 @@ if __name__ == "__main__":
         test_portfolio_risk_snapshot_limits_concentration_and_correlation,
         test_portfolio_zero_capacity_blocks_buy_signal_everywhere,
         test_html_export_folds_only_long_tables,
+        test_pdf_tables_wrap_cells_and_normalize_literal_bold_tags,
         test_portfolio_summary_removes_repeated_per_stock_signal_table,
         test_account_equity_and_exposure_use_same_frozen_prices,
         test_research_observations_parse_and_confirm_llm_candidates,
+        test_llm_observation_templates_are_canonical_and_scored_separately,
+        test_history_cannot_upgrade_an_observation_without_confirmed_risk,
+        test_negative_history_never_upgrades_a_d_level_data_conflict,
         test_research_observation_log_verifies_future_returns,
         test_research_history_feedback_demotes_negative_expectancy,
         test_historical_evaluation_panel_summarizes_predictions_and_patterns,
+        test_probability_calibration_and_joint_oof_are_explained_without_fake_zero_score,
         test_a_share_evaluation_includes_tab1_predictions_without_holdings,
         test_single_stock_research_item_feeds_observation_confirmation,
         test_research_observation_same_event_is_deduplicated,

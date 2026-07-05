@@ -26,6 +26,7 @@ pandas>=2.2.0
 numpy>=1.26.0
 scipy>=1.13.0                   # ta 依赖
 ta>=0.11.0                      # 技术指标
+exchange-calendars>=4.5         # 美股/A股真实交易日历（预测目标日冻结）
 
 # ── AI/LLM ──
 openai>=1.30.0                  # LLM API 调用（OpenAI 兼容）

@@ -46,6 +46,7 @@ class StrategyDecision:
     """
 
     action: str = "watch"          # buy / sell / hold / watch / invalid
+    signal_intent: str = ""         # alpha_entry/alpha_exit/risk_exit/profit_lock/plan
     execution_level: str = "C"     # A=可执行 B=小仓验证 C=仅观察 D=驳回
     shares: int = 0                # 可执行股数；0 时由 position_pct/风险预算推导
     price_type: str = "open"       # 转换为 Order 时的成交价类型
@@ -67,6 +68,7 @@ class StrategyDecision:
     def to_dict(self) -> dict:
         return {
             "action": self.action,
+            "signal_intent": self.signal_intent,
             "execution_level": self.execution_level,
             "shares": int(self.shares or 0),
             "price_type": self.price_type,
@@ -133,6 +135,9 @@ class StrategyContext:
     holding_days: int = 0          # 当前持仓天数
     # 策略 B 专用：全市场中位数波动率（单标的回测时传入外部估计值）
     market_median_volatility: float = 0.0
+    # 当前时点已经冻结的独立概率预测。回测只能注入当时生成的 OOF 预测，
+    # 禁止把今天的预测倒灌到历史决策。
+    forecasts: dict[int, object] = field(default_factory=dict)
 
 
 class BaseExecutionStrategy(ABC):
@@ -152,6 +157,7 @@ class BaseExecutionStrategy(ABC):
     strategy_family: str = ""
     take_profit_mode: str = "none"
     take_profit_rule: str = "未定义主动盈利退出，仅使用止损或时间退出"
+    signal_intent: str = ""
 
     def generate_orders(
         self, df: pd.DataFrame, context: StrategyContext

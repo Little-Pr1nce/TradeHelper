@@ -161,14 +161,14 @@ open < stop                  -> open 成交
 
 ```text
 candidate
-  -> positive absolute and benchmark-excess OOS return
+  -> benchmark-excess OR risk-adjusted OOS advantage
   -> confirmed across 3 different data_end windows
   -> paper (at least 20 calendar days)
   -> promoted
   -> replaced / rolled_back
 ```
 
-晋升要求同时满足正样本外绝对收益、正买入持有基准超额收益、至少半数窗口跑赢基准、样本外夏普、交易次数、3 个不同截止日确认和至少 20 天影子观察。候选中途失效会清零确认次数和观察时钟；正式参数存入 `per_stock_params`。
+晋升首先要求正样本外净收益、非负样本外夏普和足够交易数。在至少半数窗口中，候选可以通过任一通道：一是收益跑赢同标的买入持有；二是在牛市保留至少80%基准收益，同时最大回撤低至少30%、夏普高至少0.2。之后还需3个不同截止日确认和至少20天影子观察；中途失效会清零确认次数和观察时钟。退出覆盖策略仍按避免损失和过早退出成本评价，不使用买入持有收益门槛。
 
 当历史健康度转为负期望时：
 
@@ -209,7 +209,7 @@ venv/bin/python tests/test_scoring.py
 venv/bin/python -m pytest tests/ -q
 ```
 
-当前全项目基线为 204 个测试通过。回测相关回归覆盖：
+当前全项目基线为 14 个测试文件、238 个测试通过。回测相关回归覆盖：
 
 - T/T+1 时序和无未来函数。
 - Decision 到 Order 的统一转换。

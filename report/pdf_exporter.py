@@ -29,7 +29,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm, cm
 from reportlab.lib.colors import HexColor
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
+from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle,
 )
@@ -341,21 +341,43 @@ def _build_pdf_table(rows: list[list[str]], styles: dict):
     if not rows:
         return Spacer(1, 2*mm)
 
-    # 转 HTML 的内联格式
-    html_rows = [[_inline_md_to_html(cell) for cell in row] for row in rows]
+    column_count = max(len(row) for row in rows)
+    normalized_rows = [row + [""] * (column_count - len(row)) for row in rows]
+    compact_size = 6.2 if column_count >= 9 else 7.2 if column_count >= 6 else 8.0
+    cell_style = ParagraphStyle(
+        name=f"PdfTableCell{column_count}", parent=styles["ChineseBody"],
+        fontSize=compact_size, leading=compact_size + 2,
+        alignment=TA_LEFT, spaceBefore=0, spaceAfter=0,
+        splitLongWords=True,
+    )
+    header_style = ParagraphStyle(
+        name=f"PdfTableHeader{column_count}", parent=cell_style,
+        textColor=HexColor("#ffffff"), alignment=TA_CENTER,
+    )
+    paragraph_rows = []
+    for row_index, row in enumerate(normalized_rows):
+        style = header_style if row_index == 0 else cell_style
+        paragraph_rows.append([
+            Paragraph(_inline_md_to_html(str(cell)), style) for cell in row
+        ])
 
-    col_widths = [min(max(len(cell) * 4 + 20 for cell in col), 160) for col in zip(*html_rows)]
-    total = sum(col_widths)
-    if total > 460:
-        scale = 460 / total
-        col_widths = [w * scale for w in col_widths]
+    # 让信息量大的列获得更多宽度，同时保证所有表格严格落在正文宽度内。
+    max_lengths = [
+        max(len(re.sub(r"<[^>]+>", "", str(row[i]))) for row in normalized_rows)
+        for i in range(column_count)
+    ]
+    weights = [max(4.0, min(float(length) ** 0.5, 14.0)) for length in max_lengths]
+    total_weight = sum(weights) or 1.0
+    col_widths = [460.0 * weight / total_weight for weight in weights]
 
-    table = Table(html_rows, colWidths=col_widths)
+    table = Table(
+        paragraph_rows, colWidths=col_widths,
+        repeatRows=1, splitByRow=1, hAlign="LEFT",
+    )
     style_cmds = [
         ("BACKGROUND", (0, 0), (-1, 0), HexColor("#2a6496")),
         ("TEXTCOLOR", (0, 0), (-1, 0), HexColor("#ffffff")),
         ("FONTNAME", (0, 0), (-1, -1), styles["ChineseBody"].fontName),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
         ("ALIGN", (0, 0), (-1, 0), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("GRID", (0, 0), (-1, -1), 0.5, HexColor("#cccccc")),
@@ -373,6 +395,11 @@ def _inline_md_to_html(text: str) -> str:
 
     reportlab Paragraph 支持: <b> <i> <u> <strike> <font> <br/> <a>
     """
+    # LLM 偶尔输出原始 <b> 标签；先归一化为 Markdown，避免 PDF 中显示
+    # 字面量“<b>”。其他 HTML 仍按普通文本转义。
+    text = re.sub(r"<\s*b\s*>(.*?)<\s*/\s*b\s*>", r"**\1**", text, flags=re.I)
+    text = re.sub(r"<\s*br\s*/?\s*>", " / ", text, flags=re.I)
+
     # HTML 转义保护
     escaped = _escape_html(text)
 

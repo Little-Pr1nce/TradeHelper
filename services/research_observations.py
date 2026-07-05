@@ -145,14 +145,17 @@ def build_research_history_markdown(
 
     lines = [
         "### 📚 观察形态历史表现\n",
-        "| 股票 | 形态 | 样本 | 5日胜率 | 5日均值 | 10日均值 | 最大不利波动 | 正期望状态 |",
-        "|------|------|------:|------:|------:|------:|------:|------|",
+        "| 股票 | 形态 | 总样本 | LLM样本/胜率 | 5日胜率 | 5日均值 | 10日均值 | 最大不利波动 | 正期望状态 |",
+        "|------|------|------:|------:|------:|------:|------:|------:|------|",
     ]
     label_map = {
         "profit_lock": "冲高回落锁利",
         "ma120_support": "MA120支撑",
         "momentum": "动量观察",
         "strategy_signal": "策略信号",
+        "failed_breakout": "假突破/突破失败",
+        "oversold_reversal": "超卖反转",
+        "trend_pullback": "趋势回调",
     }
     expectancy_map = {
         "positive": "正期望",
@@ -163,6 +166,8 @@ def build_research_history_markdown(
         lines.append(
             f"| {obs.name}（{obs.code}） | {label_map.get(obs.pattern_type, obs.pattern_type)} | "
             f"{int(stats.get('count', 0) or 0)} | "
+            f"{int(stats.get('llm_count', 0) or 0)}/"
+            f"{float(stats.get('llm_win_rate_5d', 0) or 0):.0%} | "
             f"{float(stats.get('win_rate_5d', 0) or 0):.0%} | "
             f"{float(stats.get('avg_return_5d', 0) or 0):+.2%} | "
             f"{float(stats.get('avg_return_10d', 0) or 0):+.2%} | "
@@ -188,25 +193,43 @@ def apply_history_feedback(
         expectancy = stats.get("expectancy", "insufficient")
         win_rate = float(stats.get("win_rate_5d", 0) or 0)
         avg_5d = float(stats.get("avg_return_5d", 0) or 0)
+        if obs.llm_proposed:
+            count = int(stats.get("llm_count", 0) or 0)
+            expectancy = stats.get("llm_expectancy", "insufficient")
+            win_rate = float(stats.get("llm_win_rate_5d", 0) or 0)
+            avg_5d = float(stats.get("llm_avg_directional_5d", 0) or 0)
         if count < 3:
             continue
 
         if expectancy == "negative":
             old = obs.execution_level
-            obs.execution_level = "D" if old == "C" else "C"
-            obs.system_status = "历史负期望降级"
+            if old == "D":
+                # Data conflicts and explicit system rejections are stronger
+                # than historical feedback and can never be upgraded.
+                obs.execution_level = "D"
+            else:
+                obs.execution_level = "D" if old == "C" else "C"
+                obs.system_status = "历史负期望降级"
             obs.next_step = "不执行，等待该形态历史表现改善或出现更强系统信号"
             obs.reason = (
                 f"{obs.reason}；历史样本{count}次，5日胜率{win_rate:.0%}，"
-                f"5日均值{avg_5d:+.2%}，风控官降级"
+                f"5日均值{avg_5d:+.2%}，"
+                f"{'维持D级驳回' if old == 'D' else '风控官降级'}"
             )
         elif expectancy == "positive" and obs.execution_level == "C":
-            obs.execution_level = "B"
-            obs.system_status = "历史正期望增强"
-            obs.reason = (
-                f"{obs.reason}；历史样本{count}次，5日胜率{win_rate:.0%}，"
-                f"5日均值{avg_5d:+.2%}，允许小仓验证"
+            evidence = (
+                f"历史样本{count}次，5日胜率{win_rate:.0%}，"
+                f"5日均值{avg_5d:+.2%}"
             )
+            if _observation_has_executable_risk(obs):
+                obs.execution_level = "B"
+                obs.system_status = "历史正期望增强"
+                obs.reason = f"{obs.reason}；{evidence}，允许小仓验证"
+            else:
+                obs.reason = (
+                    f"{obs.reason}；{evidence}，但当前事实确认或止损定义不完整，"
+                    "保持观察级别"
+                )
         elif expectancy == "positive" and obs.execution_level == "B":
             obs.reason = (
                 f"{obs.reason}；历史样本{count}次，5日胜率{win_rate:.0%}，"
@@ -304,6 +327,22 @@ def _rule_based_observations(all_data: list[dict]) -> list[ResearchObservation]:
                 source="系统研究员",
                 pattern_type="momentum",
             ))
+        rsi = float(marker.get("rsi") or 0)
+        bb_lower = float(marker.get("bb_lower") or 0)
+        if rsi > 0 and rsi <= 30 and low > 0 and bb_lower > 0 and low <= bb_lower * 1.02:
+            observations.append(ResearchObservation(
+                code=code, name=name,
+                observation="RSI超卖且触碰布林下轨，观察超卖反转",
+                source="系统研究员", pattern_type="oversold_reversal",
+            ))
+        ma20 = float(marker.get("ma_20") or 0)
+        ma60 = float(marker.get("ma_60") or 0)
+        if ma20 > ma60 > 0 and low > 0 and low <= ma20 * 1.01 and close >= ma20:
+            observations.append(ResearchObservation(
+                code=code, name=name,
+                observation="上升趋势中回踩MA20后重新站回，观察趋势回调",
+                source="系统研究员", pattern_type="trend_pullback",
+            ))
     return observations
 
 
@@ -329,10 +368,16 @@ def _validate_observation(
     alpha = float(item.get("alpha_score") or 0)
     text = obs.observation.lower()
 
-    if _mentions_profit_lock(text):
-        return _validate_profit_lock(obs, item, marker)
+    if _mentions_failed_breakout(text):
+        return _validate_failed_breakout(obs, item, marker)
     if _mentions_ma120_support(text):
         return _validate_ma120(obs, item, marker)
+    if _mentions_oversold_reversal(text):
+        return _validate_oversold_reversal(obs, item, marker)
+    if _mentions_trend_pullback(text):
+        return _validate_trend_pullback(obs, item, marker)
+    if _mentions_profit_lock(text):
+        return _validate_profit_lock(obs, item, marker)
     if _mentions_momentum(text):
         return _validate_momentum(obs, marker, price, alpha)
 
@@ -350,12 +395,6 @@ def _validate_observation(
         obs.trigger_operator = "immediate"
     else:
         obs.system_status = "待验证"
-        obs.execution_level = "C"
-        obs.next_step = "保留观察，等待系统策略或关键价位确认"
-        obs.reason = "当前没有可执行策略信号，不能把观察直接升级为交易指令"
-        obs.pattern_type = obs.pattern_type or "general"
-        obs.trigger_price = price
-        obs.expected_direction = "neutral"
         obs.trigger_operator = ""
     return obs
 
@@ -501,6 +540,83 @@ def _validate_momentum(
     return obs
 
 
+def _validate_failed_breakout(
+    obs: ResearchObservation, item: dict, marker: dict,
+) -> ResearchObservation:
+    high = float(marker.get("high") or 0)
+    close = float(marker.get("close") or item.get("current_price") or 0)
+    high_120 = float(marker.get("high_120") or 0)
+    if high <= 0 or close <= 0 or high_120 <= 0:
+        obs.system_status, obs.execution_level = "数据冲突", "D"
+        obs.next_step, obs.reason = "不执行，等待阶段高点数据", "假突破验证缺少高点或收盘价"
+    elif high >= high_120 * 0.995 and close <= high * 0.97:
+        obs.system_status, obs.execution_level = "已确认", "B"
+        obs.next_step = f"仅作风险观察；重新站上 {high:.2f} 则失效"
+        obs.reason = f"高点{high:.2f}触及120日高点后回落至{close:.2f}"
+        obs.trigger_price, obs.stop_loss = close, high
+        obs.expected_direction, obs.trigger_operator = "bearish", "immediate"
+    else:
+        obs.system_status, obs.execution_level = "系统反驳", "D"
+        obs.next_step, obs.reason = "不执行，等待真实突破失败", "高点与收盘回落幅度不满足假突破事实"
+    obs.pattern_type = "failed_breakout"
+    return obs
+
+
+def _validate_oversold_reversal(
+    obs: ResearchObservation, item: dict, marker: dict,
+) -> ResearchObservation:
+    price = float(item.get("current_price") or marker.get("close") or 0)
+    low = float(marker.get("low") or 0)
+    rsi = float(marker.get("rsi") or 0)
+    bb_lower = float(marker.get("bb_lower") or 0)
+    alpha = float(item.get("alpha_score") or 0)
+    confirmed = (
+        price > 0 and low > 0 and bb_lower > 0 and 0 < rsi <= 30
+        and low <= bb_lower * 1.02 and price >= bb_lower and alpha >= -0.35
+    )
+    if confirmed:
+        obs.system_status, obs.execution_level = "已确认", "B"
+        obs.next_step = f"仅小仓验证，跌破 {low * 0.98:.2f} 失效"
+        obs.reason = f"RSI={rsi:.1f}，低点触碰布林下轨{bb_lower:.2f}后收回"
+        obs.trigger_price, obs.stop_loss = price, low * 0.98
+        obs.expected_direction, obs.trigger_operator = "bullish", "immediate"
+    else:
+        obs.system_status, obs.execution_level = "待验证", "C"
+        obs.next_step, obs.reason = "等待RSI≤30且价格从布林下轨重新收回", "超卖反转条件尚未完整成立"
+        obs.trigger_price, obs.expected_direction = bb_lower, "bullish"
+        obs.trigger_operator = "cross_above" if bb_lower > 0 else ""
+    obs.pattern_type = "oversold_reversal"
+    return obs
+
+
+def _validate_trend_pullback(
+    obs: ResearchObservation, item: dict, marker: dict,
+) -> ResearchObservation:
+    price = float(item.get("current_price") or marker.get("close") or 0)
+    low = float(marker.get("low") or 0)
+    ma20 = float(marker.get("ma_20") or 0)
+    ma60 = float(marker.get("ma_60") or 0)
+    alpha = float(item.get("alpha_score") or 0)
+    confirmed = (
+        price > 0 and low > 0 and ma20 > ma60 > 0
+        and low <= ma20 * 1.01 and low >= ma60 * 0.97
+        and price >= ma20 and alpha >= -0.20
+    )
+    if confirmed:
+        obs.system_status, obs.execution_level = "已确认", "B"
+        obs.next_step = f"回踩确认后小仓验证，跌破MA60={ma60:.2f}失效"
+        obs.reason = f"MA20={ma20:.2f}>MA60={ma60:.2f}，低点回踩后重新站上MA20"
+        obs.trigger_price, obs.stop_loss = price, ma60 * 0.98
+        obs.expected_direction, obs.trigger_operator = "bullish", "immediate"
+    else:
+        obs.system_status, obs.execution_level = "待验证", "C"
+        obs.next_step, obs.reason = "等待上升均线结构和回踩重新站回同时成立", "趋势回调条件尚不完整"
+        obs.trigger_price, obs.expected_direction = ma20, "bullish"
+        obs.trigger_operator = "cross_above" if ma20 > 0 else ""
+    obs.pattern_type = "trend_pullback"
+    return obs
+
+
 def _find_item(obs: ResearchObservation, all_data: list[dict]) -> dict | None:
     target = (obs.code or "").upper()
     target_name = obs.name or ""
@@ -541,25 +657,71 @@ def _split_symbol(value: str) -> tuple[str, str]:
 
 def _observation_type(text: str) -> str:
     lower = text.lower()
+    if _mentions_failed_breakout(lower):
+        return "failed_breakout"
+    if _mentions_ma120_support(lower):
+        return "ma120_support"
+    if _mentions_oversold_reversal(lower):
+        return "oversold_reversal"
+    if _mentions_trend_pullback(lower):
+        return "trend_pullback"
     if _mentions_profit_lock(lower):
         return "profit_lock"
-    if _mentions_ma120_support(lower):
-        return "ma120"
     if _mentions_momentum(lower):
         return "momentum"
     return re.sub(r"\s+", "", lower)[:24]
 
 
 def _mentions_profit_lock(text: str) -> bool:
-    return any(k in text for k in ("锁利", "止盈", "冲高", "回落", "profit"))
+    if any(k in text for k in ("锁利", "止盈", "profit lock", "take profit")):
+        return True
+    return (
+        "回落" in text
+        and any(k in text for k in ("冲高", "阶段高点", "历史高点", "浮盈"))
+    )
 
 
 def _mentions_ma120_support(text: str) -> bool:
-    return any(k in text for k in ("ma120", "半年线", "支撑"))
+    return any(k in text for k in ("ma120", "ma 120", "半年线", "120日均线"))
 
 
 def _mentions_momentum(text: str) -> bool:
     return any(k in text for k in ("动量", "追", "突破", "momentum"))
+
+
+def _mentions_failed_breakout(text: str) -> bool:
+    return any(k in text for k in ("假突破", "突破失败", "failed breakout"))
+
+
+def _mentions_oversold_reversal(text: str) -> bool:
+    return any(k in text for k in ("超卖", "布林下轨", "oversold"))
+
+
+def _mentions_trend_pullback(text: str) -> bool:
+    if any(k in text for k in (
+        "趋势回调", "趋势回踩", "回踩ma20", "回踩 ma20", "pullback",
+    )):
+        return True
+    return (
+        "趋势" in text
+        and any(k in text for k in ("回落", "回调", "回踩"))
+        and any(k in text for k in ("ma20", "ma 20", "ma60", "ma 60", "均线"))
+    )
+
+
+def _observation_has_executable_risk(obs: ResearchObservation) -> bool:
+    """History can support a fact/risk-complete observation, never create one."""
+    if obs.system_status != "已确认" or obs.trigger_operator != "immediate":
+        return False
+    trigger = float(obs.trigger_price or 0.0)
+    stop = float(obs.stop_loss or 0.0)
+    if trigger <= 0 or stop <= 0 or trigger == stop:
+        return False
+    if obs.expected_direction == "bullish":
+        return stop < trigger
+    if obs.expected_direction == "bearish":
+        return stop > trigger
+    return False
 
 
 def _has_positive_momentum(marker: dict, price: float) -> bool:

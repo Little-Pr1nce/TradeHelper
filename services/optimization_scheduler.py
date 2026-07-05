@@ -14,7 +14,55 @@ logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="strategy-optimizer")
 _inflight: set[tuple[str, str]] = set()
+_forecast_inflight: set[tuple[str, str]] = set()
 _lock = threading.Lock()
+
+
+def schedule_forecast_optimization(
+    *, stock_code: str, market: str, df: pd.DataFrame,
+) -> bool:
+    """预测优化独立调度，不依赖策略深度优化是否命中缓存。"""
+    if not stock_code or df is None or df.empty:
+        return False
+    data_end = str(df["date"].iloc[-1])[:10] if "date" in df.columns else ""
+    job_key = (stock_code.upper(), data_end)
+    from data.database import Database
+    from core.joint_oof import POLICY_VERSION
+    db = Database()
+    row = db.execute(
+        """SELECT COUNT(*) n FROM forecast_model_versions
+           WHERE stock_code=? AND train_end=?""",
+        (stock_code.upper(), data_end),
+    ).fetchone()
+    if (
+        row and int(row["n"] or 0) >= 3
+        and db.has_joint_oof_run(stock_code, data_end, POLICY_VERSION)
+    ):
+        return False
+    with _lock:
+        if job_key in _forecast_inflight:
+            return False
+        _forecast_inflight.add(job_key)
+    frame = df.copy(deep=True)
+
+    def _run_forecast():
+        try:
+            from services.forecast_service import optimize_forecast_models
+            result = optimize_forecast_models(
+                Database(), df=frame, market=market, stock_code=stock_code,
+            )
+            logger.info(
+                "后台预测优化完成: %s, 评估%d组, 晋升周期=%s",
+                stock_code, result["evaluated"], result["promoted"],
+            )
+        except Exception as exc:
+            logger.warning(f"后台预测优化失败 {stock_code}: {exc}", exc_info=True)
+        finally:
+            with _lock:
+                _forecast_inflight.discard(job_key)
+
+    _executor.submit(_run_forecast)
+    return True
 
 
 def schedule_deep_optimization(
@@ -27,7 +75,10 @@ def schedule_deep_optimization(
     news_df: pd.DataFrame | None = None,
 ) -> bool:
     """必要时提交后台深度优化；返回是否成功提交。"""
-    if not stock_code or df is None or df.empty or not strategy_keys:
+    if not stock_code or df is None or df.empty:
+        return False
+    schedule_forecast_optimization(stock_code=stock_code, market=market, df=df)
+    if not strategy_keys:
         return False
     data_end = str(df["date"].iloc[-1])[:10] if "date" in df.columns else ""
     job_key = (stock_code, data_end)

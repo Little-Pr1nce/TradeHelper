@@ -473,6 +473,8 @@ def _run_walk_forward_selection(
             "oos_sharpes": [],
             "oos_trades": 0,
             "positive_excess_windows": 0,
+            "risk_adjusted_windows": 0,
+            "qualified_windows": 0,
             "pass_oos": False,
         }
         for v in variants
@@ -510,16 +512,26 @@ def _run_walk_forward_selection(
                 st = stats[selected.variant_label]
                 st["selected_windows"] += 1
                 st["oos_returns"].append(float(oos.total_return))
-                benchmark_return = 0.0
-                if len(test_df) >= 2:
-                    first_price = float(test_df["open"].iloc[0] or 0.0)
-                    last_price = float(test_df["close"].iloc[-1] or 0.0)
-                    if first_price > 0 and last_price > 0:
-                        benchmark_return = last_price / first_price - 1.0
+                benchmark_return, benchmark_sharpe, benchmark_drawdown = (
+                    _benchmark_window_metrics(test_df)
+                )
                 excess_return = float(oos.total_return) - benchmark_return
                 st["oos_excess_returns"].append(excess_return)
-                if excess_return > 0:
+                excess_pass = excess_return > 0
+                risk_adjusted_pass = _passes_risk_adjusted_benchmark(
+                    strategy_return=float(oos.total_return),
+                    strategy_sharpe=float(oos.sharpe_ratio),
+                    strategy_drawdown=float(oos.max_drawdown),
+                    benchmark_return=benchmark_return,
+                    benchmark_sharpe=benchmark_sharpe,
+                    benchmark_drawdown=benchmark_drawdown,
+                )
+                if excess_pass:
                     st["positive_excess_windows"] += 1
+                if risk_adjusted_pass:
+                    st["risk_adjusted_windows"] += 1
+                if excess_pass or risk_adjusted_pass:
+                    st["qualified_windows"] += 1
                 st["oos_sharpes"].append(float(oos.sharpe_ratio))
                 st["oos_trades"] += int(oos.total_trades)
             except Exception as e:
@@ -539,15 +551,22 @@ def _run_walk_forward_selection(
         avg_return = float(np.mean(returns)) if returns else 0.0
         avg_excess_return = float(np.mean(excess_returns)) if excess_returns else 0.0
         avg_sharpe = float(np.mean(sharpes)) if sharpes else 0.0
-        required_positive = max(1, (selected + 1) // 2)
+        required_qualified = max(1, (selected + 1) // 2)
         pass_oos = (
             selected > 0
             and st["oos_trades"] > 0
             and avg_return > 0
-            and avg_excess_return > 0
-            and st["positive_excess_windows"] >= required_positive
+            and st["qualified_windows"] >= required_qualified
             and avg_sharpe >= 0
         )
+        if st["positive_excess_windows"] >= required_qualified:
+            promotion_path = "excess"
+        elif st["risk_adjusted_windows"] >= required_qualified:
+            promotion_path = "risk_adjusted"
+        elif st["qualified_windows"] >= required_qualified:
+            promotion_path = "mixed"
+        else:
+            promotion_path = "none"
         result[label] = {
             "base_key": st["base_key"],
             "selected_windows": selected,
@@ -556,12 +575,52 @@ def _run_walk_forward_selection(
             "avg_oos_sharpe": avg_sharpe,
             "oos_trades": st["oos_trades"],
             "positive_excess_windows": st["positive_excess_windows"],
+            "risk_adjusted_windows": st["risk_adjusted_windows"],
+            "qualified_windows": st["qualified_windows"],
+            "promotion_path": promotion_path,
             "pass_oos": pass_oos,
         }
 
     passed = sum(1 for v in result.values() if v["pass_oos"])
     logger.info(f"Walk-forward 参数验证: {passed}/{len(result)} 变体样本外通过")
     return result
+
+
+def _benchmark_window_metrics(test_df: pd.DataFrame) -> tuple[float, float, float]:
+    """计算同一标的买入持有基准的收益、夏普和最大回撤。"""
+    if test_df is None or len(test_df) < 2:
+        return 0.0, 0.0, 0.0
+    first_open = float(pd.to_numeric(test_df["open"], errors="coerce").iloc[0] or 0.0)
+    closes = pd.to_numeric(test_df["close"], errors="coerce").dropna()
+    if first_open <= 0 or closes.empty or float(closes.iloc[-1]) <= 0:
+        return 0.0, 0.0, 0.0
+    curve = np.concatenate(([first_open], closes.to_numpy(dtype=float)))
+    returns = pd.Series(curve).pct_change().dropna()
+    std = float(returns.std(ddof=1)) if len(returns) >= 2 else 0.0
+    sharpe = float(np.sqrt(252) * returns.mean() / std) if std > 1e-12 else 0.0
+    peaks = np.maximum.accumulate(curve)
+    drawdown = float(np.max((peaks - curve) / np.where(peaks > 0, peaks, 1.0)))
+    total_return = float(curve[-1] / curve[0] - 1.0)
+    return total_return, sharpe, drawdown
+
+
+def _passes_risk_adjusted_benchmark(
+    *,
+    strategy_return: float,
+    strategy_sharpe: float,
+    strategy_drawdown: float,
+    benchmark_return: float,
+    benchmark_sharpe: float,
+    benchmark_drawdown: float,
+) -> bool:
+    """牛市允许以大部分收益换取显著回撤改善，但不能只靠空仓过关。"""
+    if benchmark_return <= 0 or strategy_return <= 0:
+        return False
+    return bool(
+        strategy_return >= benchmark_return * 0.80
+        and strategy_drawdown <= benchmark_drawdown * 0.70
+        and strategy_sharpe >= benchmark_sharpe + 0.20
+    )
 
 
 def _slice_news(news_df: pd.DataFrame | None, price_df: pd.DataFrame) -> pd.DataFrame | None:

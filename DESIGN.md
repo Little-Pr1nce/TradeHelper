@@ -1,6 +1,6 @@
 # TradeHelper 设计文档
 
-> 当前架构基线：2026-06-30。升级进度与剩余工作以 [UPGRADE_PLAN.md](./UPGRADE_PLAN.md) 为准。
+> 当前架构基线：2026-07-03。升级进度与剩余工作以 [UPGRADE_PLAN.md](./UPGRADE_PLAN.md) 为准。
 
 ## 1. 设计目标
 
@@ -40,9 +40,11 @@ main.py
   |     +-- portfolio_service.py
   |     +-- news_service.py
   |     +-- optimization_scheduler.py
+  |     +-- forecast_service.py
   |     +-- research_observations.py
   |
   +-- core/               纯计算管道与可信度治理
+        +-- forecast_engine.py     独立1/3/5交易日概率预测与OOF评估
   |     +-- pipeline.py
   |     +-- signal_check.py
   |     +-- strategy_audit.py
@@ -215,7 +217,7 @@ StrategyDecision(
 参数变体
   -> walk-forward 样本外筛选
   -> strategy_param_candidates(candidate)
-  -> 正绝对收益 + 正基准超额收益
+  -> 正绝对收益 +（正基准超额收益 或 风险调整优势）
   -> 跨 3 个数据截止日确认 + 20 天影子观察
   -> promoted / replaced
   -> 实盘健康度转负
@@ -227,9 +229,15 @@ StrategyDecision(
 
 ## 11. 历史学习闭环
 
-`prediction_log` 保存当前可执行买入和卖出信号，使用稳定 `event_key` 去重。买入验证记录实际净收益、MFE、MAE 和方向正确性；退出验证单独记录后续 1/3/5/10/20 日收益、继续下跌、反弹、避免损失和过早退出机会成本。
+`forecast_log` 保存与交易动作无关的 1/3/5 日概率预测，使用明确目标交易日和稳定事件键冻结；到期后只补录实际收盘、方向、Brier、Log Loss、ECE、校准分箱和区间命中。`forecast_model_versions` 按股票、市场和周期隔离 Champion/Challenger；受控候选包括相似行情、正则化多分类、平滑浅层概率树和集成模型。选择/确认 OOF 之间按预测周期增加标签成熟隔离带，两个窗口都必须优于历史频率基线，配对时间块 Bootstrap 的90%改进下界为正、ECE 不明显恶化且80%收益区间覆盖率至少70%后才能晋升。方向概率与 P10/P50/P90 使用同一个按类别概率加权的条件收益分布；在线 Brier 明显退化时自动回滚。
 
-`research_observation_log` 保存 LLM/系统观察、触发算子、价格、止损、执行等级和后续表现。观察必须真实触发且达到验证窗口后，才能进入正负期望统计。
+`feature_context_snapshots` 冻结 Tab1/Tab3 当次真实可见的新闻得分、发布时间、来源、基本面字段、供应商和抓取时点。相同内容去重、内容变化保留新版本，不按新闻发布日期反向回填；覆盖不足时这些字段继续排除出历史预测训练。
+
+`trade_plan_log` 单独保存当时可执行的 A/B 级交易方案和账户快照。`reference_date` 表示信息截止日，`decision_session_date` 表示首次可执行的市场会话；事件键包含策略版本、触发价、止损、止盈、仓位、最大亏损、账户权益/现金/持股/成本快照和盘中生成分钟，因此相同方案去重、实质变化保留。盘前/盘后按下一交易日开盘及后续正式日K复盘净表现、MFE/MAE和退出机会成本；盘中以报告生成完成时间冻结建议，只读取 `intraday_price_history` 中该时点之后的分钟K，证据不足时保持待验证。A股盘中买入可在下一分钟入场，但当日不能退出，下一交易日才检查止盈止损。已验证方案保存证据来源、质量和K线数量，补充源不能覆盖已有供应商级分钟K。策略健康度和历史方案面板均按实际决策会话归组，并按证据质量跨交易日折算胜率、平均收益、有效样本和 Wilson 下界；有效样本少于8时不能标记为可靠。`prediction_log` 仅保留为旧版迁移兼容表，生产链路已停止新增。
+
+`joint_oof_runs` 保存最终建议链的嵌套样本外审计。`joint_oof_v4_embargo_coherent` 在每个测试折只用此前训练段分别选择 1/3/5 日预测模型与参数、策略参数和策略家族，测试段通过多周期预测共识、正式信号检查、执行等级、动态仓位、Broker撮合和逐步累积的历史健康度运行；每个事件分别记录策略 Decision 与 Broker 成交/拒单结果，并与单独预测能力、单策略回测分账展示。漂移只比较相同 `policy_version` 的连续运行。
+
+`research_observation_log` 保存 LLM/系统观察、触发算子、价格、止损、执行等级和后续表现。观察必须真实触发且达到验证窗口后，才能进入正负期望统计；LLM 与系统规则的命中率分账，系统规则样本不能提升 LLM 观察等级。
 
 自动学习只能在预先定义的参数空间和升降级规则内运行，不允许模型自行修改生产代码。
 
@@ -247,14 +255,14 @@ StrategyDecision(
 
 ## 13. 数据库
 
-SQLite WAL，当前 14 张表：
+SQLite WAL，当前 20 张表：
 
 | 分类 | 表 |
 |------|----|
-| 市场与报告 | `stocks`, `price_history`, `reports` |
+| 市场与报告 | `stocks`, `price_history`, `intraday_price_history`, `reports` |
 | 新闻 | `news_sentiment`, `news_refresh_state` |
 | 用户组合 | `holdings`, `watchlist`, `account_balance` |
-| 学习闭环 | `prediction_log`, `research_observation_log` |
+| 学习闭环 | `forecast_log`, `feature_context_snapshots`, `forecast_model_versions`, `trade_plan_log`, `joint_oof_runs`, `prediction_log`, `research_observation_log` |
 | 回测优化 | `bt_variant_cache`, `per_stock_params`, `strategy_param_candidates`, `deep_optimization_runs` |
 
 `Database.init()` 会自动建表、补列、清理历史重复事件并建立唯一索引；新用户首次运行和旧用户升级都会执行同一初始化/迁移路径。
@@ -287,7 +295,7 @@ SQLite WAL，当前 14 张表：
 
 ## 16. 测试与发布
 
-当前 13 个测试文件、204 个测试。除 pytest 外，每个测试文件都有直接执行入口：
+当前 14 个测试文件、249 个测试。除 pytest 外，每个测试文件都有直接执行入口：
 
 ```bash
 venv/bin/python -m pytest tests/ -q

@@ -4,6 +4,7 @@
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -13,6 +14,9 @@ import numpy as np
 from core.signal_check import (
     SignalResult,
     _apply_current_price_snapshot,
+    _apply_forecast_to_signal,
+    _apply_joint_oof_to_signal,
+    build_forecast_consensus,
     check_signals,
     generate_operation_plan,
     rank_signals,
@@ -507,6 +511,83 @@ def test_same_family_sell_signals_do_not_create_false_consensus():
     assert select_actionable_sell_signals(signals) == []
 
 
+def test_mature_negative_joint_oof_can_only_reduce_new_entry_risk():
+    buy = SignalResult(
+        "A", "趋势A", "A", "buy", signal_intent="alpha_entry",
+        execution_level="B", position_pct=0.2, max_loss_amount=500.0,
+    )
+    health = {
+        "samples": 60, "total_trades": 8, "total_return": -0.05,
+        "excess_return": -0.08, "sharpe_ratio": -0.5,
+    }
+    _apply_joint_oof_to_signal(buy, health)
+
+    assert buy.signal == "no_signal"
+    assert buy.execution_level == "C"
+    assert buy.position_pct == 0.0
+    assert "联合OOF" in buy.no_signal_reason
+
+    sell = SignalResult(
+        "R", "风险退出", "R", "sell", signal_intent="risk_exit",
+        execution_level="A", position_pct=1.0,
+    )
+    _apply_joint_oof_to_signal(sell, health)
+    assert sell.signal == "sell"
+    assert sell.execution_level == "A"
+
+
+def test_joint_oof_drift_warning_reduces_but_never_upgrades_entry():
+    buy = SignalResult(
+        "A", "趋势A", "A", "buy", signal_intent="alpha_entry",
+        execution_level="A", position_pct=0.4, max_loss_amount=1000.0,
+    )
+    _apply_joint_oof_to_signal(buy, {
+        "samples": 60, "total_trades": 7, "total_return": 0.04,
+        "excess_return": 0.01, "sharpe_ratio": 0.4,
+        "drift_status": "warning", "drift_reasons": ["超额收益较上次下降6.0%"],
+    })
+
+    assert buy.execution_level == "B"
+    assert np.isclose(buy.position_pct, 0.3)
+    assert np.isclose(buy.max_loss_amount, 750.0)
+    assert "性能漂移" in buy.reason
+
+
+def test_multihorizon_forecast_consensus_ignores_unvalidated_and_reduces_conflict():
+    unvalidated = SimpleNamespace(
+        horizon=1, confidence=0.0, direction="bearish",
+        prob_up=0.05, prob_down=0.90,
+    )
+    assert build_forecast_consensus([unvalidated])["direction"] == "unknown"
+
+    forecasts = [
+        SimpleNamespace(
+            horizon=1, confidence=0.4, direction="bullish",
+            prob_up=0.70, prob_down=0.10,
+        ),
+        SimpleNamespace(
+            horizon=3, confidence=0.3, direction="bearish",
+            prob_up=0.15, prob_down=0.65,
+        ),
+        SimpleNamespace(
+            horizon=5, confidence=0.2, direction="bearish",
+            prob_up=0.20, prob_down=0.60,
+        ),
+    ]
+    consensus = build_forecast_consensus(forecasts)
+    assert consensus["conflict"] is True
+    assert consensus["validated_horizons"] == [1, 3, 5]
+
+    signal = SignalResult(
+        "A", "趋势A", "A", "buy", signal_intent="alpha_entry",
+        execution_level="A", position_pct=0.4, max_loss_amount=1000.0,
+    )
+    _apply_forecast_to_signal(signal, forecasts)
+    assert signal.execution_level == "B"
+    assert np.isclose(signal.position_pct, 0.3)
+    assert "方向冲突" in signal.reason
+
+
 if __name__ == "__main__":
     test_check_signals_position_pct_comes_from_order_shares()
     test_check_signals_can_use_real_account_equity()
@@ -531,4 +612,7 @@ if __name__ == "__main__":
     test_same_trigger_price_explains_risk_budget_difference()
     test_execution_plan_keeps_one_representative_per_strategy_family()
     test_same_family_sell_signals_do_not_create_false_consensus()
-    print("23/23 passed")
+    test_mature_negative_joint_oof_can_only_reduce_new_entry_risk()
+    test_joint_oof_drift_warning_reduces_but_never_upgrades_entry()
+    test_multihorizon_forecast_consensus_ignores_unvalidated_and_reduces_conflict()
+    print("26/26 passed")

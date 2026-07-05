@@ -81,6 +81,26 @@ class PriceData:
 
 
 @dataclass
+class IntradayBar:
+    """Immutable minute-level evidence, isolated from daily price history."""
+    code: str
+    market: str
+    timestamp_ms: int
+    session_date: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float = 0.0
+    source: str = ""
+    fetched_at: str = ""
+    quality_status: str = "supplemental"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
 class AnalysisReport:
     """
     分析报告记录。
@@ -251,6 +271,9 @@ class PredictionLog:
     actual_return: float = 0.0         # 方向调整、扣估算成本后的建议收益
     underlying_return: float = 0.0     # 标的从评价基准到验证价的原始涨跌幅
     validation_price: float = 0.0      # 第 N 个交易日或风控退出的验证价格
+    actual_entry_price: float = 0.0    # 验证时按口径得到的实际入场价
+    actual_exit_type: str = ""         # stop_loss/take_profit/window_close/...
+    actual_exit_date: str = ""         # 实际退出日；到期验证时等于验证截止日
     max_favorable_excursion: float = 0.0  # 验证窗口最大有利波动（方向调整）
     max_adverse_excursion: float = 0.0    # 验证窗口最大不利波动（负值）
     actual_direction: str = ""         # 实际方向（验证后填入）
@@ -293,6 +316,7 @@ class PredictionStats:
     """从 prediction_log 聚合的预测绩效统计。"""
     code: str = ""                     # 股票代码或组合标识
     total_predictions: int = 0         # 累计预测次数
+    strategy_sample_count: int = 0     # 去重前的股票×策略验证样本数
     direction_accuracy_10: float = 0.0 # 近 10 次方向正确率
     direction_accuracy_all: float = 0.0# 全部历史方向正确率
     avg_predicted_return: float = 0.0  # 平均预测收益
@@ -310,6 +334,178 @@ class PredictionStats:
             value = d.get(name)
             result[name] = value if value is not None else field_def.default
         return cls(**result)
+
+
+@dataclass
+class ForecastResult:
+    """独立市场预测；不从买卖动作反推，生成后不可改写预测字段。"""
+    id: Optional[int] = None
+    code: str = ""
+    market: str = ""
+    mode: str = "eod"
+    generated_at: str = ""
+    data_cutoff: str = ""
+    target_session_date: str = ""
+    horizon: int = 1
+    reference_price: float = 0.0
+    prob_up: float = 0.0
+    prob_flat: float = 0.0
+    prob_down: float = 0.0
+    expected_return_p10: float = 0.0
+    expected_return_p50: float = 0.0
+    expected_return_p90: float = 0.0
+    direction: str = "neutral"
+    confidence: float = 0.0
+    market_regime: str = "unknown"
+    model_version: str = "analog_v1"
+    feature_snapshot_hash: str = ""
+    sample_count: int = 0
+    calendar_source: str = ""
+    event_key: str = ""
+    status: str = "pending"       # pending / verified / unsupported
+    actual_price: float = 0.0
+    actual_return: float = 0.0
+    actual_direction: str = ""
+    correct: int = 0
+    brier_score: float = 0.0
+    interval_hit: int = 0
+    verified_at: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ForecastResult":
+        result = {}
+        for name, field_def in cls.__dataclass_fields__.items():
+            value = d.get(name)
+            result[name] = value if value is not None else field_def.default
+        return cls(**result)
+
+
+@dataclass
+class FeatureContextSnapshot:
+    """Point-in-time news/fundamental context frozen at analysis delivery."""
+    id: Optional[int] = None
+    code: str = ""
+    market: str = ""
+    mode: str = "eod"
+    captured_at: str = ""
+    effective_date: str = ""
+    news_score: float = 0.0
+    news_count: int = 0
+    news_latest_published_at: str = ""
+    news_sources_json: str = "[]"
+    fundamental_json: str = "{}"
+    fundamental_source: str = ""
+    quality_status: str = "empty"
+    payload_hash: str = ""
+    event_key: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class ForecastModelVersion:
+    """预测模型 Champion/Challenger 版本记录。"""
+    id: Optional[int] = None
+    stock_code: str = "*"
+    market: str = ""
+    horizon: int = 1
+    version: str = ""
+    status: str = "challenger"
+    params_json: str = "{}"
+    feature_set_json: str = "[]"
+    train_start: str = ""
+    train_end: str = ""
+    sample_count: int = 0
+    accuracy: float = 0.0
+    brier_score: float = 0.0
+    log_loss: float = 0.0
+    calibration_error: float = 0.0
+    baseline_brier: float = 0.0
+    created_at: str = ""
+    promoted_at: str = ""
+    reason: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class JointOOFRun:
+    """One immutable audit run of the combined forecast/strategy/risk policy."""
+    id: Optional[int] = None
+    code: str = ""
+    market: str = ""
+    data_start: str = ""
+    data_end: str = ""
+    policy_version: str = "joint_oof_v3_multimodel"
+    samples: int = 0
+    actionable_signals: int = 0
+    forecast_gate_active: int = 0
+    total_return: float = 0.0
+    annual_return: float = 0.0
+    benchmark_return: float = 0.0
+    excess_return: float = 0.0
+    max_drawdown: float = 0.0
+    sharpe_ratio: float = 0.0
+    win_rate: float = 0.0
+    total_trades: int = 0
+    forecast_brier: float = 0.0
+    forecast_log_loss: float = 0.0
+    forecast_ece: float = 0.0
+    horizon_metrics_json: str = "{}"
+    calibration_json: str = "[]"
+    regime_metrics_json: str = "{}"
+    fold_summaries_json: str = "[]"
+    trace_json: str = "[]"
+    created_at: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class TradePlanLog:
+    """交易方案及其结果；与ForecastResult分开评价。"""
+    id: Optional[int] = None
+    forecast_id: Optional[int] = None
+    code: str = ""
+    market: str = ""
+    mode: str = "eod"
+    created_at: str = ""
+    reference_date: str = ""
+    decision_session_date: str = ""
+    signal_timestamp_ms: int = 0
+    strategy_key: str = ""
+    strategy_version: str = ""
+    signal_intent: str = ""       # alpha_entry/alpha_exit/risk_exit/...
+    action: str = "watch"
+    execution_level: str = "C"
+    trigger_price: float = 0.0
+    stop_loss: float = 0.0
+    take_profit: float = 0.0
+    position_pct: float = 0.0
+    max_loss_amount: float = 0.0
+    account_snapshot_json: str = "{}"
+    status: str = "pending"
+    entry_price: float = 0.0
+    exit_price: float = 0.0
+    net_return: float = 0.0
+    max_favorable_excursion: float = 0.0
+    max_adverse_excursion: float = 0.0
+    opportunity_cost: float = 0.0
+    outcome: str = ""
+    evidence_sources: str = ""
+    evidence_quality: str = ""
+    evidence_bar_count: int = 0
+    evaluated_at: str = ""
+    event_key: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 
 @dataclass

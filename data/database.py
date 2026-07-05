@@ -20,6 +20,8 @@ SQLite 数据库操作层
   3. 在本模块添加对应的 CRUD 方法
 """
 
+import json
+import hashlib
 import sqlite3
 import logging
 import math
@@ -28,8 +30,10 @@ from datetime import datetime
 from typing import Optional
 
 from data.models import (
-    StockInfo, PriceData, AnalysisReport, NewsItem,
+    StockInfo, PriceData, IntradayBar, AnalysisReport, NewsItem,
     Holding, WatchItem, AccountBalance, PredictionLog, ResearchObservationLog,
+    ForecastResult, ForecastModelVersion, TradePlanLog, JointOOFRun,
+    FeatureContextSnapshot,
 )
 from config.settings import Settings
 
@@ -45,7 +49,7 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: 
         logger.info(f"DB migrate: added column {table}.{column}")
 
 
-def _wilson_lower_bound(successes: int, total: int, z: float = 1.96) -> float:
+def _wilson_lower_bound(successes: float, total: float, z: float = 1.96) -> float:
     """Wilson score lower bound for a binomial success rate."""
     if total <= 0:
         return 0.0
@@ -54,6 +58,86 @@ def _wilson_lower_bound(successes: int, total: int, z: float = 1.96) -> float:
     centre = p + z * z / (2 * total)
     margin = z * math.sqrt((p * (1 - p) + z * z / (4 * total)) / total)
     return max(0.0, (centre - margin) / denom)
+
+
+def _trade_plan_event_key(data: dict) -> str:
+    """Build a stable key for one materially distinct user-visible plan."""
+    mode = str(data.get("mode") or "eod")
+    timestamp_minute = (
+        int(data.get("signal_timestamp_ms") or 0) // 60_000
+        if mode == "intraday" else 0
+    )
+
+    def number(name: str, digits: int) -> str:
+        try:
+            return f"{float(data.get(name) or 0.0):.{digits}f}"
+        except (TypeError, ValueError):
+            return f"{0.0:.{digits}f}"
+
+    return "|".join((
+        "v2",
+        str(data.get("code") or "").upper(),
+        mode,
+        str(
+            data.get("decision_session_date")
+            or data.get("reference_date")
+            or data.get("created_at")
+            or ""
+        )[:10],
+        str(data.get("strategy_key") or "unknown"),
+        str(data.get("strategy_version") or "unknown"),
+        str(data.get("signal_intent") or "unknown"),
+        str(data.get("action") or "watch"),
+        str(data.get("execution_level") or "C"),
+        number("trigger_price", 6),
+        number("stop_loss", 6),
+        number("take_profit", 6),
+        number("position_pct", 6),
+        number("max_loss_amount", 2),
+        _account_snapshot_signature(data.get("account_snapshot_json")),
+        str(timestamp_minute),
+    ))
+
+
+def _account_snapshot_signature(value) -> str:
+    """Hash only account fields that materially change plan sizing or costs."""
+    if isinstance(value, dict):
+        snapshot = value
+    else:
+        try:
+            snapshot = json.loads(value or "{}")
+        except (TypeError, ValueError):
+            snapshot = {}
+    material = {
+        key: snapshot.get(key)
+        for key in ("account_equity", "cash", "shares", "cost_price")
+        if key in snapshot
+    }
+    payload = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _minute_session_is_complete(
+    market: str, target_session: str, last_timestamp_ms: int,
+    available_sessions: list[str],
+) -> bool:
+    """Require a later session or a bar near the official regular close."""
+    if any(str(value) > target_session for value in available_sessions):
+        return True
+    try:
+        from zoneinfo import ZoneInfo
+
+        timezone = ZoneInfo(
+            "Asia/Shanghai" if str(market).upper() == "A" else "America/New_York"
+        )
+        last_bar = datetime.fromtimestamp(int(last_timestamp_ms) / 1000, timezone)
+        close_minutes = 15 * 60 if str(market).upper() == "A" else 16 * 60
+        return (
+            last_bar.date().isoformat() == target_session
+            and last_bar.hour * 60 + last_bar.minute >= close_minutes - 10
+        )
+    except Exception:
+        return False
 
 
 # ======================== 数据库建表 DDL ========================
@@ -85,6 +169,25 @@ CREATE TABLE IF NOT EXISTS price_history (
 -- 索引：加速按股票代码和日期查询
 CREATE INDEX IF NOT EXISTS idx_price_code ON price_history(code);
 CREATE INDEX IF NOT EXISTS idx_price_date ON price_history(date);
+
+-- 分钟K只作为盘中方案的前瞻验证证据，禁止与正式日K混写。
+CREATE TABLE IF NOT EXISTS intraday_price_history (
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    timestamp_ms INTEGER NOT NULL,
+    session_date TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    volume REAL DEFAULT 0.0,
+    source TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    quality_status TEXT NOT NULL DEFAULT 'supplemental',
+    PRIMARY KEY (code, timestamp_ms)
+);
+CREATE INDEX IF NOT EXISTS idx_intraday_scope
+ON intraday_price_history(code, session_date, timestamp_ms);
 
 -- 分析报告表：存储每次分析生成的完整报告
 CREATE TABLE IF NOT EXISTS reports (
@@ -164,6 +267,163 @@ CREATE TABLE IF NOT EXISTS account_balance (
 -- 确保单条记录存在
 INSERT OR IGNORE INTO account_balance (id, us_balance, a_balance) VALUES (1, 0.0, 0.0);
 
+-- 独立市场预测：只记录预测事实和到期结果，不混入交易动作。
+CREATE TABLE IF NOT EXISTS forecast_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'eod',
+    generated_at TEXT NOT NULL,
+    data_cutoff TEXT NOT NULL,
+    target_session_date TEXT NOT NULL,
+    horizon INTEGER NOT NULL,
+    reference_price REAL NOT NULL,
+    prob_up REAL NOT NULL,
+    prob_flat REAL NOT NULL,
+    prob_down REAL NOT NULL,
+    expected_return_p10 REAL DEFAULT 0.0,
+    expected_return_p50 REAL DEFAULT 0.0,
+    expected_return_p90 REAL DEFAULT 0.0,
+    direction TEXT NOT NULL,
+    confidence REAL DEFAULT 0.0,
+    market_regime TEXT DEFAULT 'unknown',
+    model_version TEXT NOT NULL,
+    feature_snapshot_hash TEXT NOT NULL,
+    sample_count INTEGER DEFAULT 0,
+    calendar_source TEXT DEFAULT '',
+    event_key TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    actual_price REAL DEFAULT 0.0,
+    actual_return REAL DEFAULT 0.0,
+    actual_direction TEXT DEFAULT '',
+    correct INTEGER DEFAULT 0,
+    brier_score REAL DEFAULT 0.0,
+    interval_hit INTEGER DEFAULT 0,
+    verified_at TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_forecast_due
+ON forecast_log(status, target_session_date);
+CREATE INDEX IF NOT EXISTS idx_forecast_scope
+ON forecast_log(code, market, horizon, generated_at);
+
+-- 新闻/基本面历史时点快照：只记录应用在当时真实看到的上下文。
+CREATE TABLE IF NOT EXISTS feature_context_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'eod',
+    captured_at TEXT NOT NULL,
+    effective_date TEXT NOT NULL,
+    news_score REAL DEFAULT 0.0,
+    news_count INTEGER DEFAULT 0,
+    news_latest_published_at TEXT DEFAULT '',
+    news_sources_json TEXT NOT NULL DEFAULT '[]',
+    fundamental_json TEXT NOT NULL DEFAULT '{}',
+    fundamental_source TEXT DEFAULT '',
+    quality_status TEXT NOT NULL DEFAULT 'empty',
+    payload_hash TEXT NOT NULL,
+    event_key TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_feature_context_scope
+ON feature_context_snapshots(code, captured_at, effective_date);
+
+CREATE TABLE IF NOT EXISTS forecast_model_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stock_code TEXT NOT NULL DEFAULT '*',
+    market TEXT NOT NULL,
+    horizon INTEGER NOT NULL,
+    version TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'challenger',
+    params_json TEXT NOT NULL DEFAULT '{}',
+    feature_set_json TEXT NOT NULL DEFAULT '[]',
+    train_start TEXT DEFAULT '',
+    train_end TEXT DEFAULT '',
+    sample_count INTEGER DEFAULT 0,
+    accuracy REAL DEFAULT 0.0,
+    brier_score REAL DEFAULT 0.0,
+    log_loss REAL DEFAULT 0.0,
+    calibration_error REAL DEFAULT 0.0,
+    baseline_brier REAL DEFAULT 0.0,
+    created_at TEXT NOT NULL,
+    promoted_at TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    UNIQUE(market, horizon, version)
+);
+CREATE INDEX IF NOT EXISTS idx_forecast_model_status
+ON forecast_model_versions(market, horizon, status);
+
+-- 最终联合策略的嵌套样本外回放；与单独预测、单策略回测分账保存。
+CREATE TABLE IF NOT EXISTS joint_oof_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    data_start TEXT NOT NULL,
+    data_end TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    samples INTEGER DEFAULT 0,
+    actionable_signals INTEGER DEFAULT 0,
+    forecast_gate_active INTEGER DEFAULT 0,
+    total_return REAL DEFAULT 0.0,
+    annual_return REAL DEFAULT 0.0,
+    benchmark_return REAL DEFAULT 0.0,
+    excess_return REAL DEFAULT 0.0,
+    max_drawdown REAL DEFAULT 0.0,
+    sharpe_ratio REAL DEFAULT 0.0,
+    win_rate REAL DEFAULT 0.0,
+    total_trades INTEGER DEFAULT 0,
+    forecast_brier REAL DEFAULT 0.0,
+    forecast_log_loss REAL DEFAULT 0.0,
+    forecast_ece REAL DEFAULT 0.0,
+    horizon_metrics_json TEXT NOT NULL DEFAULT '{}',
+    calibration_json TEXT NOT NULL DEFAULT '[]',
+    regime_metrics_json TEXT NOT NULL DEFAULT '{}',
+    fold_summaries_json TEXT NOT NULL DEFAULT '[]',
+    trace_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    UNIQUE(code, data_end, policy_version)
+);
+CREATE INDEX IF NOT EXISTS idx_joint_oof_scope
+ON joint_oof_runs(market, code, data_end);
+
+CREATE TABLE IF NOT EXISTS trade_plan_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    forecast_id INTEGER,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'eod',
+    created_at TEXT NOT NULL,
+    reference_date TEXT NOT NULL DEFAULT '',
+    decision_session_date TEXT NOT NULL DEFAULT '',
+    signal_timestamp_ms INTEGER DEFAULT 0,
+    strategy_key TEXT DEFAULT '',
+    strategy_version TEXT DEFAULT '',
+    signal_intent TEXT DEFAULT '',
+    action TEXT NOT NULL DEFAULT 'watch',
+    execution_level TEXT DEFAULT 'C',
+    trigger_price REAL DEFAULT 0.0,
+    stop_loss REAL DEFAULT 0.0,
+    take_profit REAL DEFAULT 0.0,
+    position_pct REAL DEFAULT 0.0,
+    max_loss_amount REAL DEFAULT 0.0,
+    account_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'pending',
+    entry_price REAL DEFAULT 0.0,
+    exit_price REAL DEFAULT 0.0,
+    net_return REAL DEFAULT 0.0,
+    max_favorable_excursion REAL DEFAULT 0.0,
+    max_adverse_excursion REAL DEFAULT 0.0,
+    opportunity_cost REAL DEFAULT 0.0,
+    outcome TEXT DEFAULT '',
+    evidence_sources TEXT DEFAULT '',
+    evidence_quality TEXT DEFAULT '',
+    evidence_bar_count INTEGER DEFAULT 0,
+    evaluated_at TEXT DEFAULT '',
+    event_key TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY(forecast_id) REFERENCES forecast_log(id)
+);
+CREATE INDEX IF NOT EXISTS idx_trade_plan_scope
+ON trade_plan_log(code, strategy_key, signal_intent, status);
+
 -- 预测追踪表（预测→验证→反馈闭环）
 CREATE TABLE IF NOT EXISTS prediction_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -188,6 +448,9 @@ CREATE TABLE IF NOT EXISTS prediction_log (
     actual_return REAL DEFAULT 0.0,
     underlying_return REAL DEFAULT 0.0,
     validation_price REAL DEFAULT 0.0,
+    actual_entry_price REAL DEFAULT 0.0,
+    actual_exit_type TEXT DEFAULT '',
+    actual_exit_date TEXT DEFAULT '',
     max_favorable_excursion REAL DEFAULT 0.0,
     max_adverse_excursion REAL DEFAULT 0.0,
     actual_direction TEXT DEFAULT '',
@@ -262,6 +525,9 @@ CREATE TABLE IF NOT EXISTS strategy_param_candidates (
     oos_trades INTEGER DEFAULT 0,
     selected_windows INTEGER DEFAULT 0,
     positive_excess_windows INTEGER DEFAULT 0,
+    risk_adjusted_windows INTEGER DEFAULT 0,
+    qualified_windows INTEGER DEFAULT 0,
+    promotion_path TEXT DEFAULT '',
     confirmations INTEGER DEFAULT 0,
     first_eligible_data_end TEXT DEFAULT '',
     last_data_end TEXT DEFAULT '',
@@ -424,6 +690,38 @@ def _prepare_prediction_events(conn: sqlite3.Connection):
     )
 
 
+def _prepare_trade_plan_events(conn: sqlite3.Connection):
+    """同一股票、模式、日期、策略和动作只保留一份正式方案。"""
+    conn.execute("DROP INDEX IF EXISTS idx_trade_plan_event")
+    conn.execute(
+        """UPDATE trade_plan_log
+           SET event_key = UPPER(code) || '|' ||
+                           COALESCE(NULLIF(mode, ''), 'eod') || '|' ||
+                           COALESCE(NULLIF(reference_date, ''), SUBSTR(created_at, 1, 10)) || '|' ||
+                           COALESCE(NULLIF(strategy_key, ''), 'unknown') || '|' ||
+                           COALESCE(NULLIF(signal_intent, ''), 'unknown') || '|' ||
+                           COALESCE(NULLIF(action, ''), 'watch')
+           WHERE event_key IS NULL OR event_key = ''"""
+    )
+    conn.execute(
+        """DELETE FROM trade_plan_log
+           WHERE id IN (
+               SELECT id FROM (
+                   SELECT id,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY event_key
+                              ORDER BY CASE status WHEN 'evaluated' THEN 0 ELSE 1 END, id ASC
+                          ) AS rn
+                   FROM trade_plan_log WHERE event_key != ''
+               ) WHERE rn > 1
+           )"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_plan_event
+           ON trade_plan_log(event_key) WHERE event_key != ''"""
+    )
+
+
 class Database:
     """
     SQLite 数据库单例类。
@@ -499,6 +797,9 @@ class Database:
         _ensure_column(conn, "prediction_log", "reference_date", "TEXT", "''")
         _ensure_column(conn, "prediction_log", "underlying_return", "REAL", "0.0")
         _ensure_column(conn, "prediction_log", "validation_price", "REAL", "0.0")
+        _ensure_column(conn, "prediction_log", "actual_entry_price", "REAL", "0.0")
+        _ensure_column(conn, "prediction_log", "actual_exit_type", "TEXT", "''")
+        _ensure_column(conn, "prediction_log", "actual_exit_date", "TEXT", "''")
         _ensure_column(conn, "prediction_log", "max_favorable_excursion", "REAL", "0.0")
         _ensure_column(conn, "prediction_log", "max_adverse_excursion", "REAL", "0.0")
         _ensure_column(conn, "prediction_log", "validation_end_date", "TEXT", "''")
@@ -518,6 +819,31 @@ class Database:
         _ensure_column(conn, "prediction_log", "exit_avoided_loss", "REAL", "0.0")
         _ensure_column(conn, "prediction_log", "exit_opportunity_cost", "REAL", "0.0")
         _ensure_column(conn, "prediction_log", "exit_quality", "TEXT", "''")
+        # v2 早期记录没有保存实际开盘入场价和退出类型。下一交易日开盘
+        # 可以从正式K线可靠恢复；退出类型只在价位与止损/止盈一致时回填。
+        conn.execute(
+            """UPDATE prediction_log
+               SET actual_entry_price=(
+                   SELECT ph.open FROM price_history ph
+                   WHERE ph.code=prediction_log.code
+                     AND ph.date>COALESCE(NULLIF(prediction_log.reference_date, ''),
+                                          SUBSTR(prediction_log.predict_time, 1, 10))
+                   ORDER BY ph.date ASC LIMIT 1)
+               WHERE validated=1 AND entry_mode='next_open'
+                 AND COALESCE(actual_entry_price, 0)<=0"""
+        )
+        conn.execute(
+            """UPDATE prediction_log
+               SET actual_exit_type=CASE
+                   WHEN entry_triggered=0 THEN 'not_triggered'
+                   WHEN stop_loss>0 AND ABS(validation_price-stop_loss)
+                        <= MAX(0.01, ABS(stop_loss)*0.001) THEN 'stop_loss'
+                   WHEN take_profit>0 AND ABS(validation_price-take_profit)
+                        <= MAX(0.01, ABS(take_profit)*0.001) THEN 'take_profit'
+                   ELSE 'legacy_validation' END,
+                   actual_exit_date=COALESCE(NULLIF(actual_exit_date, ''), validation_end_date)
+               WHERE validated=1 AND COALESCE(actual_exit_type, '')=''"""
+        )
         conn.execute(
             """UPDATE prediction_log
                SET signal_action = CASE
@@ -553,8 +879,35 @@ class Database:
         # 旧记录没有触发语义，必须隔离，不能自动参与新版学习。
         _ensure_column(conn, "research_observation_log", "validation_status", "TEXT", "'unsupported'")
         _prepare_research_observation_events(conn)
+        _ensure_column(conn, "forecast_model_versions", "stock_code", "TEXT", "'*'")
+        _ensure_column(conn, "forecast_model_versions", "log_loss", "REAL", "0.0")
+        _ensure_column(conn, "joint_oof_runs", "horizon_metrics_json", "TEXT", "'{}'")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_forecast_model_stock_status "
+            "ON forecast_model_versions(stock_code, market, horizon, status)"
+        )
+        _ensure_column(conn, "trade_plan_log", "event_key", "TEXT", "''")
+        _ensure_column(conn, "trade_plan_log", "reference_date", "TEXT", "''")
+        _ensure_column(conn, "trade_plan_log", "decision_session_date", "TEXT", "''")
+        _ensure_column(conn, "trade_plan_log", "signal_timestamp_ms", "INTEGER", "0")
+        _ensure_column(conn, "trade_plan_log", "evidence_sources", "TEXT", "''")
+        _ensure_column(conn, "trade_plan_log", "evidence_quality", "TEXT", "''")
+        _ensure_column(conn, "trade_plan_log", "evidence_bar_count", "INTEGER", "0")
+        conn.execute(
+            """UPDATE trade_plan_log
+               SET decision_session_date = COALESCE(
+                   NULLIF(decision_session_date, ''),
+                   NULLIF(reference_date, ''),
+                   SUBSTR(created_at, 1, 10)
+               )
+               WHERE decision_session_date IS NULL OR decision_session_date = ''"""
+        )
+        _prepare_trade_plan_events(conn)
         _ensure_column(conn, "strategy_param_candidates", "avg_oos_excess_return", "REAL", "0.0")
         _ensure_column(conn, "strategy_param_candidates", "positive_excess_windows", "INTEGER", "0")
+        _ensure_column(conn, "strategy_param_candidates", "risk_adjusted_windows", "INTEGER", "0")
+        _ensure_column(conn, "strategy_param_candidates", "qualified_windows", "INTEGER", "0")
+        _ensure_column(conn, "strategy_param_candidates", "promotion_path", "TEXT", "''")
         _ensure_column(conn, "strategy_param_candidates", "first_eligible_data_end", "TEXT", "''")
         # 索引必须在列迁移完成后创建（旧库没有 strategy_name 列，不能放在 DDL 里）
         conn.execute(
@@ -697,6 +1050,117 @@ class Database:
         sql = f"SELECT * FROM price_history WHERE {' AND '.join(conditions)} ORDER BY date ASC"
         rows = self.execute(sql, params).fetchall()
         return [PriceData.from_dict(dict(r)) for r in rows]
+
+    def clear_price_history(self, code: str) -> int:
+        """删除单只股票整段缓存；用于发现污染后由可信数据源完整重建。"""
+        cursor = self._execute_write(
+            "DELETE FROM price_history WHERE code=?", (code.upper(),)
+        )
+        return int(cursor.rowcount or 0)
+
+    # ======================== 分钟K前瞻证据 ========================
+
+    def insert_intraday_bars(self, bars: list[IntradayBar]) -> int:
+        """Insert validated minute bars without touching daily price history."""
+        valid = []
+        for bar in bars or []:
+            try:
+                values = [float(bar.open), float(bar.high), float(bar.low), float(bar.close)]
+                if (
+                    int(bar.timestamp_ms) <= 0 or min(values) <= 0
+                    or values[1] < max(values[0], values[2], values[3])
+                    or values[2] > min(values[0], values[1], values[3])
+                ):
+                    continue
+                valid.append((
+                    bar.code.upper(), bar.market, int(bar.timestamp_ms),
+                    bar.session_date, values[0], values[1], values[2], values[3],
+                    max(float(bar.volume or 0.0), 0.0), bar.source,
+                    bar.fetched_at or datetime.now().isoformat(),
+                    bar.quality_status or "supplemental",
+                ))
+            except (TypeError, ValueError):
+                continue
+        if not valid:
+            return 0
+        self._executemany_write(
+            """INSERT INTO intraday_price_history
+               (code, market, timestamp_ms, session_date, open, high, low, close,
+                volume, source, fetched_at, quality_status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(code, timestamp_ms) DO UPDATE SET
+                 market=excluded.market,
+                 session_date=excluded.session_date,
+                 open=excluded.open,
+                 high=excluded.high,
+                 low=excluded.low,
+                 close=excluded.close,
+                 volume=excluded.volume,
+                 source=excluded.source,
+                 fetched_at=excluded.fetched_at,
+                 quality_status=excluded.quality_status
+               WHERE intraday_price_history.quality_status!='provider'
+                  OR excluded.quality_status='provider'""",
+            valid,
+        )
+        return len(valid)
+
+    def get_intraday_bars(
+        self, code: str, *, start_ms: int = 0, end_ms: int = 0,
+    ) -> list[IntradayBar]:
+        clauses = ["code=?"]
+        params: list = [code.upper()]
+        if start_ms:
+            clauses.append("timestamp_ms>=?")
+            params.append(int(start_ms))
+        if end_ms:
+            clauses.append("timestamp_ms<=?")
+            params.append(int(end_ms))
+        rows = self.execute(
+            "SELECT * FROM intraday_price_history WHERE "
+            + " AND ".join(clauses) + " ORDER BY timestamp_ms",
+            tuple(params),
+        ).fetchall()
+        return [IntradayBar(**dict(row)) for row in rows]
+
+    def get_intraday_coverage(self, code: str) -> dict:
+        row = self.execute(
+            """SELECT COUNT(*) count, COUNT(DISTINCT session_date) sessions,
+                      MIN(timestamp_ms) first_ms, MAX(timestamp_ms) last_ms,
+                      GROUP_CONCAT(DISTINCT source) sources
+               FROM intraday_price_history WHERE code=?""",
+            (code.upper(),),
+        ).fetchone()
+        return dict(row) if row else {
+            "count": 0, "sessions": 0, "first_ms": 0, "last_ms": 0, "sources": "",
+        }
+
+    def get_intraday_evidence_overview(self, market: str) -> list[dict]:
+        bars = self.execute(
+            """SELECT code, COUNT(*) bar_count, COUNT(DISTINCT session_date) sessions,
+                      MIN(session_date) first_session, MAX(session_date) last_session,
+                      GROUP_CONCAT(DISTINCT source) sources
+               FROM intraday_price_history WHERE market=? GROUP BY code""",
+            (market,),
+        ).fetchall()
+        plans = self.execute(
+            """SELECT code,
+                      SUM(CASE WHEN status='pending_intraday' THEN 1 ELSE 0 END) pending,
+                      SUM(CASE WHEN status='evaluated' THEN 1 ELSE 0 END) evaluated
+               FROM trade_plan_log WHERE market=? AND mode='intraday' GROUP BY code""",
+            (market,),
+        ).fetchall()
+        result = {row["code"]: dict(row) for row in bars}
+        for row in plans:
+            item = result.setdefault(row["code"], {
+                "code": row["code"], "bar_count": 0, "sessions": 0,
+                "first_session": "", "last_session": "", "sources": "",
+            })
+            item.update({"pending": int(row["pending"] or 0), "evaluated": int(row["evaluated"] or 0)})
+        for item in result.values():
+            item.setdefault("pending", 0)
+            item.setdefault("evaluated", 0)
+        return sorted(result.values(), key=lambda item: (-int(item["bar_count"]), item["code"]))
 
 
     # ======================== 分析报告 ========================
@@ -1025,6 +1489,874 @@ class Database:
         )
 
     # ═══════════════════════════════════════════════════════════════
+    # 独立预测与交易方案双闭环
+    # ═══════════════════════════════════════════════════════════════
+
+    def insert_feature_context_snapshot(
+        self, snapshot: FeatureContextSnapshot,
+    ) -> int:
+        """Freeze one point-in-time context without rewriting earlier snapshots."""
+        data = snapshot.to_dict()
+        data.pop("id", None)
+        columns = ", ".join(data.keys())
+        placeholders = ", ".join(["?"] * len(data))
+        cursor = self._execute_write(
+            f"INSERT OR IGNORE INTO feature_context_snapshots ({columns}) "
+            f"VALUES ({placeholders})",
+            tuple(data.values()),
+        )
+        if cursor.rowcount:
+            snapshot.id = int(cursor.lastrowid or 0)
+            return snapshot.id
+        row = self.execute(
+            "SELECT id FROM feature_context_snapshots WHERE event_key=?",
+            (snapshot.event_key,),
+        ).fetchone()
+        snapshot.id = int(row["id"] or 0) if row else 0
+        return snapshot.id
+
+    def get_feature_context_snapshots(
+        self, code: str, *, before_at: str = "", limit: int = 100,
+    ) -> list[FeatureContextSnapshot]:
+        clauses = ["code=?"]
+        params: list = [code.upper()]
+        if before_at:
+            clauses.append("captured_at<=?")
+            params.append(before_at)
+        params.append(max(int(limit), 1))
+        rows = self.execute(
+            "SELECT * FROM feature_context_snapshots WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY captured_at DESC, id DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
+        return [FeatureContextSnapshot(**dict(row)) for row in rows]
+
+    def get_feature_context_overview(self, market: str) -> list[dict]:
+        rows = self.execute(
+            """SELECT code, COUNT(*) snapshot_count,
+                      SUM(CASE WHEN news_count>0 THEN 1 ELSE 0 END) news_snapshots,
+                      SUM(CASE WHEN fundamental_source NOT IN ('', 'default') THEN 1 ELSE 0 END) fundamental_snapshots,
+                      MIN(captured_at) first_captured_at,
+                      MAX(captured_at) last_captured_at,
+                      GROUP_CONCAT(DISTINCT fundamental_source) fundamental_sources
+               FROM feature_context_snapshots WHERE market=?
+               GROUP BY code ORDER BY snapshot_count DESC, code""",
+            (market,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def insert_forecast(self, forecast: ForecastResult) -> int:
+        """冻结一条预测；重复事件返回原记录，不覆盖预测字段。"""
+        probabilities = [
+            float(forecast.prob_up),
+            float(forecast.prob_flat),
+            float(forecast.prob_down),
+        ]
+        if any(not math.isfinite(value) or value < 0 or value > 1 for value in probabilities):
+            raise ValueError("预测概率必须是 0 到 1 的有限数")
+        if abs(sum(probabilities) - 1.0) > 1e-6:
+            raise ValueError("上涨、震荡、下跌概率之和必须等于 1")
+        if not forecast.event_key:
+            raise ValueError("预测必须包含稳定 event_key")
+        if not forecast.target_session_date or not forecast.data_cutoff:
+            raise ValueError("预测必须包含数据截止日和目标交易日")
+
+        data = forecast.to_dict()
+        data.pop("id", None)
+        columns = ", ".join(data.keys())
+        placeholders = ", ".join(["?"] * len(data))
+        cursor = self._execute_write(
+            f"INSERT OR IGNORE INTO forecast_log ({columns}) VALUES ({placeholders})",
+            tuple(data.values()),
+        )
+        if cursor.rowcount:
+            forecast.id = int(cursor.lastrowid or 0)
+            return forecast.id
+        row = self.execute(
+            "SELECT id FROM forecast_log WHERE event_key=?", (forecast.event_key,)
+        ).fetchone()
+        forecast.id = int(row["id"] or 0) if row else 0
+        return forecast.id
+
+    def insert_forecasts(self, forecasts: list[ForecastResult]) -> list[int]:
+        return [self.insert_forecast(item) for item in forecasts]
+
+    def get_forecasts(
+        self,
+        *,
+        code: str = "",
+        market: str = "",
+        status: str = "",
+        horizon: int = 0,
+        limit: int = 100,
+    ) -> list[ForecastResult]:
+        clauses, params = [], []
+        if code:
+            clauses.append("code=?")
+            params.append(code.upper())
+        if market:
+            clauses.append("market=?")
+            params.append(market)
+        if status:
+            clauses.append("status=?")
+            params.append(status)
+        if horizon:
+            clauses.append("horizon=?")
+            params.append(int(horizon))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, int(limit)))
+        rows = self.execute(
+            f"SELECT * FROM forecast_log {where} ORDER BY generated_at DESC, horizon ASC LIMIT ?",
+            tuple(params),
+        ).fetchall()
+        return [ForecastResult.from_dict(dict(row)) for row in rows]
+
+    def verify_due_forecasts(
+        self,
+        *,
+        code: str = "",
+        as_of_date: str = "",
+    ) -> list[ForecastResult]:
+        """用目标交易日正式收盘价验证预测，缺失时保持 pending。"""
+        cutoff = (as_of_date or datetime.now().date().isoformat())[:10]
+        params: list = [cutoff]
+        code_filter = ""
+        if code:
+            code_filter = " AND code=?"
+            params.append(code.upper())
+        rows = self.execute(
+            "SELECT * FROM forecast_log WHERE status='pending' "
+            "AND target_session_date<=?" + code_filter + " ORDER BY target_session_date, id",
+            tuple(params),
+        ).fetchall()
+        verified: list[ForecastResult] = []
+        now = datetime.now().isoformat()
+        for row in rows:
+            forecast = ForecastResult.from_dict(dict(row))
+            price_row = self.execute(
+                "SELECT close FROM price_history WHERE code=? AND date=?",
+                (forecast.code, forecast.target_session_date),
+            ).fetchone()
+            if not price_row or forecast.reference_price <= 0:
+                continue
+            actual_price = float(price_row["close"] or 0.0)
+            if actual_price <= 0:
+                continue
+            actual_return = actual_price / forecast.reference_price - 1.0
+            actual_direction = (
+                "bullish" if actual_return > 0.01
+                else "bearish" if actual_return < -0.01
+                else "neutral"
+            )
+            outcomes = {
+                "bullish": 1.0 if actual_direction == "bullish" else 0.0,
+                "neutral": 1.0 if actual_direction == "neutral" else 0.0,
+                "bearish": 1.0 if actual_direction == "bearish" else 0.0,
+            }
+            brier = (
+                (forecast.prob_up - outcomes["bullish"]) ** 2
+                + (forecast.prob_flat - outcomes["neutral"]) ** 2
+                + (forecast.prob_down - outcomes["bearish"]) ** 2
+            )
+            interval_hit = int(
+                forecast.expected_return_p10 <= actual_return
+                <= forecast.expected_return_p90
+            )
+            self._execute_write(
+                """UPDATE forecast_log SET status='verified', actual_price=?,
+                   actual_return=?, actual_direction=?, correct=?, brier_score=?,
+                   interval_hit=?, verified_at=? WHERE id=? AND status='pending'""",
+                (
+                    actual_price, actual_return, actual_direction,
+                    int(forecast.direction == actual_direction), brier,
+                    interval_hit, now, forecast.id,
+                ),
+            )
+            refreshed = self.execute(
+                "SELECT * FROM forecast_log WHERE id=?", (forecast.id,)
+            ).fetchone()
+            if refreshed:
+                verified.append(ForecastResult.from_dict(dict(refreshed)))
+        return verified
+
+    def get_forecast_metrics(
+        self,
+        *,
+        market: str = "",
+        code: str = "",
+        horizon: int = 0,
+        model_version: str = "",
+    ) -> dict:
+        clauses = ["status='verified'"]
+        params: list = []
+        for column, value in (
+            ("market", market), ("code", code.upper() if code else ""),
+            ("model_version", model_version),
+        ):
+            if value:
+                clauses.append(f"{column}=?")
+                params.append(value)
+        if horizon:
+            clauses.append("horizon=?")
+            params.append(int(horizon))
+        rows = self.execute(
+            "SELECT correct, brier_score, interval_hit, actual_direction, "
+            "prob_up, prob_flat, prob_down, market_regime "
+            f"FROM forecast_log WHERE {' AND '.join(clauses)}",
+            tuple(params),
+        ).fetchall()
+        if not rows:
+            return {
+                "samples": 0, "accuracy": 0.0, "brier_score": 0.0,
+                "baseline_brier": 0.0, "log_loss": 0.0, "ece": 0.0,
+                "interval_coverage": 0.0, "calibration_bins": [],
+                "regime_metrics": {},
+            }
+        count = len(rows)
+        direction_counts = {
+            key: sum(1 for row in rows if row["actual_direction"] == key)
+            for key in ("bullish", "neutral", "bearish")
+        }
+        frequencies = [direction_counts[key] / count for key in direction_counts]
+        baseline_brier = 1.0 - sum(value * value for value in frequencies)
+        from core.forecast_engine import multiclass_log_loss, probability_diagnostics
+
+        direction_index = {"bullish": 0, "neutral": 1, "bearish": 2}
+        probabilities = [
+            [float(row["prob_up"]), float(row["prob_flat"]), float(row["prob_down"])]
+            for row in rows
+        ]
+        actual_indices = [direction_index.get(str(row["actual_direction"]), 1) for row in rows]
+        diagnostics = probability_diagnostics(
+            probabilities, actual_indices,
+            regimes=[str(row["market_regime"] or "unknown") for row in rows],
+        )
+        return {
+            "samples": count,
+            "accuracy": sum(int(row["correct"] or 0) for row in rows) / count,
+            "brier_score": sum(float(row["brier_score"] or 0.0) for row in rows) / count,
+            "baseline_brier": baseline_brier,
+            "log_loss": sum(
+                multiclass_log_loss(probability, actual)
+                for probability, actual in zip(probabilities, actual_indices)
+            ) / count,
+            "ece": diagnostics["ece"],
+            "interval_coverage": sum(int(row["interval_hit"] or 0) for row in rows) / count,
+            "calibration_bins": diagnostics["calibration_bins"],
+            "regime_metrics": diagnostics["regime_metrics"],
+        }
+
+    def save_forecast_model_version(self, version: ForecastModelVersion) -> int:
+        data = version.to_dict()
+        data.pop("id", None)
+        columns = ", ".join(data.keys())
+        placeholders = ", ".join(["?"] * len(data))
+        updates = ", ".join(
+            f"{key}=excluded.{key}" for key in data if key not in ("market", "horizon", "version")
+        )
+        cursor = self._execute_write(
+            f"INSERT INTO forecast_model_versions ({columns}) VALUES ({placeholders}) "
+            f"ON CONFLICT(market, horizon, version) DO UPDATE SET {updates}",
+            tuple(data.values()),
+        )
+        row = self.execute(
+            "SELECT id FROM forecast_model_versions WHERE market=? AND horizon=? AND version=?",
+            (version.market, version.horizon, version.version),
+        ).fetchone()
+        return int(row["id"] or cursor.lastrowid or 0) if row else 0
+
+    def get_forecast_champion(
+        self, market: str, horizon: int, stock_code: str = "",
+    ) -> ForecastModelVersion | None:
+        scope = stock_code.upper() if stock_code else "*"
+        row = self.execute(
+            """SELECT * FROM forecast_model_versions
+               WHERE market=? AND horizon=? AND status='champion'
+                 AND stock_code IN (?, '*')
+               ORDER BY CASE WHEN stock_code=? THEN 0 ELSE 1 END,
+                        promoted_at DESC, id DESC LIMIT 1""",
+            (market, int(horizon), scope, scope),
+        ).fetchone()
+        if not row:
+            return None
+        values = dict(row)
+        return ForecastModelVersion(**{
+            key: values.get(key) for key in ForecastModelVersion.__dataclass_fields__
+        })
+
+    def promote_forecast_model(
+        self, market: str, horizon: int, version: str, stock_code: str = "",
+    ) -> None:
+        """原子晋升 Challenger，并保留旧 Champion 供审计与回滚。"""
+        now = datetime.now().isoformat()
+        scope = stock_code.upper() if stock_code else "*"
+        with self._write_lock:
+            conn = self.conn
+            row = conn.execute(
+                """SELECT id FROM forecast_model_versions
+                   WHERE market=? AND horizon=? AND version=? AND stock_code=?""",
+                (market, int(horizon), version, scope),
+            ).fetchone()
+            if not row:
+                raise ValueError(f"预测模型候选不存在: {market}/{horizon}/{version}")
+            conn.execute(
+                """UPDATE forecast_model_versions SET status='retired'
+                   WHERE market=? AND horizon=? AND stock_code=?
+                     AND status='champion' AND version!=?""",
+                (market, int(horizon), scope, version),
+            )
+            conn.execute(
+                """UPDATE forecast_model_versions SET status='champion', promoted_at=?
+                   WHERE market=? AND horizon=? AND version=? AND stock_code=?""",
+                (now, market, int(horizon), version, scope),
+            )
+            conn.commit()
+
+    def rollback_forecast_model(
+        self, market: str, horizon: int, version: str, stock_code: str, reason: str,
+    ) -> None:
+        """在线概率表现显著退化时退出执行链；保留记录供审计。"""
+        self._execute_write(
+            """UPDATE forecast_model_versions
+               SET status='rolled_back', reason=?
+               WHERE market=? AND horizon=? AND version=? AND stock_code=?
+                 AND status='champion'""",
+            (reason, market, int(horizon), version, stock_code.upper()),
+        )
+
+    def save_joint_oof_run(self, run: JointOOFRun | dict) -> int:
+        """Persist one combined-policy OOF audit, replacing the same cutoff run."""
+        values = run.to_dict() if hasattr(run, "to_dict") else dict(run)
+        values.pop("id", None)
+        for source, target, default in (
+            ("horizon_metrics", "horizon_metrics_json", {}),
+            ("calibration_bins", "calibration_json", []),
+            ("regime_metrics", "regime_metrics_json", {}),
+            ("fold_summaries", "fold_summaries_json", []),
+            ("trace", "trace_json", []),
+        ):
+            if source in values:
+                values[target] = json.dumps(values.pop(source), ensure_ascii=False)
+            elif not isinstance(values.get(target), str):
+                values[target] = json.dumps(values.get(target, default), ensure_ascii=False)
+        values["code"] = str(values.get("code") or "").upper()
+        values["created_at"] = values.get("created_at") or datetime.now().isoformat()
+        columns = ", ".join(values.keys())
+        placeholders = ", ".join(["?"] * len(values))
+        updates = ", ".join(
+            f"{key}=excluded.{key}"
+            for key in values if key not in ("code", "data_end", "policy_version")
+        )
+        self._execute_write(
+            f"INSERT INTO joint_oof_runs ({columns}) VALUES ({placeholders}) "
+            f"ON CONFLICT(code, data_end, policy_version) DO UPDATE SET {updates}",
+            tuple(values.values()),
+        )
+        row = self.execute(
+            "SELECT id FROM joint_oof_runs WHERE code=? AND data_end=? AND policy_version=?",
+            (values["code"], values["data_end"], values["policy_version"]),
+        ).fetchone()
+        return int(row["id"] or 0) if row else 0
+
+    def has_joint_oof_run(
+        self, code: str, data_end: str, policy_version: str = "",
+    ) -> bool:
+        sql = "SELECT 1 FROM joint_oof_runs WHERE code=? AND data_end=?"
+        params: list = [code.upper(), data_end]
+        if policy_version:
+            sql += " AND policy_version=?"
+            params.append(policy_version)
+        row = self.execute(sql + " LIMIT 1", tuple(params)).fetchone()
+        return bool(row)
+
+    def get_joint_oof_runs(
+        self, *, market: str = "", code: str = "", policy_version: str = "",
+        limit: int = 100,
+    ) -> list[dict]:
+        clauses, params = [], []
+        if market:
+            clauses.append("market=?")
+            params.append(market)
+        if code:
+            clauses.append("code=?")
+            params.append(code.upper())
+        if policy_version:
+            clauses.append("policy_version=?")
+            params.append(policy_version)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self.execute(
+            "SELECT * FROM joint_oof_runs" + where
+            + " ORDER BY data_end DESC, id DESC LIMIT ?",
+            tuple(params + [max(int(limit), 1)]),
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            for key, default in (
+                ("horizon_metrics_json", {}),
+                ("calibration_json", []), ("regime_metrics_json", {}),
+                ("fold_summaries_json", []), ("trace_json", []),
+            ):
+                try:
+                    item[key[:-5] if key.endswith("_json") else key] = json.loads(
+                        item.get(key) or json.dumps(default)
+                    )
+                except (TypeError, ValueError):
+                    item[key[:-5] if key.endswith("_json") else key] = default
+            result.append(item)
+        return result
+
+    def get_joint_oof_health(self, code: str) -> dict:
+        """Return latest combined-policy audit plus conservative drift signals."""
+        latest_rows = self.get_joint_oof_runs(code=code, limit=1)
+        if not latest_rows:
+            return {}
+        latest = dict(latest_rows[0])
+        runs = self.get_joint_oof_runs(
+            code=code,
+            policy_version=str(latest.get("policy_version") or ""),
+            limit=2,
+        )
+        reasons = []
+        status = "stable"
+        previous = runs[1] if len(runs) > 1 else None
+        if previous:
+            excess_delta = float(latest.get("excess_return", 0) or 0) - float(
+                previous.get("excess_return", 0) or 0
+            )
+            brier_delta = float(latest.get("forecast_brier", 0) or 0) - float(
+                previous.get("forecast_brier", 0) or 0
+            )
+            latest["excess_return_delta"] = excess_delta
+            latest["forecast_brier_delta"] = brier_delta
+            if excess_delta <= -0.05:
+                reasons.append(f"超额收益较上次下降{abs(excess_delta):.1%}")
+            previous_brier = float(previous.get("forecast_brier", 0) or 0)
+            if previous_brier > 0 and brier_delta >= max(0.03, previous_brier * 0.10):
+                reasons.append(f"预测Brier较上次恶化{brier_delta:+.3f}")
+        trades = int(latest.get("total_trades", 0) or 0)
+        if (
+            trades >= 8
+            and float(latest.get("total_return", 0) or 0) <= -0.03
+            and float(latest.get("excess_return", 0) or 0) <= -0.03
+        ):
+            status = "critical"
+            reasons.append("最新联合OOF超额收益为负")
+        elif reasons:
+            status = "warning"
+        latest["drift_status"] = status
+        latest["drift_reasons"] = reasons
+        return latest
+
+    def insert_trade_plan(self, plan: TradePlanLog) -> int:
+        data = plan.to_dict()
+        data.pop("id", None)
+        data["decision_session_date"] = str(
+            data.get("decision_session_date")
+            or data.get("reference_date")
+            or data.get("created_at")
+            or ""
+        )[:10]
+        data["event_key"] = data.get("event_key") or _trade_plan_event_key(data)
+        if isinstance(data.get("account_snapshot_json"), dict):
+            data["account_snapshot_json"] = json.dumps(
+                data["account_snapshot_json"], ensure_ascii=False, sort_keys=True
+            )
+        columns = ", ".join(data.keys())
+        placeholders = ", ".join(["?"] * len(data))
+        cursor = self._execute_write(
+            f"INSERT OR IGNORE INTO trade_plan_log ({columns}) VALUES ({placeholders})",
+            tuple(data.values()),
+        )
+        if cursor.rowcount:
+            plan.id = int(cursor.lastrowid or 0)
+            return plan.id
+        row = self.execute(
+            "SELECT id FROM trade_plan_log WHERE event_key=?", (data["event_key"],)
+        ).fetchone()
+        plan.id = int(row["id"] or 0) if row else 0
+        return plan.id
+
+    def verify_due_trade_plans(self, *, code: str = "", window: int = 5) -> int:
+        """分别复盘交易方案；只评价当时 A/B 级可执行动作。"""
+        params: list = []
+        code_filter = ""
+        if code:
+            code_filter = " AND code=?"
+            params.append(code.upper())
+        rows = self.execute(
+            "SELECT * FROM trade_plan_log WHERE status='pending'" + code_filter,
+            tuple(params),
+        ).fetchall()
+        updated = 0
+        now = datetime.now().isoformat()
+        for row in rows:
+            plan = dict(row)
+            origin = str(plan.get("reference_date") or plan.get("created_at") or "")[:10]
+            bars = self.execute(
+                """SELECT date, open, high, low, close FROM price_history
+                   WHERE code=? AND date>? ORDER BY date ASC LIMIT ?""",
+                (plan["code"], origin, max(1, int(window))),
+            ).fetchall()
+            if len(bars) < max(1, int(window)):
+                continue
+            entry = float(bars[0]["open"] or 0.0)
+            if entry <= 0:
+                continue
+            action = str(plan.get("action") or "")
+            stop = float(plan.get("stop_loss") or 0.0)
+            take_profit = float(plan.get("take_profit") or 0.0)
+            exit_price = float(bars[-1]["close"] or 0.0)
+            outcome = "window_close"
+            if action == "buy":
+                exit_index = len(bars) - 1
+                is_a_share = str(plan.get("market") or "").upper() == "A"
+                for index, bar in enumerate(bars):
+                    open_price = float(bar["open"] or 0.0)
+                    low = float(bar["low"] or 0.0)
+                    high = float(bar["high"] or 0.0)
+                    # A股新建仓当日不可卖出；当日止损只能记录风险，次日起才能成交。
+                    if is_a_share and index == 0:
+                        continue
+                    # 同一根 K 线同时触及时按止损优先，避免乐观路径假设。
+                    if stop > 0 and (open_price <= stop or low <= stop):
+                        exit_price = open_price if open_price <= stop else stop
+                        outcome = "stop_loss"
+                        exit_index = index
+                        break
+                    if take_profit > entry and high >= take_profit:
+                        exit_price = take_profit
+                        outcome = "take_profit"
+                        exit_index = index
+                        break
+                active_bars = bars[:exit_index + 1]
+                raw_path = [float(bar["high"]) / entry - 1.0 for bar in active_bars]
+                adverse_path = [float(bar["low"]) / entry - 1.0 for bar in active_bars]
+                gross_return = exit_price / entry - 1.0
+                mfe, mae = max(raw_path), min(adverse_path)
+                opportunity_cost = 0.0
+            elif action == "sell":
+                final_return = float(bars[-1]["close"]) / entry - 1.0
+                gross_return = -final_return
+                mfe = max(entry / float(bar["low"]) - 1.0 for bar in bars if float(bar["low"]) > 0)
+                mae = min(entry / float(bar["high"]) - 1.0 for bar in bars if float(bar["high"]) > 0)
+                opportunity_cost = max(final_return, 0.0)
+                outcome = "effective_exit" if final_return < 0 else "premature_exit"
+                exit_price = float(bars[-1]["close"])
+            else:
+                continue
+
+            from utils.market_rules import get_market_rules
+            rules = get_market_rules(plan["market"], code=plan["code"])
+            try:
+                snapshot = json.loads(plan.get("account_snapshot_json") or "{}")
+            except (TypeError, ValueError):
+                snapshot = {}
+            if action == "buy":
+                position_value = (
+                    float(snapshot.get("account_equity", 0.0) or 0.0)
+                    * float(plan.get("position_pct", 0.0) or 0.0)
+                )
+                if position_value > 0:
+                    from utils.market_rules import estimate_round_trip_cost
+                    estimated_cost = estimate_round_trip_cost(
+                        position_value, plan["market"]
+                    ) / position_value
+                else:
+                    estimated_cost = rules.round_trip_cost_pct
+            else:
+                position_value = (
+                    float(snapshot.get("shares", 0.0) or 0.0) * entry
+                )
+                if position_value > 0:
+                    one_side_amount = (
+                        position_value * float(rules.slippage)
+                        + max(position_value * float(rules.commission), float(rules.min_commission))
+                        + position_value * float(rules.sell_tax)
+                    )
+                    estimated_cost = one_side_amount / position_value
+                else:
+                    estimated_cost = (
+                        float(rules.slippage)
+                        + float(rules.commission)
+                        + float(rules.sell_tax)
+                    )
+            net_return = gross_return - estimated_cost
+            self._execute_write(
+                """UPDATE trade_plan_log SET status='evaluated', entry_price=?,
+                   exit_price=?, net_return=?, max_favorable_excursion=?,
+                   max_adverse_excursion=?, opportunity_cost=?, outcome=?,
+                   evidence_sources='daily_price_history',
+                   evidence_quality='provider', evidence_bar_count=?,
+                   evaluated_at=? WHERE id=? AND status='pending'""",
+                (
+                    entry, exit_price, net_return, mfe, mae,
+                    opportunity_cost, outcome, len(bars), now, plan["id"],
+                ),
+            )
+            updated += 1
+        return updated
+
+    def verify_due_intraday_trade_plans(self, *, code: str = "") -> int:
+        """Verify prospective intraday plans only from timestamped minute bars."""
+        clauses = ["status='pending_intraday'"]
+        params: list = []
+        if code:
+            clauses.append("code=?")
+            params.append(code.upper())
+        plans = self.execute(
+            "SELECT * FROM trade_plan_log WHERE " + " AND ".join(clauses)
+            + " ORDER BY signal_timestamp_ms, id",
+            tuple(params),
+        ).fetchall()
+        updated = 0
+        for raw_plan in plans:
+            plan = dict(raw_plan)
+            signal_ms = int(plan.get("signal_timestamp_ms") or 0)
+            if signal_ms <= 0:
+                continue
+            bars = [dict(row) for row in self.execute(
+                """SELECT * FROM intraday_price_history
+                   WHERE code=? AND timestamp_ms>? ORDER BY timestamp_ms LIMIT 10000""",
+                (plan["code"], signal_ms),
+            ).fetchall()]
+            if not bars:
+                continue
+            entry_bar = bars[0]
+            entry_session = str(entry_bar["session_date"])
+            action = str(plan.get("action") or "")
+            market = str(plan.get("market") or "").upper()
+            session_dates = list(dict.fromkeys(str(bar["session_date"]) for bar in bars))
+            if action == "buy" and market == "A":
+                # A股可在信号后立即买入，但当日买入的仓位次日才能卖出。
+                # 因此保留买入日路径，直到下一交易日收盘才完成复盘。
+                target_session = next(
+                    (value for value in session_dates if value > entry_session), ""
+                )
+                if not target_session:
+                    continue
+                active_bars = [
+                    bar for bar in bars
+                    if str(bar["session_date"]) in (entry_session, target_session)
+                ]
+            else:
+                target_session = entry_session
+                active_bars = [
+                    bar for bar in bars if str(bar["session_date"]) == target_session
+                ]
+            if not active_bars or not _minute_session_is_complete(
+                market, target_session, active_bars[-1]["timestamp_ms"], session_dates,
+            ):
+                continue
+
+            entry = float(entry_bar["open"] or 0.0)
+            if entry <= 0:
+                continue
+            stop = float(plan.get("stop_loss") or 0.0)
+            take_profit = float(plan.get("take_profit") or 0.0)
+            exit_price = float(active_bars[-1]["close"] or 0.0)
+            outcome = "session_close"
+            if action == "buy":
+                exit_index = len(active_bars) - 1
+                for index, bar in enumerate(active_bars):
+                    if market == "A" and str(bar["session_date"]) == entry_session:
+                        continue
+                    open_price = float(bar["open"] or 0.0)
+                    low = float(bar["low"] or 0.0)
+                    high = float(bar["high"] or 0.0)
+                    if stop > 0 and (open_price <= stop or low <= stop):
+                        exit_price = open_price if open_price <= stop else stop
+                        outcome = "stop_loss"
+                        exit_index = index
+                        break
+                    if take_profit > entry and high >= take_profit:
+                        exit_price = take_profit
+                        outcome = "take_profit"
+                        exit_index = index
+                        break
+                path = active_bars[:exit_index + 1]
+                evidence_bars = path
+                gross_return = exit_price / entry - 1.0
+                mfe = max(float(bar["high"]) / entry - 1.0 for bar in path)
+                mae = min(float(bar["low"]) / entry - 1.0 for bar in path)
+                opportunity_cost = 0.0
+            elif action == "sell":
+                evidence_bars = active_bars
+                final_return = exit_price / entry - 1.0
+                gross_return = -final_return
+                mfe = max(
+                    entry / float(bar["low"]) - 1.0
+                    for bar in active_bars if float(bar["low"]) > 0
+                )
+                mae = min(
+                    entry / float(bar["high"]) - 1.0
+                    for bar in active_bars if float(bar["high"]) > 0
+                )
+                opportunity_cost = max(final_return, 0.0)
+                outcome = "effective_exit" if final_return < 0 else "premature_exit"
+            else:
+                continue
+
+            from utils.market_rules import estimate_round_trip_cost, get_market_rules
+
+            rules = get_market_rules(market, code=plan["code"])
+            try:
+                snapshot = json.loads(plan.get("account_snapshot_json") or "{}")
+            except (TypeError, ValueError):
+                snapshot = {}
+            if action == "buy":
+                position_value = (
+                    float(snapshot.get("account_equity", 0.0) or 0.0)
+                    * float(plan.get("position_pct", 0.0) or 0.0)
+                )
+                estimated_cost = (
+                    estimate_round_trip_cost(position_value, market) / position_value
+                    if position_value > 0 else float(rules.round_trip_cost_pct)
+                )
+            else:
+                position_value = float(snapshot.get("shares", 0.0) or 0.0) * entry
+                if position_value > 0:
+                    one_side_amount = (
+                        position_value * float(rules.slippage)
+                        + max(
+                            position_value * float(rules.commission),
+                            float(rules.min_commission),
+                        )
+                        + position_value * float(rules.sell_tax)
+                    )
+                    estimated_cost = one_side_amount / position_value
+                else:
+                    estimated_cost = (
+                        float(rules.slippage)
+                        + float(rules.commission)
+                        + float(rules.sell_tax)
+                    )
+            evidence_sources = ",".join(sorted({
+                str(bar.get("source") or "unknown") for bar in evidence_bars
+            }))
+            evidence_qualities = {
+                str(bar.get("quality_status") or "supplemental")
+                for bar in evidence_bars
+            }
+            evidence_quality = (
+                "provider" if evidence_qualities == {"provider"}
+                else "supplemental" if evidence_qualities == {"supplemental"}
+                else "mixed"
+            )
+            self._execute_write(
+                """UPDATE trade_plan_log SET status='evaluated', entry_price=?,
+                   exit_price=?, net_return=?, max_favorable_excursion=?,
+                   max_adverse_excursion=?, opportunity_cost=?, outcome=?,
+                   evidence_sources=?, evidence_quality=?, evidence_bar_count=?,
+                   evaluated_at=? WHERE id=? AND status='pending_intraday'""",
+                (
+                    entry, exit_price, gross_return - estimated_cost, mfe, mae,
+                    opportunity_cost, outcome, evidence_sources, evidence_quality,
+                    len(evidence_bars), datetime.now().isoformat(), plan["id"],
+                ),
+            )
+            updated += 1
+        return updated
+
+    def get_trade_plan_metrics(self, *, market: str = "", code: str = "") -> list[dict]:
+        clauses = ["status='evaluated'"]
+        params: list = []
+        if market:
+            clauses.append("market=?")
+            params.append(market)
+        if code:
+            clauses.append("code=?")
+            params.append(code.upper())
+        rows = self.execute(
+            "SELECT * FROM trade_plan_log WHERE " + " AND ".join(clauses),
+            tuple(params),
+        ).fetchall()
+        grouped: dict[tuple[str, str, str, str], list[dict]] = {}
+        for raw in rows:
+            row = dict(raw)
+            key = (
+                str(row.get("code") or ""), str(row.get("strategy_key") or ""),
+                str(row.get("signal_intent") or ""), str(row.get("action") or ""),
+            )
+            grouped.setdefault(key, []).append(row)
+        result = []
+        for (symbol, strategy, intent, action), samples in grouped.items():
+            by_day: dict[str, list[dict]] = {}
+            for sample in samples:
+                session = str(
+                    sample.get("decision_session_date")
+                    or sample.get("reference_date")
+                    or sample.get("created_at")
+                    or ""
+                )[:10]
+                by_day.setdefault(session, []).append(sample)
+            daily = []
+            for session_samples in by_day.values():
+                weights = [{
+                    "provider": 1.0, "supplemental": 0.60, "mixed": 0.75,
+                }.get(str(item.get("evidence_quality") or ""), 1.0) for item in session_samples]
+                denominator = sum(weights) or 1.0
+                daily_item = {
+                    field: sum(
+                        float(item.get(field) or 0.0) * weight
+                        for item, weight in zip(session_samples, weights)
+                    ) / denominator
+                    for field in (
+                        "net_return", "max_favorable_excursion",
+                        "max_adverse_excursion", "opportunity_cost",
+                    )
+                }
+                daily_item["weight"] = max(weights) if weights else 1.0
+                daily.append(daily_item)
+            count = len(samples)
+            independent_days = len(daily)
+            effective_days = sum(float(item["weight"]) for item in daily)
+            sources = sorted({
+                source.strip()
+                for item in samples
+                for source in str(item.get("evidence_sources") or "").split(",")
+                if source.strip()
+            })
+            result.append({
+                "code": symbol, "strategy_key": strategy,
+                "signal_intent": intent, "action": action,
+                "count": count, "independent_days": independent_days,
+                "effective_days": round(effective_days, 2),
+                "avg_net_return": (
+                    sum(item["net_return"] * item["weight"] for item in daily)
+                    / effective_days if effective_days > 0 else 0.0
+                ),
+                "positive_rate": (
+                    sum(item["weight"] for item in daily if item["net_return"] > 0)
+                    / effective_days if effective_days > 0 else 0.0
+                ),
+                "avg_mfe": (
+                    sum(item["max_favorable_excursion"] * item["weight"] for item in daily)
+                    / effective_days if effective_days > 0 else 0.0
+                ),
+                "avg_mae": (
+                    sum(item["max_adverse_excursion"] * item["weight"] for item in daily)
+                    / effective_days if effective_days > 0 else 0.0
+                ),
+                "avg_opportunity_cost": (
+                    sum(item["opportunity_cost"] * item["weight"] for item in daily)
+                    / effective_days if effective_days > 0 else 0.0
+                ),
+                "intraday_count": sum(str(item.get("mode")) == "intraday" for item in samples),
+                "provider_evidence_count": sum(str(item.get("evidence_quality")) == "provider" for item in samples),
+                "supplemental_evidence_count": sum(
+                    str(item.get("evidence_quality")) in ("supplemental", "mixed")
+                    for item in samples
+                ),
+                "evidence_sources": ",".join(sources),
+            })
+        return sorted(
+            result,
+            key=lambda item: (-int(item["independent_days"]), -float(item["avg_net_return"])),
+        )
+
+    # ═══════════════════════════════════════════════════════════════
     # 预测追踪 (prediction_log) CRUD
     # ═══════════════════════════════════════════════════════════════
 
@@ -1136,6 +2468,8 @@ class Database:
         pred.underlying_return = raw_return
         pred.actual_return = self._directional_return(pred.direction, raw_return)
         pred.validation_price = end_value
+        pred.actual_exit_type = "portfolio_window"
+        pred.actual_exit_date = max(end_dates) if end_dates else ""
         pred.actual_direction = (
             "bullish" if raw_return > 0.01 else "bearish" if raw_return < -0.01 else "neutral"
         )
@@ -1175,6 +2509,9 @@ class Database:
         if direction not in ("bullish", "bearish"):
             pred.actual_return = 0.0
             pred.validation_price = end_close
+            pred.actual_entry_price = reference
+            pred.actual_exit_type = "window_close"
+            pred.actual_exit_date = pred.validation_end_date
             pred.entry_triggered = 1
             pred.validation_status = "verified"
             pred.validation_version = 2
@@ -1207,13 +2544,18 @@ class Database:
                 pred.entry_triggered = 0
                 pred.actual_return = 0.0
                 pred.validation_price = end_close
+                pred.actual_exit_type = "not_triggered"
+                pred.actual_exit_date = pred.validation_end_date
                 pred.validation_status = "not_triggered"
                 pred.validation_version = 2
                 pred.validated = 1
                 return True
 
         pred.entry_triggered = 1
+        pred.actual_entry_price = entry_price
         exit_price = end_close
+        exit_type = "window_close"
+        exit_date = pred.validation_end_date
         stop = float(pred.stop_loss or 0.0)
         take_profit = float(pred.take_profit or 0.0)
         favorable = []
@@ -1227,18 +2569,26 @@ class Database:
                 adverse.append((low - entry_price) / entry_price)
                 if stop > 0 and low <= stop:
                     exit_price = min(stop, bar_open)
+                    exit_type = "stop_loss"
+                    exit_date = str(bar.get("date", ""))[:10]
                     break
                 if take_profit > 0 and high >= take_profit:
                     exit_price = max(take_profit, bar_open)
+                    exit_type = "take_profit"
+                    exit_date = str(bar.get("date", ""))[:10]
                     break
             else:
                 favorable.append((entry_price - low) / entry_price)
                 adverse.append((entry_price - high) / entry_price)
                 if stop > 0 and high >= stop:
                     exit_price = max(stop, bar_open)
+                    exit_type = "stop_loss"
+                    exit_date = str(bar.get("date", ""))[:10]
                     break
                 if take_profit > 0 and low <= take_profit:
                     exit_price = min(take_profit, bar_open)
+                    exit_type = "take_profit"
+                    exit_date = str(bar.get("date", ""))[:10]
                     break
 
         gross_return = (
@@ -1249,6 +2599,8 @@ class Database:
         from utils.market_rules import get_market_rules
         pred.actual_return = gross_return - get_market_rules(pred.market).round_trip_cost_pct
         pred.validation_price = exit_price
+        pred.actual_exit_type = exit_type
+        pred.actual_exit_date = exit_date
         pred.max_favorable_excursion = max(favorable, default=0.0)
         pred.max_adverse_excursion = min(adverse, default=0.0)
         pred.validation_status = "verified"
@@ -1259,12 +2611,15 @@ class Database:
     def _save_prediction_validation(self, pred: PredictionLog):
         self._execute_write(
             """UPDATE prediction_log SET validated=?, reference_date=?, actual_return=?, underlying_return=?,
-               validation_price=?, max_favorable_excursion=?, max_adverse_excursion=?,
+               validation_price=?, actual_entry_price=?, actual_exit_type=?, actual_exit_date=?,
+               max_favorable_excursion=?, max_adverse_excursion=?,
                actual_direction=?, entry_triggered=?, verified_at=?, validation_end_date=?,
                validation_status=?, validation_version=? WHERE id=?""",
             (
                 pred.validated, pred.reference_date, pred.actual_return, pred.underlying_return,
-                pred.validation_price, pred.max_favorable_excursion,
+                pred.validation_price, pred.actual_entry_price,
+                pred.actual_exit_type, pred.actual_exit_date,
+                pred.max_favorable_excursion,
                 pred.max_adverse_excursion, pred.actual_direction,
                 pred.entry_triggered, pred.verified_at, pred.validation_end_date,
                 pred.validation_status, pred.validation_version, pred.id,
@@ -1384,35 +2739,45 @@ class Database:
             """SELECT * FROM prediction_log
                WHERE code = ? AND validated = 1
                  AND validation_version >= 2 AND validation_status = 'verified'
-               ORDER BY predict_time DESC LIMIT ?""",
-            (code, limit),
-        ).fetchall()
-        stats = PredictionStats(code=code, total_predictions=len(rows))
-        if not rows:
-            return stats
-        correct = sum(
-            1 for r in rows
-            if r["direction"] and r["actual_direction"]
-            and r["direction"] == r["actual_direction"]
-        )
-        stats.direction_accuracy_10 = correct / len(rows) if rows else 0.0
-        returns = [float(r["actual_return"] or 0.0) for r in rows]
-        stats.avg_predicted_return = sum(returns) / len(returns) if returns else 0.0
-        all_rows = self.execute(
-            """SELECT * FROM prediction_log WHERE code = ? AND validated = 1
-                 AND validation_version >= 2 AND validation_status = 'verified'""",
+               ORDER BY predict_time DESC""",
             (code,),
         ).fetchall()
-        all_correct = sum(
-            1 for r in all_rows
-            if r["direction"] and r["actual_direction"]
-            and r["direction"] == r["actual_direction"]
-        )
-        stats.total_predictions = len(all_rows)
-        stats.direction_accuracy_all = all_correct / len(all_rows) if all_rows else 0.0
-        if len(rows) >= 10:
-            recent_5 = rows[:5]
-            older_5 = rows[5:10]
+        stats = PredictionStats(code=code, strategy_sample_count=len(rows))
+        if not rows:
+            return stats
+        unique_rows = []
+        seen_events = set()
+        for row in rows:
+            event = (
+                str(row["reference_date"] or row["predict_time"] or "")[:10],
+                str(row["direction"] or ""),
+                str(row["signal_action"] or ""),
+            )
+            if event in seen_events:
+                continue
+            seen_events.add(event)
+            unique_rows.append(row)
+        recent = unique_rows[:max(int(limit), 1)]
+
+        def _accuracy(items) -> float:
+            actionable = [
+                row for row in items
+                if row["direction"] in ("bullish", "bearish") and row["actual_direction"]
+            ]
+            correct = sum(
+                1 for row in actionable
+                if row["direction"] == row["actual_direction"]
+            )
+            return correct / len(actionable) if actionable else 0.0
+
+        stats.total_predictions = len(unique_rows)
+        stats.direction_accuracy_10 = _accuracy(recent)
+        stats.direction_accuracy_all = _accuracy(unique_rows)
+        returns = [float(row["actual_return"] or 0.0) for row in recent]
+        stats.avg_predicted_return = sum(returns) / len(returns) if returns else 0.0
+        if len(recent) >= 10:
+            recent_5 = recent[:5]
+            older_5 = recent[5:10]
             recent_acc = sum(
                 1 for r in recent_5
                 if r["direction"] and r["actual_direction"]
@@ -1466,9 +2831,28 @@ class Database:
                 ORDER BY predict_time DESC""",
             tuple(params),
         ).fetchall()
-        stats.total_predictions = len(rows)
+        stats.strategy_sample_count = len(rows)
         if not rows:
             return stats
+
+        # 组合报告中的“正确率”按独立市场事件计算。同一股票、同一依据日、
+        # 同一方向/动作即使被多个策略确认，也只能算一次机会；策略健康度
+        # 仍在其他查询中保留逐策略样本，不受这里去重影响。
+        unique_rows = []
+        seen_events = set()
+        for row in rows:
+            event = (
+                str(row["code"] or ""),
+                str(row["mode"] or ""),
+                str(row["reference_date"] or row["predict_time"] or "")[:10],
+                str(row["direction"] or ""),
+                str(row["signal_action"] or ""),
+            )
+            if event in seen_events:
+                continue
+            seen_events.add(event)
+            unique_rows.append(row)
+        stats.total_predictions = len(unique_rows)
 
         def _accuracy(items) -> float:
             actionable = [
@@ -1482,9 +2866,9 @@ class Database:
             )
             return correct / len(actionable) if actionable else 0.0
 
-        recent = rows[:max(int(limit), 1)]
+        recent = unique_rows[:max(int(limit), 1)]
         stats.direction_accuracy_10 = _accuracy(recent)
-        stats.direction_accuracy_all = _accuracy(rows)
+        stats.direction_accuracy_all = _accuracy(unique_rows)
         returns = [float(row["actual_return"] or 0.0) for row in recent]
         stats.avg_predicted_return = sum(returns) / len(returns) if returns else 0.0
         if len(recent) >= 10:
@@ -1517,12 +2901,23 @@ class Database:
         params: list = [*normalized]
         if mode:
             params.append(mode)
-        row = self.execute(
-            f"""SELECT COUNT(*) AS cnt FROM prediction_log
+        rows = self.execute(
+            f"""SELECT code, mode, reference_date, predict_time, direction, signal_action
+                FROM prediction_log
                 WHERE code IN ({placeholders}) AND validated = 0 {mode_sql}""",
             tuple(params),
-        ).fetchone()
-        return int(row["cnt"] or 0) if row else 0
+        ).fetchall()
+        events = {
+            (
+                str(row["code"] or ""),
+                str(row["mode"] or ""),
+                str(row["reference_date"] or row["predict_time"] or "")[:10],
+                str(row["direction"] or ""),
+                str(row["signal_action"] or ""),
+            )
+            for row in rows
+        }
+        return len(events)
 
     def get_validated_predictions_for_codes(
         self,
@@ -1539,16 +2934,36 @@ class Database:
         params: list = [*normalized]
         if mode:
             params.append(mode)
-        params.append(int(limit))
         rows = self.execute(
             f"""SELECT * FROM prediction_log
                 WHERE code IN ({placeholders}) AND validated = 1
                   AND validation_version >= 2 AND validation_status = 'verified'
                   {mode_sql}
-                ORDER BY predict_time DESC LIMIT ?""",
+                ORDER BY predict_time DESC""",
             tuple(params),
         ).fetchall()
-        return [PredictionLog.from_dict(dict(row)) for row in rows]
+        return self._dedupe_prediction_events(rows, limit)
+
+    @staticmethod
+    def _dedupe_prediction_events(rows, limit: int) -> list[PredictionLog]:
+        """面向用户的预测结果按独立事件展示，不重复罗列策略样本。"""
+        result = []
+        seen = set()
+        for row in rows:
+            event = (
+                str(row["code"] or ""),
+                str(row["mode"] or ""),
+                str(row["reference_date"] or row["predict_time"] or "")[:10],
+                str(row["direction"] or ""),
+                str(row["signal_action"] or ""),
+            )
+            if event in seen:
+                continue
+            seen.add(event)
+            result.append(PredictionLog.from_dict(dict(row)))
+            if len(result) >= max(int(limit), 1):
+                break
+        return result
 
     def get_latest_unverified_prediction(self, code: str) -> "PredictionLog | None":
         row = self.execute(
@@ -1595,10 +3010,10 @@ class Database:
             """SELECT * FROM prediction_log
                WHERE code = ? AND validated = 1
                  AND validation_version >= 2 AND validation_status = 'verified'
-               ORDER BY predict_time DESC LIMIT ?""",
-            (code, limit),
+               ORDER BY predict_time DESC""",
+            (code,),
         ).fetchall()
-        return [PredictionLog.from_dict(dict(r)) for r in rows]
+        return self._dedupe_prediction_events(rows, limit)
 
     def get_strategy_prediction_stats(
         self, code: str, strategy_name: str, limit: int = 20
@@ -1754,65 +3169,83 @@ class Database:
         return result
 
     def get_strategy_health_report(self, code: str) -> list[dict]:
-        """持续优化：按策略统计预测准确率，返回健康报告。"""
-        # 防护：旧数据库可能还没有 strategy_name 列
-        cols = {r[1] for r in self.execute("PRAGMA table_info(prediction_log)").fetchall()}
-        if "strategy_name" not in cols:
-            return []
-
+        """按独立交易日和证据质量统计策略健康度。"""
         rows = self.execute(
-            """SELECT strategy_name, signal_action, COUNT(*) as cnt,
-                      SUM(CASE
-                          WHEN signal_action='sell'
-                               AND exit_avoided_loss > exit_opportunity_cost THEN 1
-                          WHEN signal_action!='sell' AND actual_return > 0 THEN 1
-                          ELSE 0 END) as correct_cnt,
-                      AVG(CASE WHEN signal_action='sell'
-                          THEN COALESCE(exit_avoided_loss, 0.0) - COALESCE(exit_opportunity_cost, 0.0)
-                          ELSE COALESCE(actual_return, 0.0) END) as avg_return
-               FROM prediction_log
-               WHERE code = ? AND validated = 1 AND strategy_name != ''
-                 AND validation_version >= 2 AND validation_status = 'verified'
-                 AND direction IN ('bullish', 'bearish')
-                 AND (signal_action!='sell' OR exit_review_status='verified')
-               GROUP BY strategy_name, signal_action
-               HAVING cnt >= 3
-               ORDER BY cnt DESC""",
+            """SELECT strategy_key AS strategy_name, action AS signal_action,
+                      reference_date, decision_session_date, created_at,
+                      evaluated_at, net_return,
+                      evidence_quality
+               FROM trade_plan_log
+               WHERE code = ? AND status='evaluated' AND strategy_key != ''
+               ORDER BY evaluated_at ASC, id ASC""",
             (code,),
         ).fetchall()
 
+        grouped: dict[tuple[str, str], list[dict]] = {}
+        for raw in rows:
+            row = dict(raw)
+            grouped.setdefault(
+                (str(row["strategy_name"]), str(row["signal_action"] or "unknown")), []
+            ).append(row)
+
         result = []
-        for row in rows:
-            sname = row["strategy_name"]
-            signal_action = str(row["signal_action"] or "unknown")
-            total = row["cnt"]
-            correct = row["correct_cnt"] or 0
-            accuracy = correct / total if total > 0 else 0
-            avg_return = float(row["avg_return"] or 0.0)
-            confidence_lower = _wilson_lower_bound(correct, total)
-
-            # 判断趋势：对比最近 5 条 vs 全部
-            recent = self.execute(
-                """SELECT direction, actual_direction,
-                          CASE WHEN signal_action='sell'
-                              THEN COALESCE(exit_avoided_loss, 0.0) - COALESCE(exit_opportunity_cost, 0.0)
-                              ELSE actual_return END AS actual_return
-                   FROM prediction_log
-                   WHERE code=? AND strategy_name=? AND signal_action=? AND validated=1
-                     AND validation_version >= 2 AND validation_status='verified'
-                     AND direction IN ('bullish', 'bearish')
-                     AND (signal_action!='sell' OR exit_review_status='verified')
-                   ORDER BY predict_time DESC LIMIT 5""",
-                (code, sname, signal_action),
-            ).fetchall()
-            recent_correct = sum(
-                1 for r in recent if float(r["actual_return"] or 0.0) > 0
+        for (sname, signal_action), samples in grouped.items():
+            daily: dict[str, list[tuple[float, float, str]]] = {}
+            for sample in samples:
+                session = str(
+                    sample.get("decision_session_date")
+                    or sample.get("reference_date")
+                    or sample.get("created_at")
+                    or ""
+                )[:10]
+                quality = str(sample.get("evidence_quality") or "")
+                quality_weight = {
+                    "provider": 1.0, "supplemental": 0.60, "mixed": 0.75,
+                }.get(quality, 1.0)
+                daily.setdefault(session, []).append((
+                    float(sample.get("net_return") or 0.0), quality_weight,
+                    str(sample.get("evaluated_at") or sample.get("created_at") or ""),
+                ))
+            independent = []
+            for session, values in daily.items():
+                denominator = sum(value[1] for value in values) or 1.0
+                daily_return = sum(value[0] * value[1] for value in values) / denominator
+                independent.append({
+                    "session": session,
+                    "return": daily_return,
+                    "weight": max(value[1] for value in values),
+                    "evaluated_at": max(value[2] for value in values),
+                })
+            independent.sort(key=lambda item: (item["session"], item["evaluated_at"]))
+            total = len(independent)
+            if total < 3:
+                continue
+            effective_samples = sum(float(item["weight"]) for item in independent)
+            weighted_correct = sum(
+                float(item["weight"]) for item in independent if item["return"] > 0
             )
-            recent_acc = recent_correct / len(recent) if recent else 0
-            recent_returns = [float(r["actual_return"] or 0.0) for r in recent]
-            recent_avg_return = sum(recent_returns) / len(recent_returns) if recent_returns else 0.0
+            accuracy = weighted_correct / effective_samples if effective_samples > 0 else 0
+            avg_return = (
+                sum(item["return"] * item["weight"] for item in independent)
+                / effective_samples if effective_samples > 0 else 0.0
+            )
+            confidence_lower = _wilson_lower_bound(weighted_correct, effective_samples)
 
-            sample_status = "insufficient" if total < 5 else ("thin" if total < 8 else "ok")
+            recent = independent[-5:]
+            recent_weight = sum(float(item["weight"]) for item in recent)
+            recent_correct = sum(
+                float(item["weight"]) for item in recent if item["return"] > 0
+            )
+            recent_acc = recent_correct / recent_weight if recent_weight > 0 else 0
+            recent_avg_return = (
+                sum(float(item["return"]) * float(item["weight"]) for item in recent)
+                / recent_weight if recent_weight > 0 else 0.0
+            )
+
+            sample_status = (
+                "insufficient" if effective_samples < 5
+                else "thin" if effective_samples < 8 else "ok"
+            )
             risk_note = ""
 
             # 判定：小样本不允许直接可靠；负收益或置信下界过低会触发降级。
@@ -1829,6 +3262,10 @@ class Database:
                     risk_note = "净盈利率置信下界过低"
                 else:
                     risk_note = "近期正确率明显恶化"
+            elif sample_status == "thin":
+                action = "watch"
+                status = "unstable"
+                risk_note = "有效样本不足8个，不能标记为可靠策略"
             elif accuracy >= 0.60 and recent_acc >= 0.50 and confidence_lower >= 0.35 and avg_return >= 0:
                 action = "keep"
                 status = "reliable"
@@ -1844,6 +3281,8 @@ class Database:
                 "strategy_name": sname,
                 "signal_action": signal_action,
                 "total": total,
+                "raw_total": len(samples),
+                "effective_samples": round(effective_samples, 2),
                 "accuracy": round(accuracy, 3),
                 "recent_accuracy": round(recent_acc, 3),
                 "confidence_lower_95": round(confidence_lower, 3),
@@ -2029,6 +3468,10 @@ class Database:
                 "avg_return_10d": 0.0,
                 "avg_adverse": 0.0,
                 "expectancy": "insufficient",
+                "llm_count": 0,
+                "llm_win_rate_5d": 0.0,
+                "llm_avg_directional_5d": 0.0,
+                "llm_expectancy": "insufficient",
             }
 
         def favorable(r: dict, horizon: str = "return_5d") -> bool:
@@ -2050,6 +3493,24 @@ class Database:
         expectancy = "positive" if total >= 3 and win_rate >= 0.5 and directional_avg > 0 else (
             "negative" if total >= 3 and (win_rate < 0.45 or directional_avg < 0) else "insufficient"
         )
+        llm_items = [item for item in items if int(item.get("llm_proposed") or 0) == 1]
+        llm_count = len(llm_items)
+        llm_wins = sum(1 for item in llm_items if favorable(item))
+        llm_win_rate = llm_wins / llm_count if llm_count else 0.0
+        llm_directional_avg = (
+            sum(
+                -float(item.get("return_5d") or 0)
+                if item.get("expected_direction") == "bearish"
+                else float(item.get("return_5d") or 0)
+                for item in llm_items
+            ) / llm_count if llm_count else 0.0
+        )
+        llm_expectancy = (
+            "positive" if llm_count >= 3 and llm_win_rate >= 0.5 and llm_directional_avg > 0
+            else "negative" if llm_count >= 3 and (
+                llm_win_rate < 0.45 or llm_directional_avg < 0
+            ) else "insufficient"
+        )
         return {
             "count": total,
             "win_rate_5d": round(win_rate, 4),
@@ -2057,6 +3518,10 @@ class Database:
             "avg_return_10d": round(avg_10d, 4),
             "avg_adverse": round(avg_adverse, 4),
             "expectancy": expectancy,
+            "llm_count": llm_count,
+            "llm_win_rate_5d": round(llm_win_rate, 4),
+            "llm_avg_directional_5d": round(llm_directional_avg, 4),
+            "llm_expectancy": llm_expectancy,
         }
 
     def get_research_observation_overview(self, market: str = "", limit: int = 20) -> list[dict]:
@@ -2071,10 +3536,16 @@ class Database:
             params.append(market)
         sql = f"""SELECT code, name, pattern_type, execution_level,
                          COUNT(*) as cnt,
+                         SUM(CASE WHEN llm_proposed=1 THEN 1 ELSE 0 END) as llm_cnt,
                          SUM(CASE
                              WHEN (expected_direction = 'bearish' AND return_5d < 0)
                                   OR (expected_direction != 'bearish' AND return_5d > 0)
                              THEN 1 ELSE 0 END) as wins_5d,
+                         SUM(CASE
+                             WHEN llm_proposed=1 AND (
+                                 (expected_direction = 'bearish' AND return_5d < 0)
+                                 OR (expected_direction != 'bearish' AND return_5d > 0))
+                             THEN 1 ELSE 0 END) as llm_wins_5d,
                          AVG(return_5d) as avg_return_5d,
                          AVG(CASE WHEN expected_direction = 'bearish'
                                   THEN -return_5d ELSE return_5d END) as avg_directional_5d,
@@ -2093,6 +3564,8 @@ class Database:
             wins = int(row["wins_5d"] or 0)
             win_rate = wins / count if count else 0.0
             avg_5d = float(row["avg_return_5d"] or 0.0)
+            llm_count = int(row["llm_cnt"] or 0)
+            llm_win_rate = int(row["llm_wins_5d"] or 0) / llm_count if llm_count else 0.0
             directional_avg = float(row["avg_directional_5d"] or 0.0)
             expectancy = "positive" if count >= 3 and win_rate >= 0.5 and directional_avg > 0 else (
                 "negative" if count >= 3 and (win_rate < 0.45 or directional_avg < 0) else "insufficient"
@@ -2103,6 +3576,8 @@ class Database:
                 "pattern_type": row["pattern_type"] or "",
                 "execution_level": row["execution_level"] or "",
                 "count": count,
+                "llm_count": llm_count,
+                "llm_win_rate_5d": round(llm_win_rate, 4),
                 "win_rate_5d": round(win_rate, 4),
                 "avg_return_5d": round(avg_5d, 4),
                 "avg_return_10d": round(float(row["avg_return_10d"] or 0.0), 4),
@@ -2225,15 +3700,24 @@ class Database:
         positive_excess_windows = int(
             walk_forward.get("positive_excess_windows", 0) or 0
         )
-        required_positive_windows = max(1, (selected_windows + 1) // 2)
+        risk_adjusted_windows = int(
+            walk_forward.get("risk_adjusted_windows", 0) or 0
+        )
+        qualified_windows = int(
+            walk_forward.get(
+                "qualified_windows",
+                max(positive_excess_windows, risk_adjusted_windows),
+            ) or 0
+        )
+        promotion_path = str(walk_forward.get("promotion_path") or "")
+        required_qualified_windows = max(1, (selected_windows + 1) // 2)
         eligible = (
             bool(walk_forward.get("pass_oos"))
             and avg_oos_return > 0
-            and avg_oos_excess_return > 0
             and avg_oos_sharpe >= 0
             and oos_trades >= 3
             and selected_windows >= 1
-            and positive_excess_windows >= required_positive_windows
+            and qualified_windows >= required_qualified_windows
         )
         row = self.execute(
             """SELECT confirmations, last_data_end, status, first_eligible_data_end
@@ -2262,7 +3746,7 @@ class Database:
         paper_complete = paper_days >= max(int(min_paper_days), 0)
         if not eligible:
             status = "rejected"
-            reason = "样本外绝对收益、基准超额收益、夏普或交易数未同时达标"
+            reason = "样本外正收益、超额/风险调整优势、夏普或交易数未同时达标"
         elif confirmations < min_confirmations:
             status = "candidate"
             reason = f"等待不同数据截止日确认（{confirmations}/{min_confirmations}）"
@@ -2271,7 +3755,7 @@ class Database:
             reason = f"影子观察期{paper_days}/{min_paper_days}天，暂不晋升"
         else:
             status = "candidate"
-            reason = "达到超额收益和影子观察晋升门槛"
+            reason = "达到双通道样本外和影子观察晋升门槛"
         created_at = now
         if row:
             old = self.execute(
@@ -2285,13 +3769,15 @@ class Database:
                (stock_code, strategy_key, params_json, test_sharpe,
                 avg_oos_return, avg_oos_excess_return, avg_oos_sharpe,
                 oos_trades, selected_windows, positive_excess_windows,
+                risk_adjusted_windows, qualified_windows, promotion_path,
                 confirmations, first_eligible_data_end, last_data_end,
                 status, reason, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 stock_code, strategy_key, params_json, float(test_sharpe),
                 avg_oos_return, avg_oos_excess_return, avg_oos_sharpe,
                 oos_trades, selected_windows, positive_excess_windows,
+                risk_adjusted_windows, qualified_windows, promotion_path,
                 confirmations, first_eligible_data_end, data_end,
                 status, reason, created_at, now,
             ),
@@ -2328,6 +3814,7 @@ class Database:
             "confirmations": confirmations,
             "paper_days": paper_days,
             "avg_oos_excess_return": avg_oos_excess_return,
+            "promotion_path": promotion_path,
             "eligible": eligible,
             "promoted": status == "champion",
         }

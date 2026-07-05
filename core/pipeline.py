@@ -45,6 +45,7 @@ class AnalysisResult:
     signal_check: list | None = None                        # 各策略信号状态 list[dict]
     data_quality: dict = field(default_factory=dict)         # 数据质量评分与交易闸门
     decision_df: pd.DataFrame | None = None                  # 含实时临时K线的当次决策视图
+    forecasts: list = field(default_factory=list)            # 独立1/3/5交易日概率预测
 
 
 def run_pipeline(
@@ -72,6 +73,8 @@ def run_pipeline(
     realtime_quote_quality: dict | None = None,
     listing_date: str = "",
     requested_history_start: str = "",
+    forecast_targets=None,
+    forecast_configs: dict[int, dict] | None = None,
 ):
     """
     执行完整的量化分析计算管道。
@@ -228,12 +231,14 @@ def run_pipeline(
 
     # ---- ⑤ 行情检测 + 策略过滤 ----
     health_data: list[dict] = []
+    policy_health: dict = {}
     db_instance = None
     if stock_code:
         try:
             from data.database import Database
             db_instance = Database()
             health_data = db_instance.get_strategy_health_report(stock_code)
+            policy_health = db_instance.get_joint_oof_health(stock_code)
             feedback = db_instance.apply_strategy_health_feedback(stock_code, health_data)
             if feedback.get("demoted"):
                 logger.info(
@@ -362,6 +367,7 @@ def run_pipeline(
     operation_plan = None
     signal_check_results = None
     decision_df = df
+    forecasts = []
     # 选取用于信号检查的策略变体
     check_variants = []
 
@@ -427,6 +433,32 @@ def run_pipeline(
         except Exception as e:
             logger.warning(f"条件/风控覆盖策略加载失败（非致命）: {e}")
 
+    # 独立预测先于交易方案生成。失败时宁可不报预测，也不使用不可靠日期。
+    if run_signals and stock_code:
+        try:
+            from core.forecast_engine import generate_forecasts
+            from core.signal_check import _apply_current_price_snapshot
+
+            decision_df = _apply_current_price_snapshot(
+                df, current_price, market, current_bar
+            )
+            forecasts = generate_forecasts(
+                decision_df,
+                code=stock_code,
+                market=market,
+                mode=validation_mode,
+                market_regime=market_regime,
+                targets=forecast_targets,
+                configs_by_horizon=forecast_configs,
+            )
+            logger.info(
+                "  [独立预测] 生成 %d 个冻结预测: %s",
+                len(forecasts),
+                [item.target_session_date for item in forecasts],
+            )
+        except Exception as e:
+            logger.warning(f"独立预测未生成（非致命）: {e}")
+
     # 运行信号检查（快速和完整模式通用）
     if check_variants:
         try:
@@ -458,6 +490,8 @@ def run_pipeline(
                 current_position=current_position,
                 health_data=health_data,
                 data_quality=data_quality,
+                forecasts=forecasts,
+                policy_health=policy_health,
             )
             signal_check_results = [r.to_dict() for r in ranked]
             if plan:
@@ -494,6 +528,7 @@ def run_pipeline(
         signal_check=signal_check_results,
         data_quality=data_quality,
         decision_df=decision_df,
+        forecasts=forecasts,
     )
 
 

@@ -29,6 +29,15 @@ SYSTEM_PROMPT = """你是一个专业的量化分析师。请基于下面提供�
 - 脱离回测数据自己编造价位（所有价位必须来自系统方案或技术指标数据）
 - 在没有策略信号支持的情况下自己决定买卖时机
 - 创造新的策略规则并在当前报告中使用
+- 自己生成、修改或覆盖未来方向概率。未来 1/3/5 个交易日预测只能引用
+  「独立市场预测（代码生成）」中的目标日期、概率和区间；没有该章节时必须写
+  「本次无正式预测」，不得用买入/卖出动作反推看多/看空。
+
+## 预测与方案顺序
+
+先逐项引用代码生成的独立预测，再解释策略在不同预测情景下的方案。预测是否正确
+看方向准确率、Brier 分数和区间命中；策略是否正确看触发后的净收益、回撤和机会成本，
+两者不得混为一个结论。止损、锁利和再平衡卖出是风险动作，不代表系统预测价格下跌。
 
 ## 如何写操作方案
 
@@ -157,7 +166,7 @@ Prompt 中会包含「## 🎯 系统操作方案（代码生成）」章节，�
       两套方案都要覆盖：入场价位 + 理由、仓位 + 理由、止损价 + 理由、卖出条件 + 理由。不能只给数字不给原因。
 
       所有点位必须基于提供的数据推导，不得凭空编造。
-   8.3) **短期走势预测**：对未来 1-4 周走势做判断，并说明置信度（高/中/低）及依据。**盘口买卖力量对比是短期方向的重要参考**，结合技术面和新闻面综合预判。如果盘口数据显示买盘显著占优且实时报价上涨，短期偏多概率更高。
+   8.3) **独立预测解读**：只解读「独立市场预测（代码生成）」给出的明确目标交易日、上涨/震荡/下跌概率和收益区间，不得自行外推 1-4 周方向或另造置信度。若无正式预测，明确写“本次无正式预测”。
 
 6. **隐式分隔标记**：在第 7 章（策略回测结果）和第 8 章（综合建议与短期预测）之间，必须插入一行 `<!-- SECTION_8_BOUNDARY -->`（独占一行，前后不加其他内容）。这个标记不会在渲染时显示，但能帮助系统后续识别报告结构。
 """
@@ -227,6 +236,7 @@ def build_trust_hard_summary(
     signal_checks: list[dict] | None = None,
     prediction_stats=None,
     evaluation_panel: dict | None = None,
+    forecast_metrics: dict | None = None,
     health_reports: list[dict] | None = None,
     scope: str = "单股",
 ) -> str:
@@ -312,6 +322,7 @@ def build_trust_hard_summary(
 
     health_counts = {"keep": 0, "watch": 0, "demote": 0}
     relevant_health_counts = {"keep": 0, "watch": 0, "demote": 0}
+    relevant_health_entries = []
     for h in health:
         action = str(h.get("action", "") or "")
         if action in health_counts:
@@ -324,11 +335,25 @@ def build_trust_hard_summary(
         )
         if is_relevant and action in relevant_health_counts:
             relevant_health_counts[action] += 1
+            relevant_health_entries.append(h)
 
     expectancy = "样本不足"
     history_count = 0
     avg_return = None
-    if evaluation_panel:
+    if relevant_health_entries:
+        history_count = sum(int(item.get("total", 0) or 0) for item in relevant_health_entries)
+        weighted_return = sum(
+            float(item.get("avg_return", 0.0) or 0.0) * int(item.get("total", 0) or 0)
+            for item in relevant_health_entries
+        )
+        avg_return = weighted_return / history_count if history_count else None
+        if relevant_health_counts["demote"]:
+            expectancy = "负期望"
+        elif relevant_health_counts["keep"]:
+            expectancy = "正期望"
+        else:
+            expectancy = "样本不足"
+    elif evaluation_panel:
         overall = evaluation_panel.get("overall") or {}
         history_count = int(overall.get("count", 0) or 0)
         avg_return = float(overall.get("avg_return", 0.0) or 0.0)
@@ -402,8 +427,112 @@ def build_trust_hard_summary(
         )
         if health_counts["demote"] and not relevant_health_counts["demote"]:
             lines.append("- 背景提示：存在已降级策略，但与当前可执行信号无关，不降低本次执行等级")
+    fm = forecast_metrics or {}
+    forecast_samples = int(fm.get("samples", 0) or 0)
+    if forecast_samples:
+        brier = float(fm.get("brier_score", 0.0) or 0.0)
+        baseline = float(fm.get("baseline_brier", 0.0) or 0.0)
+        forecast_status = "优于历史频率基线" if baseline > 0 and brier < baseline else "尚未优于基线"
+        lines.append(
+            f"- 独立预测：{forecast_samples} 次，方向正确率 "
+            f"{float(fm.get('accuracy', 0.0) or 0.0):.0%}，Brier {brier:.3f} "
+            f"vs 基线 {baseline:.3f}（{forecast_status}）"
+        )
+    else:
+        lines.append("- 独立预测：样本不足；未验证模型只展示概率，不调整执行等级")
     if blockers:
         lines.append(f"- 硬约束提醒：**{'；'.join(blockers)}**")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_forecast_section(forecasts: list, *, title: str = "## 独立市场预测（代码生成）") -> str:
+    """把冻结概率预测展示成用户能快速读懂的天气预报式表格。"""
+    if not forecasts:
+        return (
+            f"{title}\n\n"
+            "> 本次未生成正式预测。常见原因是历史样本不足或可靠交易日历不可用；"
+            "系统不会用买卖信号反推预测。\n"
+        )
+    lines = [title, ""]
+    lines.append(
+        "> 先预测市场，再制定交易方案。预测在生成时已冻结，目标日到期后只补录实际结果。"
+    )
+    lines.append("")
+    codes = {
+        (item.code if hasattr(item, "code") else str(item.get("code", "")))
+        for item in forecasts
+    }
+    show_code = len(codes) > 1
+    if show_code:
+        lines.append("| 股票 | 目标 | 截止信息 | 上涨 | 震荡 | 下跌 | 收益中位数（80%区间） | 模型状态 |")
+        lines.append("|------|------|------|------:|------:|------:|------:|------:|")
+    else:
+        lines.append("| 目标 | 截止信息 | 上涨 | 震荡 | 下跌 | 收益中位数（80%区间） | 模型状态 |")
+        lines.append("|------|------|------:|------:|------:|------:|------:|")
+    for item in forecasts:
+        d = item.to_dict() if hasattr(item, "to_dict") else item
+        model_version = str(d.get("model_version", "") or "")
+        model_status = (
+            "未通过OOF验证，不参与执行分级"
+            if model_version.endswith("_unvalidated")
+            else f"Champion，分离度{float(d.get('confidence', 0) or 0):.1%}"
+        )
+        lines.append(
+            f"| {(str(d.get('code', '')) + ' | ') if show_code else ''}"
+            f"{d.get('target_session_date', '')}（{int(d.get('horizon', 0) or 0)}个交易日） "
+            f"| {d.get('data_cutoff', '')} 收盘，{float(d.get('reference_price', 0) or 0):.2f} "
+            f"| {float(d.get('prob_up', 0) or 0):.1%} "
+            f"| {float(d.get('prob_flat', 0) or 0):.1%} "
+            f"| {float(d.get('prob_down', 0) or 0):.1%} "
+            f"| {float(d.get('expected_return_p50', 0) or 0):+.2%} "
+            f"（{float(d.get('expected_return_p10', 0) or 0):+.2%} ~ "
+            f"{float(d.get('expected_return_p90', 0) or 0):+.2%}） "
+            f"| {model_status} |"
+        )
+    lines.extend([
+        "",
+        "- 上涨/下跌：相对参考价超过 ±1%；其余记为震荡。",
+        "- 预测评价看方向正确率、Brier 概率误差和区间命中率；交易方案盈亏另行评价。",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def build_forecast_tracking_section(
+    forecasts: list,
+    metrics: dict | None = None,
+    *,
+    title: str = "## 独立预测验证",
+) -> str:
+    metrics = metrics or {}
+    lines = [title, ""]
+    if metrics.get("samples", 0):
+        lines.append(
+            f"- 已验证 {metrics['samples']} 次；方向正确率 {metrics.get('accuracy', 0):.1%}；"
+            f"Brier 分数 {metrics.get('brier_score', 0):.3f}"
+            f"（历史频率基线 {metrics.get('baseline_brier', 0):.3f}，越低越好）；"
+            f"80%区间命中率 {metrics.get('interval_coverage', 0):.1%}。"
+        )
+    else:
+        lines.append("- 暂无到期的新版独立预测；运行分析会生成预测，目标交易日收盘入库后自动验证。")
+    verified = [
+        item for item in (forecasts or [])
+        if (getattr(item, "status", "") if hasattr(item, "status") else item.get("status")) == "verified"
+    ]
+    if verified:
+        lines.extend(["", "| 股票 | 何时预测 | 预测哪天 | 预测 | 实际 | 结果 |", "|------|------|------|------|------|:---:|"])
+        mapping = {"bullish": "上涨", "neutral": "震荡", "bearish": "下跌"}
+        for item in verified[:8]:
+            d = item.to_dict() if hasattr(item, "to_dict") else item
+            lines.append(
+                f"| {d.get('code', '')} | {str(d.get('generated_at', ''))[:16].replace('T', ' ')} "
+                f"| {d.get('target_session_date', '')} "
+                f"| {mapping.get(d.get('direction'), d.get('direction', ''))} "
+                f"| {float(d.get('actual_price', 0) or 0):.2f}（{float(d.get('actual_return', 0) or 0):+.2%}，"
+                f"{mapping.get(d.get('actual_direction'), d.get('actual_direction', ''))}） "
+                f"| {'对' if int(d.get('correct', 0) or 0) else '错'} |"
+            )
     lines.append("")
     return "\n".join(lines)
 
@@ -414,7 +543,8 @@ def build_prediction_footer(code: str, prediction_stats,
                             evaluation_panel: dict | None = None,
                             scope_label: str = "") -> str:
     """构建预测追踪报告尾部 Markdown，供 Tab1/Tab3 直接拼接到报告末尾。"""
-    lines = ["\n---\n", "## 📈 系统追踪\n"]
+    lines = ["\n---\n", "## 旧版动作追踪（兼容数据）\n"]
+    lines.append("> 本节是升级前按交易动作生成的兼容记录，不参与新版独立预测评分。\n")
     if scope_label:
         lines.append(f"> 统计范围：{scope_label}\n")
 
@@ -422,85 +552,75 @@ def build_prediction_footer(code: str, prediction_stats,
         ps = prediction_stats.to_dict() if hasattr(prediction_stats, 'to_dict') else (prediction_stats or {})
         total = ps.get('total_predictions', 0)
         if total > 0:
-            lines.append(f"- 累计已验证预测：{total} 次")
-            lines.append(f"- 近 10 次方向正确率：{ps.get('direction_accuracy_10', 0):.0%}")
+            lines.append(f"- 累计已验证独立事件：{total} 次")
+            lines.append(f"- 近 10 个独立事件方向正确率：{ps.get('direction_accuracy_10', 0):.0%}")
             lines.append(f"- 全部历史正确率：{ps.get('direction_accuracy_all', 0):.0%}")
             lines.append(f"- 正确率趋势：{ps.get('accuracy_trend', 'stable')}")
         if unverified_count > 0:
-            lines.append(f"- 待验证预测：{unverified_count} 条（验证窗口未到）")
+            lines.append(f"- 待验证独立事件：{unverified_count} 个（验证窗口未到）")
         if total <= 0 and unverified_count <= 0:
             lines.append("- 暂无历史预测记录（首次分析）")
         lines.append("")
 
     if validated_predictions:
+        lines.append("### 历史方向预测结果（非本次交易建议）\n")
         lines.append(
-            "| 股票 | 策略/动作 | 预测生成时间 | 依据日 | 方向 | "
-            "预测时参考价 | 入场口径 | 是否触发 | 验证日/验证价 | 方向净收益 | 结论 |"
+            "> **系统能力**：预测指定目标交易日的收盘方向，不预测精确目标价。"
+            "目标日收盘价比预测时价格高超过1%记为上涨，低超过1%记为下跌，"
+            "上下1%以内记为震荡。\n"
         )
         lines.append(
-            "|------|------|------|------|------|------:|------|:---:|------|------:|------|"
+            "| 股票 | 何时预测 | 预测内容 | 实际结果 | 对错 |"
+        )
+        lines.append(
+            "|------|------|------|------|:---:|"
         )
         for p in validated_predictions[:5]:
             d = p.to_dict() if hasattr(p, 'to_dict') else p
-            direction_map = {"bullish": "偏多", "bearish": "偏空", "neutral": "中性"}
-            direction_str = direction_map.get(d.get("direction", ""), d.get("direction", ""))
             direction = str(d.get("direction") or "")
             actual_direction = str(d.get("actual_direction") or "")
-            actual_return = float(d.get("actual_return", 0) or 0)
-            if direction not in ("bullish", "bearish"):
-                conclusion = "中性记录，不判对错"
-            elif direction == actual_direction and actual_return > 0:
-                conclusion = "方向正确，净盈利"
-            elif direction == actual_direction:
-                conclusion = "方向正确，但净亏损"
-            elif actual_return > 0:
-                conclusion = "方向偏差，但净盈利"
-            elif actual_direction:
-                conclusion = "方向错误，净亏损"
-            else:
-                conclusion = "尚无实际方向"
-
+            direction_map = {"bullish": "上涨", "bearish": "下跌", "neutral": "震荡/中性"}
             currency = "¥" if d.get("market") == "A" else "$"
-            entry = float(d.get('conservative_entry', 0) or d.get('aggressive_entry', 0) or 0)
-            entry_mode = str(d.get("entry_mode") or "reference")
-            if entry_mode == "next_open":
-                entry_text = "下一交易日开盘"
-                triggered = "是" if d.get("entry_triggered", 0) else "否"
-            elif entry_mode == "signal_price":
-                entry_text = f"盘中信号价 {currency}{entry:.2f}" if entry > 0 else "盘中信号价"
-                triggered = "是" if d.get("entry_triggered", 0) else "否"
-            elif entry_mode == "conditional":
-                entry_text = f"条件价 {currency}{entry:.2f}" if entry > 0 else "条件价缺失"
-                triggered = "是" if d.get("entry_triggered", 0) else "否"
-            else:
-                # 旧版 reference 记录中的非零入场值来自正文正则，不能作为交易事实。
-                entry_text = "仅方向参考，不适用"
-                triggered = "不适用"
-
-            strategy = str(d.get("strategy_name") or "整体判断")
-            action = {"buy": "买入", "sell": "卖出"}.get(
-                str(d.get("signal_action") or ""), "观察"
-            )
             time_str = str(d.get('predict_time') or '')[:16].replace("T", " ")
-            reference_date = str(d.get("reference_date") or "—")[:10]
-            validation_date = str(d.get("validation_end_date") or "—")[:10]
-            validation_price = float(d.get("validation_price", 0) or 0)
-            validation_text = (
-                f"{validation_date} / {currency}{validation_price:.2f}"
-                if validation_price > 0 else validation_date
+            target_date = str(d.get("validation_end_date") or "—")[:10]
+            reference_price = float(d.get("predicted_price", 0) or 0)
+            underlying_return = float(d.get("underlying_return", 0) or 0)
+            actual_price = (
+                reference_price * (1.0 + underlying_return)
+                if reference_price > 0 else 0.0
             )
+            if direction == "bullish":
+                forecast_sentence = (
+                    f"预测{target_date}收盘价将高于{currency}{reference_price:.2f}"
+                )
+            elif direction == "bearish":
+                forecast_sentence = (
+                    f"预测{target_date}收盘价将低于{currency}{reference_price:.2f}"
+                )
+            else:
+                forecast_sentence = (
+                    f"预测{target_date}收盘价与{currency}{reference_price:.2f}"
+                    "相比保持在±1%内"
+                )
+            actual_text = (
+                f"{target_date}实际收盘{currency}{actual_price:.2f}"
+                f"（{underlying_return:+.2%}，"
+                f"{direction_map.get(actual_direction, actual_direction or '未知')}）"
+            )
+            if direction not in ("bullish", "bearish"):
+                verdict = "不判定"
+            elif actual_direction and direction == actual_direction:
+                verdict = "对"
+            elif actual_direction:
+                verdict = "错"
+            else:
+                verdict = "待确认"
             lines.append(
                 f"| {d.get('code', '')} "
-                f"| {strategy} / {action} "
                 f"| {time_str} "
-                f"| {reference_date} "
-                f"| {direction_str} "
-                f"| {currency}{float(d.get('predicted_price', 0) or 0):.2f} "
-                f"| {entry_text} "
-                f"| {triggered} "
-                f"| {validation_text} "
-                f"| {actual_return:+.2%} "
-                f"| {conclusion} |"
+                f"| {forecast_sentence} "
+                f"| {actual_text} "
+                f"| {verdict} |"
             )
         lines.append("")
 
@@ -684,9 +804,9 @@ def build_strategy_health_section(
 
     lines = ["\n---\n", "## 🩺 策略健康度追踪（持续优化闭环）\n"]
     if health_report:
-        lines.append("> 基于新版历史预测验证数据，按策略统计净盈利率、95%置信下界和扣除估算成本后的方向净收益。\n")
+        lines.append("> 基于新版交易方案复盘数据，先按独立交易日去重，再按分钟证据质量折算有效样本；统计扣成本正收益率、95%置信下界和平均净表现。\n")
 
-        lines.append("| 策略 | 信号 | 预测次数 | 净盈利率 | 95%下界 | 近期净盈利率 | 方向净收益 | 趋势 | 状态 | 建议 |")
+        lines.append("| 策略 | 信号 | 独立日/有效样本 | 正收益率 | 95%下界 | 近期正收益率 | 平均净表现 | 趋势 | 状态 | 建议 |")
         lines.append("|------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|------|------|")
 
     action_labels = {"keep": "✅ 保留", "watch": "⚠️ 观察", "demote": "🔻 降级"}
@@ -701,7 +821,7 @@ def build_strategy_health_section(
         lines.append(
             f"| {h['strategy_name'][:20]} "
             f"| {'买入' if h.get('signal_action') == 'buy' else '卖出' if h.get('signal_action') == 'sell' else '未知'} "
-            f"| {h['total']} "
+            f"| {h['total']}/{float(h.get('effective_samples', h['total'])):.1f} "
             f"| {h['accuracy']:.0%} "
             f"| {float(h.get('confidence_lower_95', 0) or 0):.0%} "
             f"| {h['recent_accuracy']:.0%} "
@@ -744,8 +864,8 @@ def build_strategy_health_section(
         lines.extend([
             "### 参数候选生命周期\n",
             "> 参数必须在不同数据截止日重复通过 walk-forward，才会替换正式参数。\n",
-            "| 股票 | 策略 | 参数 | 确认 | OOS收益 | 超额收益 | 正超额窗口 | OOS夏普 | 交易数 | 状态 |",
-            "|------|------|------|:---:|------:|------:|:---:|------:|------:|------|",
+            "| 股票 | 策略 | 参数 | 确认 | OOS收益 | 超额收益 | 合格窗口 | 晋升通道 | OOS夏普 | 交易数 | 状态 |",
+            "|------|------|------|:---:|------:|------:|:---:|------|------:|------:|------|",
         ])
         for row in param_candidates[:20]:
             try:
@@ -758,8 +878,9 @@ def build_strategy_health_section(
                 f"{params_text[:32]} | {int(row.get('confirmations', 0) or 0)} | "
                 f"{float(row.get('avg_oos_return', 0) or 0):+.2%} | "
                 f"{float(row.get('avg_oos_excess_return', 0) or 0):+.2%} | "
-                f"{int(row.get('positive_excess_windows', 0) or 0)}/"
+                f"{int(row.get('qualified_windows', 0) or 0)}/"
                 f"{int(row.get('selected_windows', 0) or 0)} | "
+                f"{ {'excess': '超额', 'risk_adjusted': '风险调整', 'mixed': '混合'}.get(str(row.get('promotion_path') or ''), '—') } | "
                 f"{float(row.get('avg_oos_sharpe', 0) or 0):.2f} | "
                 f"{int(row.get('oos_trades', 0) or 0)} | "
                 f"{status_labels.get(row.get('status'), row.get('status', '—'))} |"
@@ -959,6 +1080,7 @@ INTRADAY_SYSTEM_PROMPT = """你是一个专业的量化分析师，正在为一�
 8. **盘中数据时效声明** — 所有点位基于快照时刻的实时价格计算，会随行情变化。
 9. **翻译系统操作方案** — prompt 中会包含「## 🎯 系统操作方案（代码生成）」章节（量化模型原始判断）。你的 8.2 节改为输出保守和激进两套方案，把量化条件翻译成交易员能看懂的 K 线图语言：看什么信号、什么价位、概率多大；有信号时选最稳/最优策略，无信号时指出最接近触发的策略和轻仓试探的可能。所有价位必须来自系统方案或技术指标，不得自编。
 10. **严格区分止盈类型** — 固定止盈可展示目标价和传统风险收益比；动态/条件止盈只解释系统给出的公式或退出条件，并注明固定风险收益比不可量化。不得自行补造止盈价或评价风险收益比优秀。
+11. **预测边界** — 只能引用「独立市场预测（代码生成）」的目标日期、概率和区间；不得用买卖动作反推方向，不得修改概率。风险退出、锁利和再平衡卖出不等于看空预测。
 
 ## 第八章结构要求
 
@@ -1164,6 +1286,7 @@ PREMARKET_SYSTEM_PROMPT = """你是一个专业的量化分析师，正在为一
 8. **盘前数据时效声明** — 所有分析基于盘前数据，开盘后可能因流动性变化而改变。
 9. **翻译系统操作方案** — prompt 中会包含「## 🎯 系统操作方案（代码生成）」章节（量化模型原始判断）。你的操作建议部分应输出保守和激进两套方案，把量化条件翻译成交易员能看懂的 K 线图语言。所有价位必须来自系统方案或技术指标，不得自编。
 10. **严格区分止盈类型** — 固定止盈可展示目标价和传统风险收益比；动态/条件止盈只解释系统给出的公式或退出条件，并注明固定风险收益比不可量化。不得自行补造止盈价或评价风险收益比优秀。
+11. **预测边界** — 只能引用「独立市场预测（代码生成）」的目标日期、概率和区间；不得自行外推或修改概率。风险退出、锁利和再平衡卖出不等于看空预测。
 
 ## 第八章结构要求
 
@@ -1361,6 +1484,7 @@ PORTFOLIO_SYSTEM_PROMPT = """你是一个专业的全持仓分析师和资产配
 10. **研究员观察候选** — 你可以在报告末尾提出“观察候选”，但这些不是交易指令。必须使用固定标题 `### 研究员观察候选`，并输出 Markdown 表格，表头必须是：`| 股票 | LLM观察 | 依据 |`。每条观察只描述值得系统复核的事实或机会，不写买入股数/卖出股数/调仓比例。
 11. **历史回测不是资产质量排名** — 横向表只表示某策略在该股票历史区间的拟合表现。严禁仅因最高历史收益/夏普就称某股票为“最优质资产”或推导当前持有结论；当前操作必须服从数据质量、持仓风控和当前信号共识。如二者冲突，必须明确写成“历史策略适配较好，但当前条件转弱/存在分歧”。
 12. **风险收益比必须可计算** — 只有系统同时提供有效入场价、止损价和固定止盈价时，才能评价传统风险收益比。若系统采用动态止盈或条件退出，必须解释真实规则并注明“固定风险收益比不可量化”；若没有主动止盈，则明确说明仅有止损/时间退出。严禁使用“风险收益比/风险回报比极佳、优秀、有吸引力”等无数据判断。止损距离较近不等于风险收益比优秀。
+13. **预测边界** — 组合中的未来判断只能逐股引用「组合独立市场预测（代码生成）」的目标日期、概率和区间。不得把买入、止损、锁利、减仓或调仓动作反推成市场预测，也不得自行修改概率。
 
 ## 报告结构
 1. **账户概览** — 账户总资产（现金 + 持仓市值）、各市场持仓结构、行业分布、现金比例、集中度风险

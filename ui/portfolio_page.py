@@ -270,6 +270,10 @@ class PortfolioPage(ft.Container):
             selectable=True,
             extension_set=ft.MarkdownExtensionSet.GITHUB_WEB,
         )
+        self._evaluation_chart = ft.Image(
+            src="", visible=False, fit="contain",
+            height=320,
+        )
         self._evaluation_refresh_btn = ft.ElevatedButton(
             content=ft.Row(spacing=6, controls=[
                 ft.Icon(ft.Icons.REFRESH, size=16),
@@ -311,6 +315,7 @@ class PortfolioPage(ft.Container):
                     ],
                 ),
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
+                self._evaluation_chart,
                 self._evaluation_view,
             ]),
         )
@@ -591,7 +596,13 @@ class PortfolioPage(ft.Container):
     def _load_evaluation_panel(self):
         try:
             self._evaluation_view.value = self._service.build_historical_evaluation_panel(self._evaluation_market)
+            chart_path = self._service.generate_forecast_calibration_chart(
+                self._evaluation_market
+            )
+            self._evaluation_chart.src = chart_path
+            self._evaluation_chart.visible = bool(chart_path)
             self._evaluation_view.update()
+            self._evaluation_chart.update()
         except Exception as ex:
             logger.warning(f"历史预测评估面板加载失败: {ex}")
             self._evaluation_view.value = f"### 历史预测评估面板\n\n- 加载失败：{ex}"
