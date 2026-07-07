@@ -28,6 +28,7 @@ import math
 import threading
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from data.models import (
     StockInfo, PriceData, IntradayBar, AnalysisReport, NewsItem,
@@ -38,6 +39,25 @@ from data.models import (
 from config.settings import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _generated_market_datetime(generated_at: str, market: str) -> datetime | None:
+    """Interpret legacy naive timestamps in the computer's local timezone."""
+    try:
+        value = datetime.fromisoformat(str(generated_at or ""))
+        if value.tzinfo is None:
+            value = value.astimezone()
+        timezone = ZoneInfo(
+            "Asia/Shanghai" if str(market).upper() == "A" else "America/New_York"
+        )
+        return value.astimezone(timezone)
+    except (TypeError, ValueError):
+        return None
+
+
+def _generated_market_date(generated_at: str, market: str) -> str:
+    value = _generated_market_datetime(generated_at, market)
+    return value.date().isoformat() if value else ""
 
 
 def _ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: str, default: str = "''"):
@@ -1625,6 +1645,46 @@ class Database:
         if code:
             code_filter = " AND code=?"
             params.append(code.upper())
+        impossible = self.execute(
+            "SELECT id, market, generated_at, data_cutoff, target_session_date "
+            "FROM forecast_log "
+            "WHERE status IN ('pending', 'verified')",
+        ).fetchall()
+        quarantined = 0
+        for item in impossible:
+            generated_date = _generated_market_date(
+                item["generated_at"], item["market"],
+            )
+            target_date = str(item["target_session_date"] or "")
+            stale_origin = False
+            generated_dt = _generated_market_datetime(
+                item["generated_at"], item["market"],
+            )
+            data_cutoff = str(item["data_cutoff"] or "")
+            if generated_dt and data_cutoff:
+                try:
+                    from utils.trading_calendar import latest_completed_session
+                    stale_origin = data_cutoff < latest_completed_session(
+                        item["market"], as_of=generated_dt,
+                    )
+                except Exception:
+                    stale_origin = False
+            if (
+                (generated_date and target_date and target_date < generated_date)
+                or stale_origin
+            ):
+                self._execute_write(
+                    """UPDATE forecast_log SET status='unsupported', verified_at=?
+                       WHERE id=? AND status IN ('pending', 'verified')""",
+                    (datetime.now().isoformat(), item["id"]),
+                )
+                quarantined += 1
+        if quarantined:
+            logger.warning(
+                "已隔离 %d 条目标日期倒置或数据截止日过期的预测记录，不参与评估",
+                quarantined,
+            )
+
         rows = self.execute(
             "SELECT * FROM forecast_log WHERE status='pending' "
             "AND target_session_date<=?" + code_filter + " ORDER BY target_session_date, id",

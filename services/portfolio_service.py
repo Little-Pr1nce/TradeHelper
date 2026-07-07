@@ -36,7 +36,12 @@ from services.news_service import (
     news_items_to_df,
 )
 from utils.dates import get_backtest_dates
-from utils.market import detect_market, search_us_stock_online, search_a_stock
+from utils.market import (
+    detect_market,
+    search_a_stock,
+    search_a_stock_fallback,
+    search_us_stock_online,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -646,7 +651,8 @@ def _build_conditional_trigger_plan(
         return ""
     lines = [
         f"### 📌 {_mode_trigger_label(mode)}\n",
-        "| 股票 | 类型 | 当前价 | 保守方案 | 激进方案 | 买入/加仓触发 | 卖出/减仓触发 | 失效条件 |",
+        "> **先看当前动作，再看未来条件**：持仓行若已提示减仓，后面的买入条件表示“减仓后何时允许重新加回”，不是同时买入。\n",
+        "| 股票 | 类型 | 当前价 | 当前保守方案 | 当前激进方案 | 未来买入/重新加回条件 | 当前卖出/减仓条件 | 失效条件 |",
         "|------|------|------:|------|------|------|------|------|",
     ]
     for item in all_data:
@@ -663,7 +669,10 @@ def _build_conditional_trigger_plan(
             f"{row['buy_trigger']} | {row['sell_trigger']} | {row['invalidation']} |"
         )
     lines.append("")
-    lines.append("> 这张表是代码生成的条件触发计划：盘中报告用于当日盯盘执行；盘前/盘后报告用于下一交易日盘中确认执行。\n")
+    lines.append(
+        "> 盘中报告用于当日盯盘；盘前/盘后用于下一交易日确认。"
+        "“重新站上均线且 Final_Score 转正”代表风险解除后重新评估，不是到价自动下单。\n"
+    )
     return "\n".join(lines)
 
 
@@ -747,27 +756,75 @@ def _build_historical_evaluation_markdown(
     lines = [
         f"### {market_label}历史预测评估面板：预测与策略分账\n",
         "> 预测准不准与方案赚不赚钱分开统计；样本不足时不能作为可执行依据。\n",
+        "#### 三步阅读法\n",
+        "1. **先看样本**：少于10次只算积累，10～29次只作初步观察，至少30次才开始比较模型。",
+        "2. **再看预测**：Brier、Log Loss、ECE越低越好，80%区间命中应在样本充分后接近80%。",
+        "3. **最后看交易**：联合OOF超额收益为正、回撤可控，才说明完整建议链有价值。\n",
     ]
+
+    total_verified = sum(int(row.get("verified", 0) or 0) for row in forecast_rows)
+    total_pending = sum(int(row.get("pending", 0) or 0) for row in forecast_rows)
+    total_unsupported = sum(int(row.get("unsupported", 0) or 0) for row in forecast_rows)
+    lines.extend([
+        "#### 当前预测样本状态\n",
+        "| 有效已验证 | 等待目标日 | 已隔离无效记录 | 当前能否评价模型 |",
+        "|------:|------:|------:|------|",
+        f"| {total_verified} | {total_pending} | {total_unsupported} | "
+        f"{'可以初步评价' if total_verified >= 10 else '不能，继续积累'} |",
+        "",
+    ])
 
     lines.append("#### 新版独立概率预测\n")
     if forecast_rows:
-        lines.extend([
-            "| 标的 | 周期 | 已验证 | 待验证 | 方向正确率 | Brier | Log Loss | ECE | 80%区间命中 |",
-            "|------|------:|------:|------:|------:|------:|------:|------:|------:|",
-        ])
-        for row in forecast_rows:
-            verified = int(row["verified"])
-            accuracy = f"{row['accuracy']:.0%}" if verified else "—"
-            brier = f"{row['brier_score']:.3f}" if verified else "—"
-            log_loss = f"{row['log_loss']:.3f}" if verified else "—"
-            ece = f"{row['ece']:.1%}" if verified else "—"
-            coverage = f"{row['interval_coverage']:.0%}" if verified else "—"
-            lines.append(
-                f"| {row['label']} | {row['horizon']}日 "
-                f"| {row['verified']} | {row['pending']} "
-                f"| {accuracy} | {brier} | {log_loss} | {ece} | {coverage} |"
-            )
-        lines.append("\n> Brier、Log Loss 和 ECE 都是越低越好；没有已验证样本时显示“—”，不把 0 当成完美预测。\n")
+        if total_verified <= 0:
+            grouped: dict[str, dict[int, dict]] = {}
+            for row in forecast_rows:
+                grouped.setdefault(str(row["label"]), {})[int(row["horizon"])] = row
+
+            def _compact_status(item: dict | None) -> str:
+                if not item:
+                    return "—"
+                parts = []
+                pending = int(item.get("pending", 0) or 0)
+                unsupported = int(item.get("unsupported", 0) or 0)
+                if pending:
+                    parts.append(f"待验证{pending}")
+                if unsupported:
+                    parts.append(f"已隔离{unsupported}")
+                return " / ".join(parts) or "—"
+
+            lines.extend([
+                "> 当前没有有效到期样本，先用紧凑表展示各周期进度；指标表会在首批预测到期后自动展开。\n",
+                "| 标的 | 1日状态 | 3日状态 | 5日状态 |",
+                "|------|------|------|------|",
+            ])
+            for label, horizons in grouped.items():
+                lines.append(
+                    f"| {label} | {_compact_status(horizons.get(1))} "
+                    f"| {_compact_status(horizons.get(3))} "
+                    f"| {_compact_status(horizons.get(5))} |"
+                )
+        else:
+            lines.extend([
+                "| 标的 | 周期 | 已验证 | 待验证 | 已隔离 | 方向正确率 | Brier | Log Loss | ECE | 80%区间命中 |",
+                "|------|------:|------:|------:|------:|------:|------:|------:|------:|------:|",
+            ])
+            for row in forecast_rows:
+                verified = int(row["verified"])
+                accuracy = f"{row['accuracy']:.0%}" if verified else "—"
+                brier = f"{row['brier_score']:.3f}" if verified else "—"
+                log_loss = f"{row['log_loss']:.3f}" if verified else "—"
+                ece = f"{row['ece']:.1%}" if verified else "—"
+                coverage = f"{row['interval_coverage']:.0%}" if verified else "—"
+                lines.append(
+                    f"| {row['label']} | {row['horizon']}日 "
+                    f"| {row['verified']} | {row['pending']} | {row.get('unsupported', 0)} "
+                    f"| {accuracy} | {brier} | {log_loss} | {ece} | {coverage} |"
+                )
+        lines.append(
+            "\n> **用途**：判断预测模块本身准不准。Brier看整体概率误差；Log Loss重罚高置信度错误；"
+            "ECE看模型说的把握与实际命中是否一致；没有已验证样本时显示“—”。\n"
+        )
     else:
         lines.append("- 暂无新版独立预测。生成报告后会产生明确目标交易日的预测并自动验证。\n")
 
@@ -776,6 +833,8 @@ def _build_historical_evaluation_markdown(
     if calibration:
         lines.extend([
             "#### 预测校准曲线（置信度分箱）\n",
+            "> **校准图怎么读**：横轴是模型声称的平均把握，纵轴是实际正确率；"
+            "灰色对角线是理想状态，蓝线越贴近它越可信；n是该点样本数。\n",
             "| 预测置信度区间 | 样本 | 平均置信度 | 实际命中率 | 校准偏差 |",
             "|------|------:|------:|------:|------:|",
         ])
@@ -788,6 +847,16 @@ def _build_historical_evaluation_markdown(
                 f"| {float(item.get('gap', 0)):.1%} |"
             )
         lines.append("")
+        lines.append(
+            "> **怎么看**：先看每档样本，再比较“平均置信度”和“实际命中率”；"
+            "两者越接近，校准偏差越小。\n"
+        )
+    else:
+        lines.extend([
+            "#### 预测校准曲线（置信度分箱）\n",
+            "- 暂无有效已验证预测：校准图保留灰色理想线，但暂不绘制蓝色实际曲线和分箱表。"
+            "待1/3/5日目标交易日到期并取得正式收盘价后自动出现。\n",
+        ])
 
     regime_metrics = summary.get("regime_metrics") or {}
     if regime_metrics:
@@ -810,8 +879,16 @@ def _build_historical_evaluation_markdown(
                 f"| {float(item.get('ece', 0)):.1%} |"
             )
         lines.append("")
+        lines.append(
+            "> **用途**：找出模型适合趋势市还是震荡市。必须先看各状态样本数，再比较正确率和误差。\n"
+        )
+    else:
+        lines.extend([
+            "#### 不同市场状态下的预测表现\n",
+            "- 暂无有效已验证预测，暂时无法判断模型在趋势、震荡或高波动市场中的表现。\n",
+        ])
 
-    lines.append("#### 最终联合策略OOF：预测 + 策略 + 风控官\n")
+    lines.append("#### 最终建议链样本外回放（联合OOF）：预测 + 策略 + 风控官\n")
     if joint_rows:
         lines.extend([
             "| 标的 | 测试区间 | 决策点 | 交易 | 扣成本收益 | 基准收益 | 超额收益 | 夏普 | 最大回撤 | 漂移 | 结论 |",
@@ -841,7 +918,8 @@ def _build_historical_evaluation_markdown(
             )
         lines.append(
             "\n> 该表只使用每个测试折之前的数据选择预测参数和策略；"
-            "它评价的是最终建议链，而不是单个策略的全样本回测。\n"
+            "它评价的是最终建议链，而不是单个策略的全样本回测。"
+            "优先看交易数、超额收益和最大回撤；交易少于3笔只能判为样本不足。\n"
         )
         drift_rows = [
             row for row in joint_rows
@@ -867,11 +945,12 @@ def _build_historical_evaluation_markdown(
                 )
         if horizon_lines:
             lines.extend([
-                "#### 联合OOF内的分周期预测质量\n",
+                "#### 样本外回放中的1/3/5日预测质量（联合OOF）\n",
                 "| 标的 | 周期 | 样本 | Brier | Log Loss | ECE |",
                 "|------|------:|------:|------:|------:|------:|",
                 *horizon_lines,
                 "",
+                "> **用途**：比较1日、3日、5日哪个预测周期更可靠；只有样本接近时，才比较Brier、Log Loss和ECE。\n",
             ])
         trace_lines = []
         for row in joint_rows[:8]:
@@ -902,11 +981,12 @@ def _build_historical_evaluation_markdown(
                     )
         if trace_lines:
             lines.extend([
-                "#### 联合OOF逐事件审计（最近记录）\n",
+                "#### 样本外逐事件明细（联合OOF最近记录）\n",
                 "| 标的 | 预测发生日 | 目标日 | 当时预测 | 实际结果 | 对错 | 策略决策 | Broker结果 |",
                 "|------|------|------|------|------|------|------|------|",
                 *trace_lines[:40],
                 "",
+                "> **用途**：逐条追责预测、策略、风控和成交。先检查预测发生日早于目标日，再看预测对错和未成交原因。\n",
             ])
     else:
         lines.append("- 暂无联合OOF结果；下一次后台预测优化完成后生成。\n")
@@ -1470,9 +1550,22 @@ class PortfolioService:
         code = code.strip().upper()
         market = detect_market(code)
 
+        if market:
+            cached = Database().get_stock(code)
+            if cached and cached.name and cached.name != code:
+                return {"code": code, "name": cached.name, "market": market}
+
         if not market:
             # 尝试模糊搜索
-            results = search_us_stock_online(code) or search_a_stock(code)
+            a_fallback = search_a_stock_fallback(code)
+            if a_fallback:
+                return a_fallback[0]
+            contains_chinese = any("\u4e00" <= char <= "\u9fff" for char in code)
+            results = (
+                search_a_stock(code) or search_us_stock_online(code)
+                if contains_chinese else
+                search_us_stock_online(code) or search_a_stock(code)
+            )
             if results:
                 return PortfolioService._prefer_chinese_name(results[0])
             return None
@@ -1487,6 +1580,9 @@ class PortfolioService:
             if fallback:
                 return fallback[0]
         elif market == "A":
+            fallback = search_a_stock_fallback(code)
+            if fallback:
+                return fallback[0]
             results = search_a_stock(code)
             if results:
                 return results[0]
@@ -1593,6 +1689,7 @@ class PortfolioService:
                 "horizon": horizon,
                 "verified": count,
                 "pending": sum(item.status == "pending" for item in items),
+                "unsupported": sum(item.status == "unsupported" for item in items),
                 "accuracy": float(metrics.get("accuracy", 0.0)),
                 "brier_score": float(metrics.get("brier_score", 0.0)),
                 "log_loss": float(metrics.get("log_loss", 0.0)),
@@ -1661,8 +1758,6 @@ class PortfolioService:
         """Render a reliability diagram for verified forecasts in one market."""
         metrics = self.db.get_forecast_metrics(market=market or "US")
         bins = metrics.get("calibration_bins") or []
-        if not bins:
-            return ""
         try:
             import os
             from config.settings import Settings
@@ -1674,14 +1769,28 @@ class PortfolioService:
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
 
-            x = [float(item["mean_confidence"]) for item in bins]
-            y = [float(item["accuracy"]) for item in bins]
-            counts = [int(item["count"]) for item in bins]
             figure, axis = plt.subplots(figsize=(6.8, 3.6), dpi=140)
             axis.plot([0, 1], [0, 1], linestyle="--", color="#7b8794", label="Ideal")
-            axis.plot(x, y, marker="o", linewidth=2, color="#1976d2", label="Observed")
-            for px, py, count in zip(x, y, counts):
-                axis.annotate(f"n={count}", (px, py), xytext=(5, 5), textcoords="offset points", fontsize=8)
+            if bins:
+                x = [float(item["mean_confidence"]) for item in bins]
+                y = [float(item["accuracy"]) for item in bins]
+                counts = [int(item["count"]) for item in bins]
+                axis.plot(x, y, marker="o", linewidth=2, color="#1976d2", label="Observed")
+                for px, py, count in zip(x, y, counts):
+                    axis.annotate(
+                        f"n={count}", (px, py), xytext=(5, 5),
+                        textcoords="offset points", fontsize=8,
+                    )
+            else:
+                axis.text(
+                    0.5, 0.18,
+                    "No verified samples yet\nObserved curve appears after target dates",
+                    ha="center", va="center", color="#52606d", fontsize=11,
+                    bbox={
+                        "boxstyle": "round,pad=0.6", "facecolor": "#f4f7fa",
+                        "edgecolor": "#c8d2dc",
+                    },
+                )
             axis.set(xlim=(0, 1), ylim=(0, 1), xlabel="Mean predicted confidence", ylabel="Observed accuracy")
             axis.set_title(f"{'US' if market == 'US' else 'A-share'} forecast calibration")
             axis.grid(alpha=0.2)

@@ -295,6 +295,16 @@ def build_trust_hard_summary(
     }
     worst_dq = "unknown"
     avg_score = None
+    all_worst_dq = "unknown"
+    all_avg_score = None
+    if data_quality:
+        all_worst_dq = max(
+            (str(x.get("status", "unknown")) for x in data_quality),
+            key=lambda s: dq_status_rank.get(s, 9),
+        )
+        all_avg_score = sum(
+            float(x.get("score", 0) or 0) for x in data_quality
+        ) / len(data_quality)
     if rated_data_quality:
         worst_dq = max(
             (str(x.get("status", "unknown")) for x in rated_data_quality),
@@ -402,10 +412,20 @@ def build_trust_hard_summary(
     ]
     if avg_score is not None:
         lines.append(
-            f"- 数据质量：平均 **{avg_score:.0f}/100**，最弱闸门：**{dq_label.get(worst_dq, worst_dq)}**"
+            f"- 当前机会数据质量：平均 **{avg_score:.0f}/100**，"
+            f"最弱闸门：**{dq_label.get(worst_dq, worst_dq)}**"
         )
     else:
         lines.append("- 数据质量：暂无评分")
+    if (
+        all_avg_score is not None
+        and (all_worst_dq != worst_dq or abs(all_avg_score - float(avg_score or 0)) >= 0.5)
+    ):
+        lines.append(
+            f"- 全部覆盖标的数据质量：平均 **{all_avg_score:.0f}/100**，"
+            f"最弱闸门：**{dq_label.get(all_worst_dq, all_worst_dq)}**；"
+            "被阻断标的不参与当前机会评级，但仍需单独处理"
+        )
     lines.append(
         "- 当前信号："
         f"A级 {level_counts['A']}、B级 {level_counts['B']}、C级 {level_counts['C']}、D级 {level_counts['D']}；"
@@ -413,8 +433,8 @@ def build_trust_hard_summary(
     )
     lines.append(
         "- 样本外审计："
-        f"PASS {audit_summary['pass']}、COND {audit_summary['conditional']}、"
-        f"FAIL {audit_summary['fail']}、OVERFIT {audit_summary['overfit']}"
+        f"严格通过(PASS) {audit_summary['pass']}、有条件(COND) {audit_summary['conditional']}、"
+        f"淘汰(FAIL) {audit_summary['fail']}、过拟合警示(OVERFIT) {audit_summary['overfit']}"
     )
     history_text = f"- 当前机会关联历史验证：{history_count} 次，结论：**{expectancy}**"
     if avg_return is not None and history_count > 0:
@@ -442,6 +462,12 @@ def build_trust_hard_summary(
         lines.append("- 独立预测：样本不足；未验证模型只展示概率，不调整执行等级")
     if blockers:
         lines.append(f"- 硬约束提醒：**{'；'.join(blockers)}**")
+    lines.extend([
+        "",
+        "> **读法速查**：A=满足执行条件，B=证据不足仅小仓验证，C=只观察，D=数据或事实冲突而驳回。",
+        "> **审计速查**：PASS/COND/FAIL统计的是“股票×策略变体”，不是订单数；"
+        "OVERFIT是可能与前三类重叠的过拟合警示。",
+    ])
     lines.append("")
     return "\n".join(lines)
 
@@ -457,6 +483,10 @@ def build_forecast_section(forecasts: list, *, title: str = "## 独立市场预�
     lines = [title, ""]
     lines.append(
         "> 先预测市场，再制定交易方案。预测在生成时已冻结，目标日到期后只补录实际结果。"
+    )
+    lines.append(
+        "> **阅读顺序**：先看目标日和截止信息，再看模型状态；只有 Champion 才能参与执行分级，"
+        "最后比较三类概率与收益区间宽度。"
     )
     lines.append("")
     codes = {
@@ -474,9 +504,9 @@ def build_forecast_section(forecasts: list, *, title: str = "## 独立市场预�
         d = item.to_dict() if hasattr(item, "to_dict") else item
         model_version = str(d.get("model_version", "") or "")
         model_status = (
-            "未通过OOF验证，不参与执行分级"
+            "观察模型：尚未通过样本外（OOF）验证，不影响操作等级"
             if model_version.endswith("_unvalidated")
-            else f"Champion，分离度{float(d.get('confidence', 0) or 0):.1%}"
+            else f"正式模型（Champion），方向分离度{float(d.get('confidence', 0) or 0):.1%}"
         )
         lines.append(
             f"| {(str(d.get('code', '')) + ' | ') if show_code else ''}"
@@ -493,6 +523,9 @@ def build_forecast_section(forecasts: list, *, title: str = "## 独立市场预�
     lines.extend([
         "",
         "- 上涨/下跌：相对参考价超过 ±1%；其余记为震荡。",
+        "- 收益中位数是预测分布的 P50；括号内是 P10～P90，表示约80%的历史相似结果范围，不是“80%概率赚到中位数”。",
+        "- 未通过 OOF：概率只供观察，不改变 A/B/C/D、仓位或操作；Champion：已通过隔离样本外验证。",
+        "- 分离度=最高方向概率-第二高方向概率，表示方向区分程度，不是正确率或收益率。",
         "- 预测评价看方向正确率、Brier 概率误差和区间命中率；交易方案盈亏另行评价。",
         "",
     ])
@@ -514,6 +547,8 @@ def build_forecast_tracking_section(
             f"（历史频率基线 {metrics.get('baseline_brier', 0):.3f}，越低越好）；"
             f"80%区间命中率 {metrics.get('interval_coverage', 0):.1%}。"
         )
+        if int(metrics.get("samples", 0) or 0) < 10:
+            lines.append("- 样本少于10次：当前指标只用于积累，不据此判断模型优劣或调整仓位。")
     else:
         lines.append("- 暂无到期的新版独立预测；运行分析会生成预测，目标交易日收盘入库后自动验证。")
     verified = [

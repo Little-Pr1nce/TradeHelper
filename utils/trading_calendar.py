@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 
 class TradingCalendarUnavailable(RuntimeError):
@@ -15,6 +16,38 @@ class TradingTargets:
     dates: dict[int, str]
     source: str
     reliable: bool
+
+
+def latest_completed_session(
+    market: str,
+    *,
+    as_of: datetime | None = None,
+) -> str:
+    """Return the latest exchange session whose official close has passed."""
+    timezone = ZoneInfo(
+        "Asia/Shanghai" if str(market).upper() == "A" else "America/New_York"
+    )
+    current = as_of or datetime.now(timezone)
+    if current.tzinfo is None:
+        current = current.astimezone()
+    current_utc = current.astimezone(ZoneInfo("UTC"))
+    try:
+        import exchange_calendars as xcals
+
+        calendar_name = "XSHG" if str(market).upper() == "A" else "XNYS"
+        calendar = xcals.get_calendar(calendar_name)
+        end = current.astimezone(timezone).date()
+        start = end - timedelta(days=14)
+        sessions = calendar.sessions_in_range(start.isoformat(), end.isoformat())
+        for session in reversed(sessions):
+            close = calendar.session_close(session).to_pydatetime()
+            if close.tzinfo is None:
+                close = close.replace(tzinfo=ZoneInfo("UTC"))
+            if close.astimezone(ZoneInfo("UTC")) <= current_utc:
+                return session.date().isoformat()
+    except Exception as exc:
+        raise TradingCalendarUnavailable("无法确认最近已完成交易日") from exc
+    raise TradingCalendarUnavailable("最近窗口内没有已完成交易日")
 
 
 def forecast_target_dates(

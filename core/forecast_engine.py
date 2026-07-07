@@ -8,19 +8,27 @@ Champion 使用历史相似状态的经验分布，透明、可复现，并会�
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
 
 from data.models import ForecastResult
-from utils.trading_calendar import TradingTargets, forecast_target_dates
+from utils.trading_calendar import (
+    TradingCalendarUnavailable,
+    TradingTargets,
+    forecast_target_dates,
+    latest_completed_session,
+)
 
 
 FORECAST_MODEL_FAMILY = "forecast_v4"
 MODEL_VERSION = f"{FORECAST_MODEL_FAMILY}_analog"
+LOGISTIC_SOLVER_VERSION = "adaptive_gd_v2"
 FEATURE_NAMES = ("momentum_5", "momentum_20", "trend_20", "volatility_20")
 PROBABILITY_EPSILON = 1e-12
+logger = logging.getLogger(__name__)
 
 
 def forecast_candidate_configs() -> list[dict]:
@@ -29,7 +37,10 @@ def forecast_candidate_configs() -> list[dict]:
         {"model_type": "analog", "neighbor_count": neighbors, "flat_threshold": 0.01}
         for neighbors in (40, 80, 120)
     ] + [
-        {"model_type": "logistic", "regularization": value, "flat_threshold": 0.01}
+        {
+            "model_type": "logistic", "regularization": value,
+            "solver_version": LOGISTIC_SOLVER_VERSION, "flat_threshold": 0.01,
+        }
         for value in (0.05, 0.20)
     ] + [
         {"model_type": "tree", "max_depth": 2, "min_leaf": value, "flat_threshold": 0.01}
@@ -37,6 +48,7 @@ def forecast_candidate_configs() -> list[dict]:
     ] + [{
         "model_type": "ensemble", "neighbor_count": 80,
         "regularization": 0.20, "blend_weight": 0.50,
+        "solver_version": LOGISTIC_SOLVER_VERSION,
         "flat_threshold": 0.01,
     }]
 
@@ -70,8 +82,23 @@ def generate_forecasts(
     data_cutoff = str(work["date"].iloc[-1])[:10] if "date" in work.columns else ""
     if not data_cutoff:
         return []
-    targets = targets or forecast_target_dates(data_cutoff, market, horizons)
     now = generated_at or datetime.now().isoformat()
+    supplied_targets = targets is not None
+    if not supplied_targets:
+        try:
+            generated_dt = datetime.fromisoformat(now)
+            completed_session = latest_completed_session(
+                market, as_of=generated_dt,
+            )
+        except (TradingCalendarUnavailable, ValueError):
+            return []
+        if data_cutoff < completed_session:
+            logger.warning(
+                "独立预测被数据新鲜度闸门阻断: %s 日K截止=%s，最近已完成交易日=%s",
+                code, data_cutoff, completed_session,
+            )
+            return []
+    targets = targets or forecast_target_dates(data_cutoff, market, horizons)
     reference_price = float(close.iloc[-1])
     feature_hash = _feature_hash(current, data_cutoff)
     results = []
@@ -389,6 +416,9 @@ def _normalize_candidate_config(candidate: dict | None) -> dict:
         result["regularization"] = float(np.clip(
             float(source.get("regularization", 0.20)), 0.001, 10.0,
         ))
+        result["solver_version"] = str(
+            source.get("solver_version") or LOGISTIC_SOLVER_VERSION
+        )
     if model_type == "ensemble":
         result["blend_weight"] = float(np.clip(
             float(source.get("blend_weight", 0.50)), 0.20, 0.80,
@@ -514,9 +544,9 @@ def _regularized_logistic_probabilities(
     current: np.ndarray,
     *,
     regularization: float,
-    iterations: int = 80,
+    iterations: int = 240,
 ) -> np.ndarray:
-    """Small deterministic multinomial logistic model without external ML state."""
+    """Small deterministic multinomial logistic model with adaptive convergence."""
     if len(features) == 0:
         return np.full(3, 1.0 / 3.0)
     mean = np.nanmean(features, axis=0)
@@ -530,14 +560,29 @@ def _regularized_logistic_probabilities(
     weights = np.zeros((design.shape[1], 3), dtype=float)
     learning_rate = 0.18
     penalty = max(float(regularization), 0.001)
+    loss, gradient = _logistic_loss_gradient(design, outcome, weights, penalty)
     for _ in range(max(int(iterations), 1)):
-        logits = np.clip(design @ weights, -30.0, 30.0)
-        logits -= logits.max(axis=1, keepdims=True)
-        probabilities = np.exp(logits)
-        probabilities /= probabilities.sum(axis=1, keepdims=True)
-        gradient = design.T @ (probabilities - outcome) / len(design)
-        gradient[1:] += penalty * weights[1:]
-        weights -= learning_rate * gradient
+        if float(np.linalg.norm(gradient)) <= 1e-6:
+            break
+        step = learning_rate
+        accepted = False
+        while step >= 1e-6:
+            candidate = weights - step * gradient
+            candidate_loss, candidate_gradient = _logistic_loss_gradient(
+                design, outcome, candidate, penalty,
+            )
+            if np.isfinite(candidate_loss) and candidate_loss <= loss + 1e-12:
+                accepted = True
+                break
+            step *= 0.5
+        if not accepted:
+            break
+        improvement = loss - candidate_loss
+        weights = candidate
+        loss, gradient = candidate_loss, candidate_gradient
+        learning_rate = step
+        if improvement <= 1e-8 * (1.0 + abs(loss)):
+            break
     logits = np.clip(point_design @ weights, -30.0, 30.0)
     logits -= logits.max()
     probabilities = np.exp(logits)
@@ -548,6 +593,36 @@ def _regularized_logistic_probabilities(
     probabilities = 0.90 * probabilities + 0.10 * prior
     probabilities = np.clip(probabilities, PROBABILITY_EPSILON, 1.0)
     return probabilities / probabilities.sum()
+
+
+def _logistic_loss_gradient(
+    design: np.ndarray,
+    outcome: np.ndarray,
+    weights: np.ndarray,
+    penalty: float,
+) -> tuple[float, np.ndarray]:
+    """Return stable penalized cross-entropy and its gradient."""
+    logits = np.clip(design @ weights, -30.0, 30.0)
+    logits -= logits.max(axis=1, keepdims=True)
+    probabilities = np.exp(logits)
+    probabilities /= probabilities.sum(axis=1, keepdims=True)
+    loss = -float(np.mean(np.sum(
+        outcome * np.log(np.clip(probabilities, PROBABILITY_EPSILON, 1.0)),
+        axis=1,
+    )))
+    loss += 0.5 * float(penalty) * float(np.sum(weights[1:] ** 2))
+    gradient = design.T @ (probabilities - outcome) / len(design)
+    gradient[1:] += float(penalty) * weights[1:]
+    return loss, gradient
+
+
+def forecast_model_params_compatible(params: dict | None) -> bool:
+    """Reject only models whose fitted solver semantics have changed."""
+    source = params or {}
+    model_type = str(source.get("model_type") or "analog").lower()
+    if model_type not in {"logistic", "ensemble"}:
+        return True
+    return str(source.get("solver_version") or "") == LOGISTIC_SOLVER_VERSION
 
 
 def _shallow_tree_probabilities(

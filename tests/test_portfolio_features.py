@@ -8,6 +8,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -29,7 +30,7 @@ from data.models import (
 from core.pipeline import AnalysisResult
 from core.data_quality import evaluate_data_quality
 from indicators.technical import calc_all_indicators
-from services.analysis_service import _single_stock_research_item
+from services.analysis_service import AnalysisService, _single_stock_research_item
 from services.portfolio_service import (
     PortfolioService,
     _build_historical_evaluation_markdown,
@@ -228,6 +229,47 @@ def test_holdings_watchlist_balance_crud():
     assert b.a_balance == 100000.0
 
 
+def test_a_share_code_returns_company_name_with_online_and_fallback_paths():
+    fresh_db()
+    with patch(
+        "services.portfolio_service.search_a_stock",
+        return_value=[{"code": "600000", "name": "浦发银行", "market": "A"}],
+    ):
+        assert PortfolioService.search_stock("600000")["name"] == "浦发银行"
+
+    with (
+        patch("services.portfolio_service.search_a_stock", return_value=[]),
+        patch(
+            "services.portfolio_service.search_a_stock_fallback",
+            return_value=[{"code": "600519", "name": "贵州茅台", "market": "A"}],
+        ),
+    ):
+        assert PortfolioService.search_stock("600519")["name"] == "贵州茅台"
+
+
+def test_tab1_a_share_info_fills_name_when_tickflow_only_returns_code():
+    fresh_db()
+    fetcher = SimpleNamespace(
+        fetch_stock_info=lambda code: StockInfo(code=code, name=code, market="A")
+    )
+    with (
+        patch("services.analysis_service.get_stock_fetcher", return_value=fetcher),
+        patch(
+            "services.analysis_service.search_a_stock_fallback",
+            return_value=[{"code": "600519", "name": "贵州茅台", "market": "A"}],
+        ),
+        patch(
+            "alpha.fundamental._fetch_stock_industry_baostock",
+            return_value="白酒",
+        ),
+    ):
+        info = AnalysisService()._fetch_stock_info("600519", "A")
+
+    assert info.name == "贵州茅台"
+    assert info.industry == "白酒"
+    assert Database().get_stock("600519").name == "贵州茅台"
+
+
 def test_database_uses_independent_connections_for_parallel_reads():
     db = fresh_db()
     db.upsert_stock(StockInfo(code="FCX", name="Freeport", market="US"))
@@ -283,6 +325,8 @@ def test_portfolio_summary_adds_risk_overlay_and_compacts_no_signal():
     )
 
     assert "一分钟操作台" in md
+    assert "减仓后何时允许重新加回" in md
+    assert "未来买入/重新加回条件" in md
     assert "报告模式" in md
     assert "持仓风控提示" in md
     assert "SOFI" in md
@@ -871,12 +915,52 @@ def test_probability_calibration_and_joint_oof_are_explained_without_fake_zero_s
     assert "Log Loss" in markdown
     assert "预测校准曲线" in markdown
     assert "不同市场状态" in markdown
-    assert "最终联合策略OOF" in markdown
-    assert "联合OOF逐事件审计" in markdown
+    assert "最终建议链样本外回放（联合OOF）" in markdown
+    assert "样本外逐事件明细（联合OOF最近记录）" in markdown
+    assert "三步阅读法" in markdown
+    assert "校准图怎么读" in markdown
+    assert "逐条追责预测、策略、风控和成交" in markdown
     assert "2026-03-23" in markdown
     assert "新闻/基本面历史时点快照" in markdown
     assert "样本不足" in markdown
-    assert "| — | — | — | — | — |" in markdown
+    assert "当前没有有效到期样本" in markdown
+    assert "| Apple（AAPL） | 待验证2 | — | — |" in markdown
+
+    empty_markdown = _build_historical_evaluation_markdown(
+        [], [], [], [], "US", forecast_summary={}, joint_rows=[],
+    )
+    assert "校准图保留灰色理想线" in empty_markdown
+    assert "暂时无法判断模型在趋势、震荡或高波动市场中的表现" in empty_markdown
+
+    stale_markdown = _build_historical_evaluation_markdown(
+        forecast_rows=[
+            {
+                "label": "SNDK", "horizon": horizon,
+                "verified": 0, "pending": 1, "unsupported": 1,
+                "accuracy": 0.0, "brier_score": 0.0,
+                "log_loss": 0.0, "ece": 0.0, "interval_coverage": 0.0,
+            }
+            for horizon in (1, 3, 5)
+        ],
+        plan_rows=[], prediction_rows=[], observation_rows=[], market="US",
+        forecast_summary={}, joint_rows=[],
+    )
+    assert "| 0 | 3 | 3 | 不能，继续积累 |" in stale_markdown
+    assert "| SNDK | 待验证1 / 已隔离1 | 待验证1 / 已隔离1 | 待验证1 / 已隔离1 |" in stale_markdown
+
+
+def test_empty_forecast_metrics_still_render_calibration_axes():
+    db = fresh_db()
+    service = PortfolioService()
+    with (
+        tempfile.TemporaryDirectory() as chart_dir,
+        patch("config.settings.Settings") as settings_cls,
+    ):
+        settings_cls.return_value.chart_dir = chart_dir
+        path = service.generate_forecast_calibration_chart("US")
+        assert path.endswith("forecast_calibration_US.png")
+        assert os.path.exists(path)
+        assert os.path.getsize(path) > 1000
 
 
 def test_a_share_evaluation_includes_tab1_predictions_without_holdings():
@@ -1089,6 +1173,8 @@ if __name__ == "__main__":
         test_extended_top_of_book_spread_controls_position_cap,
         test_missing_batch_quote_does_not_fall_back_to_individual_request,
         test_holdings_watchlist_balance_crud,
+        test_a_share_code_returns_company_name_with_online_and_fallback_paths,
+        test_tab1_a_share_info_fills_name_when_tickflow_only_returns_code,
         test_database_uses_independent_connections_for_parallel_reads,
         test_portfolio_summary_adds_risk_overlay_and_compacts_no_signal,
         test_portfolio_summary_shows_data_quality_gate,
@@ -1107,6 +1193,7 @@ if __name__ == "__main__":
         test_research_history_feedback_demotes_negative_expectancy,
         test_historical_evaluation_panel_summarizes_predictions_and_patterns,
         test_probability_calibration_and_joint_oof_are_explained_without_fake_zero_score,
+        test_empty_forecast_metrics_still_render_calibration_axes,
         test_a_share_evaluation_includes_tab1_predictions_without_holdings,
         test_single_stock_research_item_feeds_observation_confirmation,
         test_research_observation_same_event_is_deduplicated,

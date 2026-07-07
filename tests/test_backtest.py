@@ -591,7 +591,7 @@ class TestBacktestEngine:
 
 
 class TestMultiStrategyRun:
-    """多策略并行测试。"""
+    """多策略顺序对比测试。"""
 
     def test_run_all_strategies(self):
         """运行全部三种策略不崩溃。"""

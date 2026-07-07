@@ -16,6 +16,7 @@ CLAUDE.md 新架构 ④⑤⑥ 层的核心实现：
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 import pandas as pd
 import numpy as np
@@ -527,18 +528,6 @@ def _apply_data_quality_to_signal(sr: SignalResult, data_quality: dict | None):
             sr.reason = f"{prefix} {sr.reason}"
 
 
-def _derive_position_pct(reason: str, strategy) -> float:
-    """从策略理由中推导建议仓位比例。"""
-    name = strategy.name.lower()
-    if "mean" in name or "reversion" in name or "均值回归" in name:
-        return 0.30
-    if "ma60" in name or "中长期" in name or "trend rider" in name or "满仓" in name:
-        return 0.70
-    if "momentum" in name or "动量" in name:
-        return 0.50
-    return 0.40
-
-
 def _derive_order_position_pct(order: Order, reference_price: float, equity: float) -> float:
     """Derive position sizing from the actual strategy order."""
     if reference_price <= 0 or equity <= 0 or order.shares <= 0:
@@ -608,7 +597,7 @@ def rank_signals(
         return []
 
     # 构建 lookup map
-    audit_map: dict[str, any] = {}
+    audit_map: dict[str, Any] = {}
     if audit_entries:
         for e in audit_entries:
             audit_map[getattr(e, "strategy_key", "")] = e

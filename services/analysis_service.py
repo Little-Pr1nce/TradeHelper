@@ -643,6 +643,15 @@ class AnalysisService:
             logger.warning(f"未获取到 {code} 的股票信息，使用默认名")
             info = StockInfo(code=code, name=code, market=market)
 
+        if market == "A" and (not info.name or info.name == code):
+            cached = Database().get_stock(code)
+            if cached and cached.name and cached.name != code:
+                info.name = cached.name
+            else:
+                matches = search_a_stock_fallback(code) or search_a_stock(code)
+                if matches:
+                    info.name = str(matches[0].get("name") or code)
+
         # ── 美股：用 Finnhub profile2 补全行业和业务描述 ──
         if market == "US":
             from config.settings import Settings

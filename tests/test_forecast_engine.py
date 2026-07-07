@@ -5,6 +5,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -14,17 +15,26 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.forecast_engine import (
+    LOGISTIC_SOLVER_VERSION,
     _coherent_return_distribution,
+    _regularized_logistic_probabilities,
     _weighted_quantile,
     evaluate_forecast_candidates,
     forecast_candidate_passes_baseline,
     forecast_candidate_configs,
+    forecast_model_params_compatible,
     generate_forecasts,
     generate_oof_forecast_snapshot,
     probability_diagnostics,
     paired_block_improvement,
 )
-from core.joint_oof import run_joint_oof_replay
+from core.joint_oof import (
+    _joint_strategy_eligible,
+    _joint_training_verdict,
+    _rank_joint_strategy_candidates,
+    _select_training_strategies,
+    run_joint_oof_replay,
+)
 from core.pipeline import run_pipeline
 from data.database import Database
 from data.models import ForecastModelVersion, ForecastResult, IntradayBar, PriceData
@@ -267,16 +277,69 @@ def test_weekday_fallback_is_explicitly_unreliable():
         assert targets.dates[1] == "2026-07-06"
 
 
+def test_stale_daily_history_does_not_generate_retroactive_live_forecasts():
+    frame = _prices(150)
+    frame["date"] = pd.date_range("2025-12-04", periods=150, freq="B")
+    result = generate_forecasts(
+        frame,
+        code="TEST",
+        market="US",
+        mode="eod",
+        generated_at="2026-07-05T12:52:00+08:00",
+    )
+
+    assert result == []
+
+
+def test_retroactive_forecast_is_quarantined_before_metrics():
+    db = _fresh_db()
+    db.insert_forecast(ForecastResult(
+        code="SNDK", market="US", mode="eod",
+        generated_at="2026-07-05T12:52:00+08:00",
+        data_cutoff="2026-07-01", target_session_date="2026-07-02",
+        horizon=1, reference_price=100.0,
+        prob_up=0.53, prob_flat=0.13, prob_down=0.34,
+        direction="bullish", event_key="retroactive-test",
+        status="verified", actual_price=90.0, actual_return=-0.10,
+        actual_direction="bearish", brier_score=0.74,
+    ))
+
+    db.verify_due_forecasts(as_of_date="2026-07-06")
+
+    stored = db.get_forecasts(code="SNDK", limit=1)[0]
+    assert stored.status == "unsupported"
+    assert db.get_forecast_metrics(code="SNDK")["samples"] == 0
+
+
+def test_forecast_from_stale_cutoff_is_quarantined_even_if_target_is_future():
+    db = _fresh_db()
+    db.insert_forecast(ForecastResult(
+        code="SNDK", market="US", mode="eod",
+        generated_at="2026-07-05T12:52:00+08:00",
+        data_cutoff="2026-07-01", target_session_date="2026-07-07",
+        horizon=3, reference_price=100.0,
+        prob_up=0.53, prob_flat=0.13, prob_down=0.34,
+        direction="bullish", event_key="stale-cutoff-test",
+        status="pending",
+    ))
+
+    db.verify_due_forecasts(as_of_date="2026-07-06")
+
+    assert db.get_forecasts(code="SNDK", limit=1)[0].status == "unsupported"
+
+
 def test_database_freezes_forecast_and_verifies_exact_target_close():
     db = _fresh_db()
     forecast = generate_forecasts(
         _prices(), code="TEST", market="US", mode="eod", targets=_targets(),
+        generated_at="2025-07-31T20:00:00+08:00",
     )[0]
     original_probability = forecast.prob_up
     first_id = db.insert_forecast(forecast)
 
     duplicate = generate_forecasts(
         _prices(), code="TEST", market="US", mode="eod", targets=_targets(),
+        generated_at="2025-07-31T20:00:00+08:00",
     )[0]
     duplicate.prob_up, duplicate.prob_flat = duplicate.prob_flat, duplicate.prob_up
     second_id = db.insert_forecast(duplicate)
@@ -418,6 +481,8 @@ def test_forecast_report_states_target_date_and_separate_metrics():
     assert "2025-08-01" in current
     assert "上涨" in current and "震荡" in current and "下跌" in current
     assert "Brier" in current
+    assert "分离度=最高方向概率-第二高方向概率" in current
+    assert "不是“80%概率赚到中位数”" in current
     assert "暂无到期" in history
 
 
@@ -517,6 +582,87 @@ def test_legacy_forecast_champion_is_not_reused_under_v4_semantics():
 
     assert get_forecast_configs(db, "US", "AAPL") == {}
     assert db.get_forecast_champion("US", 1, "AAPL") is None
+
+
+def test_legacy_logistic_solver_champion_requires_fresh_oof_validation():
+    db = _fresh_db()
+    version = "forecast_v4_logistic_legacy@AAPL"
+    db.save_forecast_model_version(ForecastModelVersion(
+        stock_code="AAPL", market="US", horizon=1, version=version,
+        status="challenger",
+        params_json='{"model_type": "logistic", "regularization": 0.2}',
+        created_at="2026-07-01T00:00:00",
+    ))
+    db.promote_forecast_model("US", 1, version, stock_code="AAPL")
+
+    assert not forecast_model_params_compatible({"model_type": "logistic"})
+    assert get_forecast_configs(db, "US", "AAPL") == {}
+    assert db.get_forecast_champion("US", 1, "AAPL") is None
+
+
+def test_adaptive_logistic_solver_is_finite_deterministic_and_normalized():
+    rng = np.random.default_rng(20260706)
+    base = rng.normal(size=(120, 1))
+    # Deliberately collinear and differently scaled features stress convergence.
+    features = np.column_stack([
+        base[:, 0], base[:, 0] * 1_000_000, base[:, 0] + 1e-10,
+        rng.normal(scale=0.01, size=120),
+    ])
+    labels = np.where(base[:, 0] > 0.45, 0, np.where(base[:, 0] < -0.45, 2, 1))
+    current = np.array([0.2, 200_000.0, 0.2, 0.0])
+
+    first = _regularized_logistic_probabilities(
+        features, labels, current, regularization=0.20,
+    )
+    second = _regularized_logistic_probabilities(
+        features, labels, current, regularization=0.20,
+    )
+
+    assert np.isfinite(first).all()
+    assert np.all(first > 0)
+    assert np.isclose(first.sum(), 1.0)
+    assert np.allclose(first, second)
+    assert forecast_model_params_compatible({
+        "model_type": "logistic", "solver_version": LOGISTIC_SOLVER_VERSION,
+    })
+
+
+def test_joint_oof_strategy_selection_enforces_risk_gate_and_stable_ranking():
+    def result(**overrides):
+        values = {
+            "total_trades": 5, "total_return": 0.15, "sharpe_ratio": 1.2,
+            "max_drawdown": 0.12, "calmar_ratio": 1.25, "win_rate": 0.55,
+            "strategy_name": "test",
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    unsafe = result(total_return=0.60, sharpe_ratio=2.0, max_drawdown=0.50)
+    steady = result(total_return=0.18, sharpe_ratio=1.8, max_drawdown=0.05,
+                    calmar_ratio=3.6)
+    volatile = result(total_return=0.30, sharpe_ratio=0.6, max_drawdown=0.33,
+                      calmar_ratio=0.9)
+    steady_variant = SimpleNamespace(base_key="A", variant_label="A_steady", params={})
+    volatile_variant = SimpleNamespace(base_key="B", variant_label="B_fast", params={})
+
+    assert not _joint_strategy_eligible(unsafe)
+    assert _joint_training_verdict(unsafe) == "CONDITIONAL"
+    assert _joint_training_verdict(steady) == "PASS"
+    ranked = _rank_joint_strategy_candidates([
+        (volatile_variant, volatile), (steady_variant, steady),
+    ])
+    assert ranked[0][1].variant_label == "A_steady"
+
+    candidate = SimpleNamespace(
+        strategy=SimpleNamespace(live_signal_enabled=True, overlay_scope=""),
+        base_key="A", variant_label="A_unsafe", params={},
+    )
+    with patch("core.joint_oof.generate_variants", return_value=[candidate]), patch(
+        "core.joint_oof.BacktestEngine.run", return_value=unsafe,
+    ):
+        selected, audits = _select_training_strategies(_prices(80), ["A"], 100_000)
+    assert selected == []
+    assert audits == []
 
 
 def test_trade_plan_deduplicates_without_forecast_and_intraday_waits_for_minute_evidence():
@@ -764,6 +910,9 @@ if __name__ == "__main__":
         test_oof_snapshot_uses_only_matured_labels,
         test_probability_diagnostics_include_logical_calibration_and_regimes,
         test_weekday_fallback_is_explicitly_unreliable,
+        test_stale_daily_history_does_not_generate_retroactive_live_forecasts,
+        test_retroactive_forecast_is_quarantined_before_metrics,
+        test_forecast_from_stale_cutoff_is_quarantined_even_if_target_is_future,
         test_database_freezes_forecast_and_verifies_exact_target_close,
         test_joint_oof_replay_and_database_audit_are_separate_from_in_sample_backtest,
         test_forecast_and_trade_plan_are_persisted_and_deduplicated_separately,
@@ -774,6 +923,9 @@ if __name__ == "__main__":
         test_trade_plan_is_evaluated_separately_from_forecast_accuracy,
         test_forecast_champions_are_isolated_by_stock,
         test_legacy_forecast_champion_is_not_reused_under_v4_semantics,
+        test_legacy_logistic_solver_champion_requires_fresh_oof_validation,
+        test_adaptive_logistic_solver_is_finite_deterministic_and_normalized,
+        test_joint_oof_strategy_selection_enforces_risk_gate_and_stable_ranking,
         test_trade_plan_deduplicates_without_forecast_and_intraday_waits_for_minute_evidence,
         test_trade_plan_versions_material_changes_and_uses_market_session_date,
         test_trade_plan_event_versions_account_snapshot_and_strategy_variant,

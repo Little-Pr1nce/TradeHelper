@@ -265,7 +265,7 @@ def _select_training_strategies(
     initial_capital: float,
 ) -> tuple[list[dict], list]:
     engine = BacktestEngine(BacktestConfig(initial_capital=initial_capital))
-    scored = []
+    candidates = []
     for variant in generate_variants(keys, max_per_strategy=3):
         try:
             strategy = variant.strategy
@@ -274,24 +274,17 @@ def _select_training_strategies(
             result = engine.run(train.copy(), strategy)
         except Exception:
             continue
-        score = (
-            float(result.total_return)
-            - float(result.max_drawdown)
-            + 0.05 * float(result.sharpe_ratio)
-        )
-        scored.append((score, variant, result))
-    scored.sort(key=lambda item: item[0], reverse=True)
+        if _joint_strategy_eligible(result):
+            candidates.append((variant, result))
+    if not candidates:
+        return [], []
+
+    scored = _rank_joint_strategy_candidates(candidates)
     best_by_key = {}
     for item in scored:
         best_by_key.setdefault(item[1].base_key, item)
     scored = sorted(best_by_key.values(), key=lambda item: item[0], reverse=True)
-    eligible = [
-        item for item in scored
-        if item[2].total_trades >= 2
-        and (item[2].total_return > 0 or item[2].sharpe_ratio > 0)
-        and item[2].max_drawdown <= 0.35
-    ]
-    chosen = (eligible or scored)[:5]
+    chosen = scored[:5]
     selected = [{
         "base_key": item[1].base_key,
         "variant_label": item[1].variant_label,
@@ -299,16 +292,63 @@ def _select_training_strategies(
     } for item in chosen]
     audits = []
     for _, variant, result in chosen:
-        verdict = (
-            "PASS" if result.total_trades >= 3
-            and result.total_return > 0 and result.sharpe_ratio > 0
-            else "CONDITIONAL"
-        )
+        verdict = _joint_training_verdict(result)
         audits.append(SimpleNamespace(
             strategy_key=variant.variant_label, strategy_name=result.strategy_name,
             verdict=verdict, test_sharpe=float(result.sharpe_ratio),
         ))
     return selected, audits
+
+
+def _joint_strategy_eligible(result) -> bool:
+    """Hard gate used before a strategy can enter one joint-OOF fold."""
+    return bool(
+        int(result.total_trades) >= 2
+        and float(result.total_return) > 0
+        and float(result.sharpe_ratio) > 0
+        and float(result.max_drawdown) <= 0.35
+    )
+
+
+def _joint_training_verdict(result) -> str:
+    """Keep the fold's PASS label consistent with its risk qualification."""
+    return "PASS" if (
+        int(result.total_trades) >= 3
+        and float(result.total_return) >= 0.02
+        and float(result.sharpe_ratio) >= 0.50
+        and float(result.max_drawdown) <= 0.30
+        and float(result.win_rate) >= 0.45
+    ) else "CONDITIONAL"
+
+
+def _rank_joint_strategy_candidates(candidates: list[tuple]) -> list[tuple]:
+    """Rank eligible candidates by scale-free risk-adjusted percentiles."""
+    if not candidates:
+        return []
+
+    def _finite(value: float, default: float = 0.0) -> float:
+        value = float(value)
+        return value if np.isfinite(value) else default
+
+    returns = pd.Series([_finite(item[1].total_return) for item in candidates])
+    sharpes = pd.Series([_finite(item[1].sharpe_ratio) for item in candidates])
+    calmars = pd.Series([_finite(item[1].calmar_ratio) for item in candidates])
+    drawdowns = pd.Series([_finite(item[1].max_drawdown, 1.0) for item in candidates])
+    return_rank = returns.rank(method="average", pct=True)
+    sharpe_rank = sharpes.rank(method="average", pct=True)
+    calmar_rank = calmars.rank(method="average", pct=True)
+    drawdown_rank = (-drawdowns).rank(method="average", pct=True)
+
+    ranked = []
+    for index, (variant, result) in enumerate(candidates):
+        score = (
+            0.35 * float(return_rank.iloc[index])
+            + 0.30 * float(sharpe_rank.iloc[index])
+            + 0.20 * float(calmar_rank.iloc[index])
+            + 0.15 * float(drawdown_rank.iloc[index])
+        )
+        ranked.append((score, variant, result))
+    return sorted(ranked, key=lambda item: item[0], reverse=True)
 
 
 def _select_training_forecasts(train: pd.DataFrame) -> dict[int, dict]:

@@ -10,7 +10,9 @@ from zoneinfo import ZoneInfo
 from core.forecast_engine import (
     FEATURE_NAMES,
     FORECAST_MODEL_FAMILY,
+    LOGISTIC_SOLVER_VERSION,
     forecast_candidate_passes_baseline,
+    forecast_model_params_compatible,
     paired_block_improvement,
 )
 from data.models import (
@@ -38,6 +40,16 @@ def get_forecast_configs(db, market: str, stock_code: str) -> dict[int, dict]:
                 reason="模型验证窗口/收益分布口径已升级，旧 Champion 必须重新通过 OOF",
             )
             continue
+        try:
+            params = json.loads(version.params_json or "{}")
+        except (TypeError, ValueError):
+            params = {}
+        if not forecast_model_params_compatible(params):
+            db.rollback_forecast_model(
+                market, horizon, version.version, stock_code,
+                reason="Logistic 求解器口径已升级，旧 Champion 必须重新通过 OOF",
+            )
+            continue
         metrics = db.get_forecast_metrics(
             market=market, code=stock_code, horizon=horizon,
             model_version=version.version,
@@ -56,10 +68,6 @@ def get_forecast_configs(db, market: str, stock_code: str) -> dict[int, dict]:
                 ),
             )
             continue
-        try:
-            params = json.loads(version.params_json or "{}")
-        except (TypeError, ValueError):
-            params = {}
         params["model_version"] = version.version
         params["validated"] = True
         configs[horizon] = params
@@ -308,6 +316,13 @@ def optimize_forecast_models(db, *, df, market: str, stock_code: str) -> dict:
             incumbent_params = json.loads(incumbent.params_json or "{}") if incumbent else {}
         except (TypeError, ValueError):
             incumbent_params = {}
+        if incumbent and not forecast_model_params_compatible(incumbent_params):
+            db.rollback_forecast_model(
+                market, horizon, incumbent.version, stock_code,
+                reason="Logistic 求解器口径已升级，旧 Champion 必须重新通过 OOF",
+            )
+            incumbent = None
+            incumbent_params = {}
         candidates = forecast_candidate_configs()
         normalized_incumbent = _normalized_model_params(incumbent_params)
         if normalized_incumbent not in candidates:
@@ -449,6 +464,9 @@ def _normalized_model_params(params: dict | None) -> dict:
         result["neighbor_count"] = max(20, int(source.get("neighbor_count", 80)))
     if model_type in ("logistic", "ensemble"):
         result["regularization"] = float(source.get("regularization", 0.20))
+        result["solver_version"] = str(
+            source.get("solver_version") or LOGISTIC_SOLVER_VERSION
+        )
     if model_type == "tree":
         result["max_depth"] = max(1, min(int(source.get("max_depth", 2)), 3))
         result["min_leaf"] = max(10, int(source.get("min_leaf", 20)))

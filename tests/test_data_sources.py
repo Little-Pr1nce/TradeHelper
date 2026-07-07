@@ -6,6 +6,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -27,6 +28,7 @@ from core.data_quality import evaluate_data_quality
 from core.pipeline import run_pipeline
 from data.database import Database
 from services.intraday_data_service import normalize_intraday_frame
+from utils.market import _A_DIRECTORY_CACHE, search_a_stock, search_a_stock_fallback
 
 
 class DummyFetcher:
@@ -223,6 +225,33 @@ def test_extended_quote_availability_ok():
     assert result["extended_quote_ok"] is True
 
 
+def test_a_share_search_matches_code_and_preserves_leading_zero():
+    calls = []
+
+    def directory():
+        calls.append(1)
+        return pd.DataFrame({
+            "code": [600519, 1],
+            "name": ["贵州茅台", "平安银行"],
+        })
+
+    fake_akshare = SimpleNamespace(
+        stock_info_a_code_name=directory,
+    )
+    _A_DIRECTORY_CACHE.update({"loaded_at": 0.0, "frame": None})
+    with patch.dict(sys.modules, {"akshare": fake_akshare}):
+        assert search_a_stock("600519")[0] == {
+            "code": "600519", "name": "贵州茅台", "market": "A",
+        }
+        assert search_a_stock("000001")[0] == {
+            "code": "000001", "name": "平安银行", "market": "A",
+        }
+    assert len(calls) == 1
+
+    assert search_a_stock_fallback("600519")[0]["name"] == "贵州茅台"
+    _A_DIRECTORY_CACHE.update({"loaded_at": 0.0, "frame": None})
+
+
 def test_fetch_cached_prices_backfills_head_and_tail():
     fetcher = RecordingFetcher()
     db = MemoryPriceDB()
@@ -232,6 +261,29 @@ def test_fetch_cached_prices_backfills_head_and_tail():
     assert ("2026-01-02", "2026-01-08") in fetcher.calls
     assert ("2026-01-13", "2026-01-15") in fetcher.calls
     assert df["date"].min().strftime("%Y-%m-%d") == "2026-01-02"
+    assert df["date"].max().strftime("%Y-%m-%d") == "2026-01-15"
+
+
+def test_us_daily_history_falls_back_when_tickflow_tail_is_empty():
+    fetcher = RecordingFetcher()
+    fetcher.fetch_price_history = lambda code, start, end: []
+    db = MemoryPriceDB()
+    fallback = [
+        PriceData(
+            code="AAPL", date="2026-01-15",
+            open=3, high=4, low=2.5, close=3.5, volume=100,
+        )
+    ]
+    with (
+        patch("data.stock_fetcher.get_stock_fetcher", return_value=fetcher),
+        patch("data.stock_fetcher._fetch_yfinance_price_history", return_value=fallback) as yf,
+    ):
+        df = fetch_cached_prices(
+            "AAPL", "US", "2026-01-09", "2026-01-15", db=db,
+            listing_date="2020-01-01",
+        )
+
+    yf.assert_called_once_with("AAPL", "2026-01-13", "2026-01-15")
     assert df["date"].max().strftime("%Y-%m-%d") == "2026-01-15"
 
 
@@ -443,7 +495,9 @@ def test_minute_normalizer_keeps_only_valid_regular_session_bars():
 if __name__ == "__main__":
     test_tickflow_availability_ok()
     test_extended_quote_availability_ok()
+    test_a_share_search_matches_code_and_preserves_leading_zero()
     test_fetch_cached_prices_backfills_head_and_tail()
+    test_us_daily_history_falls_back_when_tickflow_tail_is_empty()
     test_filter_prices_for_cache_drops_unfinished_and_invalid_bars()
     test_dirty_persistent_cache_is_cleared_and_rebuilt_as_a_whole()
     test_filter_prices_for_cache_quarantines_jump_tail()
@@ -458,4 +512,4 @@ if __name__ == "__main__":
     test_finnhub_debt_ratio_uses_normalized_metric()
     test_nasdaq_timestamp_is_parsed_as_eastern_time()
     test_minute_normalizer_keeps_only_valid_regular_session_bars()
-    print("17/17 passed")
+    print("19/19 passed")

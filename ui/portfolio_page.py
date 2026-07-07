@@ -274,6 +274,21 @@ class PortfolioPage(ft.Container):
             src="", visible=False, fit="contain",
             height=320,
         )
+        self._evaluation_chart_guide = ft.Container(
+            visible=False,
+            bgcolor=ft.Colors.BLUE_50,
+            border_radius=6,
+            padding=ft.Padding(12, 9, 12, 9),
+            content=ft.Row(spacing=8, controls=[
+                ft.Icon(ft.Icons.INFO_OUTLINE, size=18, color=ft.Colors.BLUE_700),
+                ft.Text(
+                    "校准图：横轴=模型声称的把握，纵轴=实际命中率；有样本后蓝线越接近灰色对角线越可信。n<10只积累，n≥30再比较模型。",
+                    size=12,
+                    color=ft.Colors.BLUE_900,
+                    expand=True,
+                ),
+            ]),
+        )
         self._evaluation_refresh_btn = ft.ElevatedButton(
             content=ft.Row(spacing=6, controls=[
                 ft.Icon(ft.Icons.REFRESH, size=16),
@@ -315,6 +330,7 @@ class PortfolioPage(ft.Container):
                     ],
                 ),
                 ft.Divider(height=1, color=ft.Colors.GREY_200),
+                self._evaluation_chart_guide,
                 self._evaluation_chart,
                 self._evaluation_view,
             ]),
@@ -601,8 +617,10 @@ class PortfolioPage(ft.Container):
             )
             self._evaluation_chart.src = chart_path
             self._evaluation_chart.visible = bool(chart_path)
+            self._evaluation_chart_guide.visible = bool(chart_path)
             self._evaluation_view.update()
             self._evaluation_chart.update()
+            self._evaluation_chart_guide.update()
         except Exception as ex:
             logger.warning(f"历史预测评估面板加载失败: {ex}")
             self._evaluation_view.value = f"### 历史预测评估面板\n\n- 加载失败：{ex}"
@@ -709,7 +727,9 @@ class PortfolioPage(ft.Container):
         code = self._h_code_input.value.strip()
         if len(code) < 1:
             return
-        if len(code) >= 2 or (len(code) == 6 and code.isdigit()):
+        if code.isdigit() and len(code) != 6:
+            return
+        if len(code) >= 2:
             result = self._service.search_stock(code)
             if result:
                 self._h_name_text.value = result["name"][:20]
@@ -817,6 +837,8 @@ class PortfolioPage(ft.Container):
     async def _on_w_code_change(self, e):
         """输入代码后自动识别市场 + 返显名称。"""
         code = self._w_code_input.value.strip()
+        if code.isdigit() and len(code) != 6:
+            return
         if len(code) >= 2:
             result = self._service.search_stock(code)
             if result:

@@ -9,7 +9,7 @@
   3. T+1 日盘中 High/Low 检查止损 → 不允许收盘后才补止损
   4. 所有因子在回测循环前预计算完毕 → 循环内禁止动态计算
 
-支持单策略回测和多策略并行对比。
+支持单策略回测和多策略顺序对比。
 """
 
 import logging
@@ -336,7 +336,10 @@ class BacktestEngine:
         strategies: list[BaseExecutionStrategy],
         news_df: pd.DataFrame | None = None,
     ) -> dict[str, BacktestResult]:
-        """并行运行多个策略，返回 {策略名: BacktestResult} 字典。"""
+        """顺序运行多个策略，返回 {策略名: BacktestResult} 字典。
+
+        引擎实例会为每次回测切换 Broker 配置，因此这里有意保持顺序执行。
+        """
         logger.info(f"多策略回测: {len(strategies)} 个策略")
         results = {}
         for strategy in strategies:

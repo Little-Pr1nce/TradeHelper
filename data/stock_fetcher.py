@@ -2,9 +2,9 @@
 股票数据获取模块
 
 统一股票行情数据源：
-  - TickFlowFetcher: 第一且唯一的股市信息/K线/盘中报价来源
+  - TickFlowFetcher: 股市信息/K线/盘中报价主来源
   - Nasdaq.com API: 美股盘前/盘后延伸交易时段价格（首选，免费无 Key）
-  - yfinance: 美股盘前/盘后降级方案（Nasdaq 不可用时自动切换）
+  - yfinance: 美股延伸时段和日K应急降级方案
 
 新闻源不在本模块处理：A 股使用 akshare，美股使用 Finnhub。
 数据源由 get_stock_fetcher(market) 自动选择。
@@ -146,6 +146,90 @@ def _apply_proxy():
             logger.info(f"yfinance proxy: {proxy_url}")
     except Exception as e:
         logger.warning(f"Failed to configure yfinance proxy: {e}")
+
+
+def _fetch_yfinance_price_history(
+    code: str, start_date: str, end_date: str,
+) -> list[PriceData]:
+    """TickFlow 日K不可用时，用 yfinance 补齐美股已完成交易日。"""
+    try:
+        import pandas as pd
+        import yfinance as yf
+
+        _apply_proxy()
+        end_exclusive = (
+            dt_date.fromisoformat(end_date) + timedelta(days=1)
+        ).isoformat()
+        frame = yf.Ticker(code).history(
+            start=start_date,
+            end=end_exclusive,
+            auto_adjust=True,
+            actions=False,
+        )
+        if frame is None or frame.empty:
+            logger.warning(f"yfinance 日K为空 ({code}, {start_date}~{end_date})")
+            return []
+
+        prices: list[PriceData] = []
+        for index, row in frame.iterrows():
+            date_str = pd.Timestamp(index).date().isoformat()
+            if date_str < start_date or date_str > end_date:
+                continue
+            try:
+                prices.append(PriceData(
+                    code=code,
+                    date=date_str,
+                    open=float(row["Open"]),
+                    high=float(row["High"]),
+                    low=float(row["Low"]),
+                    close=float(row["Close"]),
+                    volume=float(row.get("Volume", 0.0) or 0.0),
+                ))
+            except (KeyError, TypeError, ValueError):
+                continue
+        logger.info(
+            "美股日K降级成功: %s 使用 yfinance 补拉 %d 条 (%s~%s)，"
+            "原因=TickFlow无可用结果",
+            code, len(prices), start_date, end_date,
+        )
+        return prices
+    except Exception as exc:
+        logger.warning(
+            "yfinance 日K降级失败 (%s, %s~%s): %s",
+            code, start_date, end_date, exc,
+        )
+        return []
+
+
+def _fetch_price_history_with_fallback(
+    fetcher: BaseStockFetcher,
+    code: str,
+    market: str,
+    start_date: str,
+    end_date: str,
+) -> list[PriceData]:
+    """先取正式日K源；美股无结果时才启用可审计的补充源。"""
+    prices = fetcher.fetch_price_history(code, start_date, end_date)
+    if prices or str(market).upper() != "US":
+        return prices
+    try:
+        from utils.trading_calendar import latest_completed_session
+
+        completed = latest_completed_session(market)
+        fallback_end = min(end_date, completed)
+        if start_date > fallback_end:
+            logger.info(
+                "TickFlow 日K无结果，但 %s~%s 尚无缺失的已完成交易日，跳过降级 (%s)",
+                start_date, end_date, code,
+            )
+            return []
+    except Exception:
+        fallback_end = end_date
+    logger.warning(
+        "TickFlow 日K无可用结果，降级到 yfinance (%s, %s~%s)",
+        code, start_date, fallback_end,
+    )
+    return _fetch_yfinance_price_history(code, start_date, fallback_end)
 
 
 def _retry(func: Callable[[], T], max_retries=3, label="") -> T:
@@ -966,7 +1050,9 @@ def fetch_cached_prices(
 
     if not prices:
         logger.info(f"{code} 缓存为空，联网拉取 {start}~{end}")
-        new_prices = fetcher.fetch_price_history(code, start, end)
+        new_prices = _fetch_price_history_with_fallback(
+            fetcher, code, market, start, end,
+        )
         if new_prices:
             cache_prices = _filter_prices_for_cache(new_prices, market)
             if cache_prices:
@@ -986,7 +1072,9 @@ def fetch_cached_prices(
         if first_date > start:
             head_end = (dt_date.fromisoformat(first_date) - timedelta(days=1)).isoformat()
             logger.info(f"{code} 缓存缺起始段，补拉 {start}~{head_end}")
-            head_prices = fetcher.fetch_price_history(code, start, head_end)
+            head_prices = _fetch_price_history_with_fallback(
+                fetcher, code, market, start, head_end,
+            )
             if head_prices:
                 cache_prices = _filter_prices_for_cache(head_prices, market)
                 if cache_prices:
@@ -998,7 +1086,9 @@ def fetch_cached_prices(
         if last_date < end:
             tail_start = (dt_date.fromisoformat(last_date) + timedelta(days=1)).isoformat()
             logger.info(f"{code} 检查尾部增量 {tail_start}~{end}")
-            tail_prices = fetcher.fetch_price_history(code, tail_start, end)
+            tail_prices = _fetch_price_history_with_fallback(
+                fetcher, code, market, tail_start, end,
+            )
             try:
                 previous_close = float(prices[-1].close)
             except (TypeError, ValueError, IndexError):

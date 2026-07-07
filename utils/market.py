@@ -6,8 +6,34 @@
 
 import re
 import logging
+import threading
+import time
 
 logger = logging.getLogger(__name__)
+_A_DIRECTORY_CACHE = {"loaded_at": 0.0, "frame": None}
+_A_DIRECTORY_LOCK = threading.Lock()
+_A_DIRECTORY_TTL_SECONDS = 6 * 60 * 60
+
+
+def _a_stock_directory():
+    """Load the A-share code/name directory once per process TTL."""
+    now = time.monotonic()
+    cached = _A_DIRECTORY_CACHE.get("frame")
+    if cached is not None and now - float(_A_DIRECTORY_CACHE["loaded_at"]) < _A_DIRECTORY_TTL_SECONDS:
+        return cached
+    with _A_DIRECTORY_LOCK:
+        now = time.monotonic()
+        cached = _A_DIRECTORY_CACHE.get("frame")
+        if cached is not None and now - float(_A_DIRECTORY_CACHE["loaded_at"]) < _A_DIRECTORY_TTL_SECONDS:
+            return cached
+        from data.stock_fetcher import _without_system_proxy
+        import akshare as ak
+        with _without_system_proxy():
+            frame = ak.stock_info_a_code_name()
+        if frame is not None and not frame.empty:
+            _A_DIRECTORY_CACHE["frame"] = frame.copy()
+            _A_DIRECTORY_CACHE["loaded_at"] = now
+        return frame
 
 
 def detect_market(code: str) -> str:
@@ -29,20 +55,30 @@ def detect_market(code: str) -> str:
 
 
 def search_a_stock(keyword: str) -> list[dict]:
-    """通过 akshare 在线搜索 A 股。"""
+    """通过 akshare 代码名称表搜索 A 股，代码和名称使用同一入口。"""
+    query = str(keyword or "").strip()
+    if not query:
+        return []
     try:
-        from data.stock_fetcher import _without_system_proxy
-        import akshare as ak
-        with _without_system_proxy():
-            df = ak.stock_info_a_code_name()
+        df = _a_stock_directory()
         if df is not None and not df.empty:
-            mask = df["name"].str.contains(keyword, na=False)
+            codes = (
+                df["code"].astype(str).str.extract(r"(\d+)", expand=False)
+                .fillna("").str.zfill(6)
+            )
+            names = df["name"].astype(str)
+            mask = codes.eq(query.zfill(6) if query.isdigit() else query)
+            mask |= names.str.contains(query, na=False, regex=False)
             return [
-                {"code": str(row["code"]), "name": str(row["name"]), "market": "A"}
-                for _, row in df[mask].head(10).iterrows()
+                {
+                    "code": str(codes.loc[index]),
+                    "name": str(row["name"]),
+                    "market": "A",
+                }
+                for index, row in df[mask].head(10).iterrows()
             ]
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("A股代码名称表搜索失败 (%s): %s", query, exc)
     return []
 
 
@@ -88,10 +124,14 @@ def search_a_stock_fallback(keyword: str) -> list[dict]:
         "000002": ["万科", "万科A"],
         "001979": ["招商蛇口"],
     }
+    query = str(keyword or "").strip()
     results = []
     for code, names in FALLBACK.items():
+        if query == code:
+            results.append({"code": code, "name": names[0], "market": "A"})
+            continue
         for name in names:
-            if keyword in name or name in keyword:
+            if query in name or name in query:
                 results.append({"code": code, "name": names[0], "market": "A"})
                 break
     return results
