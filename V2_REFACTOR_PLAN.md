@@ -60,7 +60,13 @@ TradeHelper 2.0 的主流程固定为：
 
 ## 1. V2 分层结构
 
-为避免 V1/V2 逻辑混在一起，2.0 新代码优先放入独立 `tradehelper_v2/` 包。迁移期允许 V2 通过 adapter 调用 V1 数据源、指标、策略和报告资产；V2 主链路稳定后，再统一删除、归档或替换旧目录。
+为避免 V1/V2 逻辑混在一起，2.0 新代码优先放入独立 `tradehelper_v2/` 包。V1 代码只作为参考实现、算法来源、测试样本和回归对照；V2 主链路不直接 import V1 的耦合业务模块。复用的是 V1 中验证过的处理逻辑和算法思想，而不是把 V1 代码换个目录继续运行。
+
+若极少数外部 I/O client 在早期阶段确实需要临时借用，必须满足三条：
+
+1. 只能通过显式 compatibility shim 调用，不能散落在 V2 业务逻辑里。
+2. 必须在阶段计划中写明替换目标和退出条件。
+3. 预测、情景、策略、风控、学习主链路不得依赖 shim。
 
 ```text
 tradehelper_v2/
@@ -70,7 +76,7 @@ tradehelper_v2/
 
   data/
     providers/            # TickFlow/Finnhub/baostock/Nasdaq/yfinance 等原始适配器
-    adapters.py           # V1 数据源适配入口
+    compatibility.py      # 临时 I/O shim；不得承载 V2 业务逻辑
     quality.py            # 数据完整度、时效、上市日期、OHLC 约束
     repository.py         # SQLite 读写边界
 
@@ -123,11 +129,11 @@ tradehelper_v2/
 迁移期旧目录定位：
 
 ```text
-data/                     # V1 数据源资产，供 tradehelper_v2.data.adapters 复用
-alpha/ indicators/         # V1 指标资产，逐步被 tradehelper_v2.features 吸收
-core/ services/            # V1 主流程兼容层，V2 稳定后逐步退出
-strategies/ backtest/      # V1 策略与回测资产，逐步迁移到 V2 strategies/learning
-report/ ui/                # V1 展示资产，V2 报告/UI 稳定后替换
+data/                     # V1 数据源参考实现；V2 数据层重新定义合同后吸收经验
+alpha/ indicators/         # V1 指标参考实现；V2 features 重新实现 point-in-time 快照
+core/ services/            # V1 主流程参考实现；V2 use_cases 不直接依赖
+strategies/ backtest/      # V1 策略与回测参考实现；V2 TradePlan/learning 重新实现
+report/ ui/                # V1 展示参考实现；V2 reports/UI 重新组织
 ```
 
 不再采用以下容易混淆的新旧混放结构：
@@ -820,7 +826,7 @@ venv/bin/python -m pytest tests/ -q
 
 1. 建立 `tests/v2/` 和 synthetic fixture。
 2. 定义数据合同，不接 UI。
-3. 把 V1 数据源通过 adapter 转成 V2 标准对象。
+3. 以 V1 数据源经验为参考，重建 V2 标准数据对象；如短期临时借用外部 client，必须封装在 `tradehelper_v2.data.compatibility` 并写清退出条件。
 4. 建立数据质量测试。
 5. 跑通后再进入特征层。
 

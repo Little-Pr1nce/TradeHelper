@@ -12,6 +12,8 @@
 
 “V2 目标位置”默认指 `tradehelper_v2/` 包下的对应模块；例如 `data/contracts.py` 表示 `tradehelper_v2/data/contracts.py` 或等效的 V2 合同模块。
 
+V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”。V1 位置用于定位参考实现、业务经验和回归样本；V2 实现应通过清晰合同重新编写。若短期必须借用外部 I/O client，只能通过临时 compatibility shim，并要在阶段状态中写明退出条件。
+
 ## 状态说明
 
 | 状态 | 含义 |
