@@ -1,209 +1,90 @@
-<p align="center">
-  <img src="https://img.shields.io/badge/python-3.12+-blue.svg" alt="Python">
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg" alt="Platform">
-  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License">
-</p>
+# TradeHelper 2.0
 
-# TradeHelper
+TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `V2.0` 分支用于重构下一代可信交易决策系统。
 
-基于 Python 3.12 和 Flet 的跨平台股票分析桌面应用，面向 A 股与美股，提供单股研究、组合持仓管理、条件触发交易计划、策略回测、历史预测评估和 HTML/PDF 报告。
+2.0 的目标不是继续堆叠 1.x 功能，而是把系统重建为更清晰的交易决策链：
 
-> 当前基线：2026-06-30。系统的目标是提高决策的一致性、可解释性和风险可控性，不承诺盈利，也不能替代券商成交回报或用户的最终决策。
+```text
+数据事实 -> 特征快照 -> 预测情景 -> 交易计划 -> 风控分级 -> 报告/UI -> 复盘学习
+```
 
-## 当前能力
+## 当前状态
 
-| 模块 | 当前实现 |
-|------|----------|
-| 单股分析（Tab1） | 盘前、盘中、盘后三种模式；技术面、基本面、新闻、策略审计、条件计划和 LLM 研究员解读 |
-| 我的持仓（Tab3） | 真实账户余额、持仓成本、行内编辑、关注列表、组合风险预算、调仓优先级和全宽报告 |
-| 条件化建议 | 买入/加仓、卖出/减仓、持有、失效条件、止损、止盈、最大亏损金额和仓位比例 |
-| 风控官 | A/B/C/D 执行等级，结合事实一致性、数据质量、账户风险、样本外审计和历史期望 |
-| 20 个策略 | A-H、O、I-N，以及 P-T 条件触发与持仓风控覆盖策略 |
-| 回测可信度 | `StrategyDecision -> Order` 统一实盘/回测路径，T+1 撮合、动态滑点、跳空止损、市场规则和 Bootstrap 区间 |
-| 自动优化 | walk-forward 参数候选、超额收益/风险调整双通道、跨窗口确认、20天影子观察、晋升、回滚、负期望恢复候选和后台深度优化 |
-| 历史学习 | 买入与退出信号分开复盘，记录 1/3/5/10/20 日表现、MFE/MAE、策略健康度和形态表现 |
-| 数据质量 | OHLC、样本量、上市日期、实时价新鲜度、新闻时效和因子验证覆盖率共同形成交易闸门 |
-| 跨平台打包 | macOS `.app`、Windows 目录版 `.exe`，Windows 构建包含运行时烟雾测试 |
+- 当前分支：`V2.0`
+- 2.0 实施计划：[V2_REFACTOR_PLAN.md](./V2_REFACTOR_PLAN.md)
+- 2.0 架构入口：[DESIGN.md](./DESIGN.md)
+- V1 能力资产清单：[docs/V1_CAPABILITY_INVENTORY.md](./docs/V1_CAPABILITY_INVENTORY.md)
+- 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-## 快速开始
+## 一以贯之的系统目标
 
-### 环境要求
+无论 1.x 还是 2.0，TradeHelper 都要稳定回答五个问题：
 
-- Python 3.12+
-- macOS、Windows 或 Linux
-- TickFlow API Key：盘中实时行情需要；免费层可获取日 K 线
-- Finnhub API Key：美股新闻、基本面和上市日期建议配置
-- OpenAI 兼容 LLM：当前首次配置要求填写，用于研究员解读
+1. 现在是否可以买、卖、减仓、加仓、持有？
+2. 如果现在不能操作，达到什么条件可以操作？
+3. 如果判断错了，最大亏损是多少，在哪里失效？
+4. 这个建议过去有没有正期望，可信度有多高？
+5. 系统预测的是哪个目标日期、概率和收益区间，过去预测到底准不准？
+
+## 2.0 重构重点
+
+1. 预测模型独立判断 1/3/5/10 日方向概率和收益区间。
+2. 情景规划器把预测结果转成可交易环境。
+3. 交易策略根据情景生成买入、加仓、减仓、卖出、持有或观察计划。
+4. 风控官只负责事实、风险、仓位和历史证据检查。
+5. 历史复盘拆成预测账、策略账和联合账，方便判断到底是哪一层失效。
+6. LLM 作为研究假设生成器，不能直接生成可执行交易指令。
+
+## 不可丢失的 V1 硬约束
+
+2.0 重构必须保留 1.x 开发中反复验证出的关键约束：
+
+1. **A股和美股同等重要**：任何核心能力不能只做美股；数据合同、特征、预测、策略、风控、报告和测试都要覆盖 A 股与美股。
+2. **Tab1 是单股完整研究**：必须覆盖单只股票的行情、技术、基本面、新闻、预测、策略、风控、历史证据和 LLM 观察。
+3. **Tab3 不是 Tab1 批量版**：必须使用用户真实余额、持仓数量、成本、现金和关注列表，额外处理组合仓位、集中度、浮盈浮亏、禁止加仓、减仓/止盈/止损和替换机会。
+4. **数据源原则不能漂移**：盘中实时、延伸时段、基本面、新闻和上市日期必须按市场走规定数据源，并记录来源、时间戳和降级原因。
+5. **实时价不得污染历史日 K**：盘中和延伸时段快照只能进入当前决策快照，不能写成正式收盘价。
+
+## 开发原则
+
+- 从数据层往上重构，每层有独立合同和测试。
+- 数据层未稳定前，不改预测、策略、报告或 UI。
+- 不再依赖“看日志和看完整报告”验证功能正确性。
+- 新功能必须能通过对应层级测试单独验证。
+- V2 新代码优先放入独立 `tradehelper_v2/` 包，V1 目录作为迁移期兼容资产，避免新旧逻辑混在一起。
+
+## 文档关系
+
+| 文件 | 用途 |
+|------|------|
+| [README.md](./README.md) | 项目当前入口，说明目标、状态和常用命令 |
+| [DESIGN.md](./DESIGN.md) | 2.0 架构设计，说明系统是什么、各层职责和边界 |
+| [V2_REFACTOR_PLAN.md](./V2_REFACTOR_PLAN.md) | 2.0 实施计划，说明按什么顺序开发、每层怎么测试和验收 |
+| [docs/V1_CAPABILITY_INVENTORY.md](./docs/V1_CAPABILITY_INVENTORY.md) | V1 能力资产清单，防止 2.0 重构时丢失已验证能力 |
+| `AGENTS.md` | Codex 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
+| `CLAUDE.md` | Claude Code 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
+
+## 常用命令
 
 ```bash
 python3 -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
+source venv/bin/activate
 pip install -r requirements.txt
 python main.py
 ```
 
-Web 模式仍属于实验功能：
-
-```bash
-flet run main.py --web
-```
-
-### 配置位置
-
-配置文件位于系统标准应用目录：
-
-- macOS：`~/Library/Application Support/TradeHelper/config.json`
-- Windows：`%APPDATA%\TradeHelper\config.json`
-- Linux：`${XDG_CONFIG_HOME:-~/.config}/TradeHelper/config.json`
-
-主要字段：`work_dir`、`llm_base_url`、`llm_api_key`、`llm_model`、`stock_token_us`、`stock_token_a`、`news_token_us`、`news_token_a`、`llm_enable_thinking`。
-
-## 四个页面
-
-| 页面 | 定位 |
-|------|------|
-| 分析 | 单只股票的完整研究工作台；生成后进入 K 线和报告全宽阅读区 |
-| 历史报告 | 查询、查看、评分和导出已生成报告 |
-| 我的持仓 | 组合级工作台；管理余额、持仓和关注列表，并生成组合操作手册 |
-| 设置 | 工作目录、LLM、行情和新闻数据源配置 |
-
-Tab3 不是 Tab1 的简单批量版。它额外考虑成本价、浮盈亏、现金、单票集中度、组合相关性、禁止加仓、减仓/止盈/止损和关注股替换机会。
-
-## 三种分析模式
-
-| 模式 | 决策数据 | 输出重点 |
-|------|----------|----------|
-| 盘中 | 正式历史 K 线 + 当次实时 OHLCV 内存快照 | 当日可执行条件；实时快照不会写入 `price_history` |
-| 盘前 | 盘前价 + T-1 历史数据 | 开盘后的触发、止损、失效和两套风险方案 |
-| 盘后 | 当日已完成收盘数据 | 下一交易日的条件计划和历史验证 |
-
-## 策略系统
-
-所有注册策略原生返回 `StrategyDecision`：
-
-```text
-action + execution_level + trigger_price + stop_loss + take_profit
-+ take_profit_mode + take_profit_rule
-+ max_loss_amount + position_pct + invalidation + missing_conditions
-```
-
-回测、Tab1、Tab3 和报告都通过同一个 `decision_to_orders()` 边界生成订单。
-
-| 组别 | 策略 |
-|------|------|
-| A-H | 百分位趋势、均值回归、新闻动量、布林突破、Dual Thrust、海龟 ATR、均线交叉、MA60 趋势 |
-| O | 趋势满仓对标基准 |
-| I-N | 追涨、抄底、回本、趋势回调、关键反转、均线粘合突破 |
-| P-T | MA120 支撑、冲高锁利、持仓风险、反抽失败退出、统一条件触发计划 |
-
-P/T 对所有分析追加条件观察；Q/R/S 只在用户存在真实持仓时加载。覆盖策略由类的 `overlay_scope` 元数据自动发现。
-
-止盈分为三类：L/M 使用固定百分比目标并在回测中真实撮合；趋势/动量类可使用移动止盈；其余策略按反向信号或技术条件退出。只有固定目标计算传统风险收益比，动态/条件退出展示真实规则但不伪造比值。
-
-## 执行等级
-
-| 等级 | 含义 | 默认动作 |
-|------|------|----------|
-| A | 事实成立、风险可控、历史证据支持 | 可执行，但仍由用户确认 |
-| B | 事实成立、风险可控、样本或历史证据不足 | 小仓验证 |
-| C | 事实成立但风险/历史期望不支持 | 仅观察 |
-| D | 数据冲突、实时价失效或事实不可验证 | 驳回 |
-
-A 级买入必须有与当前股票和策略匹配的正期望历史证据。硬止损和风险减仓不会因为买入样本不足而被阻止。
-
-## Alpha 模型
-
-技术面由 RSI、DIF、MACD 柱、布林 `%B`、K/D/J 七个因子组成，使用滚动标准化、`tanh` 压缩和 IC/IR 验证。未知 `?` 级因子保留研究先验权重，但报告会显示“未验证”；验证覆盖率低于 50% 时降低执行可信度和仓位上限。
-
-有基本面时，最新时点使用行情自适应权重：
-
-| 行情 | 技术 | 风格 | 基本面 | 新闻 |
-|------|-----:|-----:|-------:|-----:|
-| 强趋势高波 | 40% | 5% | 30% | 25% |
-| 慢涨/弱趋势 | 38% | 10% | 27% | 25% |
-| 震荡/过渡 | 35% | 15% | 25% | 25% |
-
-历史回测只使用当时可得的技术面和衰减新闻得分；当前基本面、盘口和实时快照只影响最新决策点，避免把今天的信息写回过去。
-
-## 数据源
-
-| 数据 | A 股 | 美股 |
-|------|------|------|
-| 日 K 线 | TickFlow | TickFlow |
-| 盘中实时价 | TickFlow | TickFlow |
-| 盘前/盘后价 | 不适用 | Nasdaq.com，失败后 yfinance |
-| 基本面 | baostock，失败后 akshare/LLM | Finnhub，失败后 yfinance/akshare/百度/LLM |
-| 新闻 | 东方财富（akshare） | Finnhub 个股新闻 + 市场新闻 |
-| 上市日期 | baostock | Finnhub `profile2` |
-
-上市日期会限制历史拉取和缓存读取范围，上市前数据不参与分析。Tab1 与 Tab3 共用新闻缓存，但各自执行新鲜度检查和主动刷新，不互相依赖。新闻 TTL 按时段区分：盘中约 30 分钟、盘前约 1 小时、盘后约 6 小时。
-
-Tab1/Tab3 的美股盘前和盘后报价直接走 Nasdaq.com，不先消耗 TickFlow 额度，也不会失败后回退旧 TickFlow 价；常规盘中只使用 TickFlow，Tab3 多股票报价使用批量接口，一批股票只产生一次行情请求。批量缺价会进入逐股数据质量阻断，不会用延伸时段价格冒充常规盘中价格。
-
-## 系统架构
-
-```text
-UI (ui/)
-  -> Services (services/analysis_service.py, portfolio_service.py)
-    -> Core (pipeline, signal_check, audit, strategy_pool, data_quality)
-      -> Engines (alpha, indicators, strategies, backtest)
-        -> Support (data, report, config, utils)
-```
-
-前台使用已晋升正式参数快速生成报告；几十组候选参数的 walk-forward 深度优化在报告返回后由后台单线程执行，避免 Tab1/Tab3 同步等待。
-
-## 数据库
-
-SQLite 使用 WAL 模式，当前 20 张表：
-
-`stocks`、`price_history`、`intraday_price_history`、`reports`、`news_sentiment`、`news_refresh_state`、`holdings`、`watchlist`、`account_balance`、`forecast_log`、`feature_context_snapshots`、`forecast_model_versions`、`trade_plan_log`、`joint_oof_runs`、`prediction_log`、`bt_variant_cache`、`per_stock_params`、`strategy_param_candidates`、`deep_optimization_runs`、`research_observation_log`。
-
-数据库初始化会自动建表和执行兼容迁移。预测与研究员观察使用稳定 `event_key` 去重，重复运行同一事件不会虚增学习样本。
-
-## 测试
-
-项目测试文件可由 pytest 运行，也都支持直接执行：
+完整测试：
 
 ```bash
 venv/bin/python -m pytest tests/ -q
-
-# 与打包环境一致的无 pytest 入口
-for f in tests/test_*.py; do venv/bin/python "$f" || exit 1; done
 ```
 
-Tab3 历史评估提供独立的美股/A股切换，并纳入该市场全部 Tab1/Tab3 预测；即使股票尚未录入组合，也会展示已验证、待验证和不可验证数量。
+2.0 分层测试会逐步放在：
 
-当前基线为 **14 个测试文件、249 个测试通过**，覆盖数据源边界、交易所会话日、污染缓存整段重建、新闻/基本面历史时点快照、Alpha 因果性、四类受控预测 Challenger、标签成熟隔离、双窗口 OOF、配对时间块 Bootstrap/ECE/区间覆盖晋升、概率收益同源分布、多周期联合策略嵌套 OOF、同版本漂移、Decision/Broker 成交分账、逐股 Champion 与在线回滚、证据质量跨日加权置信区间、薄样本闸门、分钟证据来源优先级、旧库迁移和A股盘中T+1、20 个策略、Decision-first 路径、LLM形态命中率分账、撮合、策略审计、组合功能和 PDF 报告排版。
-
-## 打包
-
-```bash
-bash scripts/build_macos.sh       # dist/mac/TradeHelper.app
-scripts\build_windows.bat         # dist\win\TradeHelper\TradeHelper.exe
+```text
+tests/v2/
 ```
 
-Windows GitHub Actions 使用 `.github/workflows/build-windows.yml`。本地 Windows 脚本和远程工作流都会在产物上传前执行打包运行时烟雾测试。macOS 打包流程保持独立，不受 Windows hidden imports 调整影响。
+## 历史资料
 
-## 文档
-
-| 文件 | 用途 |
-|------|------|
-| [DESIGN.md](./DESIGN.md) | 当前架构、数据流、核心约束和扩展点 |
-| [README_BACKTEST.md](./README_BACKTEST.md) | 回测、审计、撮合和参数生命周期 |
-| [UPGRADE_PLAN.md](./UPGRADE_PLAN.md) | 五阶段可信交易建议升级主线和完成度 |
-| [AGENTS.md](./AGENTS.md) | 本仓库编码代理工作约定 |
-| [CLAUDE.md](./CLAUDE.md) | Claude Code 项目上下文 |
-| [OPTIMIZATION_REPORT.md](./OPTIMIZATION_REPORT.md) | 早期审计历史及问题处理状态，不代表当前代码现状 |
-
-## 当前未完成重点
-
-- **P0/P1 可信度升级已落地**：新闻/基本面按真实抓取时点冻结，策略样本按独立交易日和证据质量折算；预测 Challenger 已包含相似行情、正则化多分类、平滑浅层概率树和集成模型，只有双窗口 OOF 优于基准才晋升。联合 OOF 提供逐事件审计和漂移降级，LLM 形态命中率与系统规则分账。快照和分钟证据仍需随真实运行自然积累，覆盖不足时不会强行参与训练。详见 [UPGRADE_PLAN.md](./UPGRADE_PLAN.md)。
-- LLM 观察候选的更多形态模板、命中率图表和 UI 明细查询。
-- 历史预测评估面板的全局筛选、钻取和图表化。
-- 参数影子观察已落地；仍需让真实样本持续覆盖更多股票和市场状态。
-- 可靠的停复牌/ST 数据，以及用户具备订阅时可选的美股授权 Level 2 适配器。
-- Web 版完善和打包体积优化。
-
-详细完成度以 [UPGRADE_PLAN.md](./UPGRADE_PLAN.md) 为准。
-
-MIT © TradeHelper
+1.x 的 README、设计文档、升级计划、回测说明和优化审计已归档到 `docs/archive/v1/`。这些文件只用于追溯，不代表 2.0 当前设计。
