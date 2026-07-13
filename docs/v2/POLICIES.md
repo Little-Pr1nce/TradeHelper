@@ -64,8 +64,10 @@ TRADEHELPER_LIVE_TESTS=1 venv/bin/python -m pytest tests/v2/integration/test_liv
 | 正式历史日 K | TickFlow 前复权 | 无 | 返回 unavailable，不静默换源 |
 | 盘中实时 | TickFlow | 无 | 该股票实时决策阻断，其他股票继续 |
 | 盘前 | 无连续盘前实时价 | 无 | 使用 T-1 正式收盘生成条件计划，不伪造报价 |
-| 基本面 | baostock | akshare | 都失败则缺失，不调用 LLM 补值 |
+| 基本面 | baostock | akshare | 按字段语义补充；都失败则缺失，不调用 LLM 补值 |
 | 新闻 | 东方财富（经 akshare 标准化） | 无独立次级源 | 空结果按负缓存 TTL 处理 |
+
+A股基本面不是“baostock 整包成功后停止”的粗粒度 fallback。估值、毛利率、净利润同比和负债率优先使用 baostock；`MBRevenue` 只保留为 `main_business_revenue` 原始事实，不得推算 canonical 营业收入同比。官方加权平均 ROE 与营业收入同比使用东方财富财务指标（经 akshare）补充，并保留字段来源、报告期与公告时间。不同会计定义不得仅因字段名称相似而互相覆盖。
 
 ### 3.2 美股
 
@@ -78,6 +80,8 @@ TRADEHELPER_LIVE_TESTS=1 venv/bin/python -m pytest tests/v2/integration/test_liv
 | 盘前/盘后延伸报价 | Nasdaq.com | yfinance `prepost=True` | 都失败则延伸报价不可用 |
 | 基本面 | Finnhub | yfinance -> akshare -> 百度可验证页面 | 每个字段保留来源；LLM 不能补值 |
 | 新闻 | Finnhub 个股新闻 + 市场新闻 | 无 | 空结果按负缓存 TTL 处理 |
+
+美股 Finnhub 原始 payload 即使覆盖四类名字，也不能仅凭模糊字段匹配判定 canonical 基本面完整。缺少已注册的净利润增长字段时继续使用 yfinance 按字段补充；`debtToEquity` 不等于债务/资产比，缺少可靠 `debt_ratio` 时保持缺失。
 
 硬规则：
 

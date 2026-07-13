@@ -84,13 +84,13 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
-| 技术指标与多周期事实 | 收益、均线、趋势、波动、成交量、支撑压力的客观输入 | `indicators/technical.py`, `alpha/scoring.py` | `features/technical.py` | 已规划，待迁移 | `tests/v2/test_feature_technical.py` |
-| 盘中价与正式日K隔离 | 实时条件不污染训练历史 | `core/pipeline.py` | `features/snapshot.py` | 已规划，待迁移 | `tests/v2/test_feature_point_in_time.py` |
-| 新闻情绪时点对齐 | 历史预测不能看到后来抓取的新闻 | `indicators/sentiment.py`, `align_finbert_scores` | `features/news.py` | 已规划，待迁移 | `tests/v2/test_feature_point_in_time.py` |
-| 基本面字段归一与时点对齐 | 不同来源单位一致且不回填未来财报 | `alpha/fundamental.py` | `features/fundamentals.py` | 已规划，待迁移 | `tests/v2/test_feature_degradation.py` |
-| 缺失不填0/中性值 | 防止缺数据被模型误认为真实中性 | V1数据质量修复经验 | `FeatureStatus/FeatureValue` | 已规划，待迁移 | `tests/v2/test_feature_degradation.py` |
-| 同一FeatureSnapshot供预测和策略使用 | 防止报告解释与实际计算两套事实 | V1 pipeline散布计算 | `features/snapshot.py` | 已规划，待迁移 | `tests/v2/test_feature_contracts.py` |
-| 特征快照稳定哈希和持久化 | 支持OOF复现、审计和版本回滚 | V1无统一实现 | `features/store.py` | 已规划，待迁移 | `tests/v2/test_feature_store.py` |
+| 技术指标与多周期事实 | 收益、均线、趋势、波动、成交量、支撑压力的客观输入 | `indicators/technical.py`, `alpha/scoring.py` | `features/technical.py` | 已迁移 | `tests/v2/test_feature_technical.py` |
+| 盘中价与正式日K隔离 | 实时条件不污染训练历史 | `core/pipeline.py` | `features/snapshot.py` | 已迁移 | `tests/v2/test_feature_point_in_time.py` |
+| 新闻情绪时点对齐 | 历史预测不能看到后来抓取的新闻 | `indicators/sentiment.py`, `align_finbert_scores` | `features/news.py` | 已迁移 | `tests/v2/test_feature_point_in_time.py` |
+| 基本面字段归一与时点对齐 | 不同来源单位一致且不回填未来财报 | `alpha/fundamental.py` | `features/fundamentals.py` | 已迁移 | `tests/v2/test_feature_degradation.py` |
+| 缺失不填0/中性值 | 防止缺数据被模型误认为真实中性 | V1数据质量修复经验 | `FeatureStatus/FeatureValue` | 已迁移 | `tests/v2/test_feature_degradation.py` |
+| 同一FeatureSnapshot供预测和策略使用 | 防止报告解释与实际计算两套事实 | V1 pipeline散布计算 | `features/snapshot.py` | 已迁移 | `tests/v2/test_feature_contracts.py` |
+| 特征快照稳定哈希和持久化 | 支持OOF复现、审计和版本回滚 | V1无统一实现 | `features/store.py` | 已迁移 | `tests/v2/test_feature_store.py` |
 | Final_Score边界重划 | 保留V1经验但不把交易观点冒充数据事实 | `alpha/scoring.py` | V2-3候选模型/后续策略，不进入V2-2 | 暂缓至后续层 | `tests/v2/test_forecast_*` |
 
 ## P0 策略与风控资产

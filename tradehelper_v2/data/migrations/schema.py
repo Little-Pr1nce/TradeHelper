@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -300,6 +300,29 @@ ON provider_refresh_queue(status, next_retry_at, created_at);
 UPDATE news_snapshots SET available_at=fetched_at WHERE available_at < fetched_at;
 """.strip()
 
+_SCHEMA_V5_SQL = """
+CREATE TABLE IF NOT EXISTS feature_snapshots (
+    instrument_key TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    cutoff_at TEXT NOT NULL,
+    latest_bar_date TEXT,
+    feature_set_version TEXT NOT NULL,
+    evidence_mode TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
+    feature_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    PRIMARY KEY (instrument_key, mode, cutoff_at, feature_set_version, input_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_features_lookup
+ON feature_snapshots(instrument_key, mode, cutoff_at DESC, feature_set_version);
+""".strip()
+
 
 def schema_checksum() -> str:
     return sha256(_SCHEMA_SQL.encode("utf-8")).hexdigest()
@@ -315,6 +338,10 @@ def schema_v3_checksum() -> str:
 
 def schema_v4_checksum() -> str:
     return sha256(_SCHEMA_V4_SQL.encode("utf-8")).hexdigest()
+
+
+def schema_v5_checksum() -> str:
+    return sha256(_SCHEMA_V5_SQL.encode("utf-8")).hexdigest()
 
 
 def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, checksum: str) -> None:
@@ -344,4 +371,5 @@ def apply_schema(connection: sqlite3.Connection) -> None:
     _apply_migration(connection, 2, _SCHEMA_V2_SQL, schema_v2_checksum())
     _apply_migration(connection, 3, _SCHEMA_V3_SQL, schema_v3_checksum())
     _apply_migration(connection, 4, _SCHEMA_V4_SQL, schema_v4_checksum())
+    _apply_migration(connection, 5, _SCHEMA_V5_SQL, schema_v5_checksum())
     connection.commit()

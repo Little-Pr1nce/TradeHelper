@@ -1163,11 +1163,25 @@ venv/bin/python -m pytest tests/ -q
 - 真实源验证：`TRADEHELPER_LIVE_TESTS=1 TRADEHELPER_LIVE_SETTINGS_PATH=... venv/bin/python -m pytest tests/v2/integration/test_live_providers.py -q -rs` -> `2 passed in 23.42s`。AAPL/600519 真实组合链路与美股 yfinance 基本面 fallback 均通过。
 - 剩余风险：免费 Provider 本身仍可能临时限频、修订或不可用；V2-1 已把它们建模为可审计的状态、持久化续跑或明确降级，而不是伪造数据。按阶段纪律，开始 V2-2 前仍需先完成复审并补充 V2-2 精确合同和 Golden Cases。
 
+### 2026-07-13 V2-2 完成：特征层
+
+- 新增 `FeatureValue`、`FeatureInputs` 和 `FeatureSnapshot` 不可变合同；以 canonical JSON + SHA-256 固定输入与特征哈希，`generated_at` 不影响复现结果，并显式标记 `observed_snapshot` 或 `reconstructed_history` 证据等级。
+- 实现纯本地的 closed technical、current market、news 和 fundamentals 特征。正式日K按交易模式和截止时点过滤；新鲜 quote 只进入 `current.*`；新闻按 `published_at + available_at`、基本面按快照和字段可见时间过滤，缺失/失败/样本不足均保留为结构化状态而非填充 0 或中性值。
+- 实现 A股/美股共用公式，以及严格的 `source + raw_field + unit -> canonical_name + scale` 基本面注册表；未登记字段或单位明确缺失。`observed_snapshot` 必须由受信任的完整输入证据验证器确认，普通历史重建不能自行声称为观察快照；无市场/行业事实时固定产生 `context.market/context.industry = missing/CONTEXT_INPUT_UNAVAILABLE`。
+- schema 升至 migration 5，新增 `feature_snapshots` 与幂等 `FeatureStore`；相同快照不重复写入，确定性冲突保留原记录并进入 quarantine。
+- 吸收 V1 资产：多周期技术事实、实时价与收盘日K隔离、新闻/基本面点时可见性、缺失不伪装成中性值。`Final_Score` 和买卖判断仍按边界留在后续阶段。
+- 审计修复：真实 Finnhub/yfinance/baostock/akshare payload 现在必须经生产 parser 后才能通过 F08；修复美股基本面原始字段和缺失单位无法进入 canonical 特征的问题，并移除 `debtToEquity -> debt_ratio` 的错误语义映射。未知字段和未知单位仍保持缺失。
+- 审计修复：canonical 基本面不再依赖字段名排序，而是显式使用“canonical 指标 + 供应商 + 期间字段”优先级。美股选择 Finnhub TTM/MRQ 字段并保留 yfinance 有效降级；A股按字段组合 baostock 与东方财富经 akshare 的事实。baostock `MBRevenue` 与发行人营业收入口径不一致，不再推算 `revenue_growth_yoy`；A股 canonical 加权 ROE 和营业收入同比改用公告口径字段。
+- 审计修复：FeatureBuilder 按当前模式和截止时点重新判断 quote 新鲜度；横盘 RSI 固定为中性50；无可见新闻时评分覆盖率保持缺失；重复交易日直接违反输入合同；`generated_at` 记录实际计算时间；FeatureStore 默认绑定明确特征版本。
+- 真实基本面复核（2026-07-13）：测试只在内存中读取 V1 Finnhub token，不输出凭据且不形成 V2 生产依赖。AAPL canonical 为 PE 37.7827、PB 43.4893、PS 10.2587、TTM ROE 146.69%、毛利率 47.86%、TTM 营收同比 12.76%，Finnhub 缺失的净利润同比由 yfinance 补充为 21.8%；网页同期 PE/PB/PS 约 38.22/43.43/10.26，毛利率 47.86%，价格型估值差异来自取价时点。网页 ROE 为 141.47%，与 Finnhub TTM ROE 存在公式/平均权益口径差，系统保留 Finnhub 来源和期间，不宣称两者完全相同。没有可靠债务/资产比时保持缺失。600519 canonical 为 PE 18.301812、PB 5.588297、PS 8.635018、年报加权 ROE 32.53%、毛利率 91.1796%、营业收入同比 -1.2001%、净利润同比 -4.5049%、负债率 16.4154%；其中 ROE、营业收入同比和净利润同比与公司2025年年报披露的 32.53%、-1.21%、-4.53% 对齐。
+- 验证：`venv/bin/python -m pytest tests/v2/ -q -rs` -> `102 passed, 3 skipped`；`venv/bin/python -m pytest tests/ -q -rs` -> `362 passed, 3 skipped`。三个 skip 是默认关闭的真实网络 smoke；显式使用 V1 本地凭据运行 `TRADEHELPER_LIVE_TESTS=1 TRADEHELPER_LIVE_USE_V1_SETTINGS=1 venv/bin/python -m pytest tests/v2/integration/test_live_providers.py -vv -rs` -> `3 passed in 44.69s`，覆盖 AAPL Finnhub/Nasdaq/新闻、600519 baostock/TickFlow/新闻、yfinance 基本面降级与 akshare 明确年报字段。
+- 剩余风险：V2-1 的基础事实没有逐次修订历史，因此从当前 canonical 数据回放的历史快照必须保持 `reconstructed_history`；新闻 FinBERT 标签仅在已有事实提供时参与情绪均值；市场/行业上下文尚无权威输入，仍明确缺失。V2-3 之前需要复审预测层合同，不能直接把当前缺失特征编码或填补。
+
 | 阶段 | 状态 | 说明 |
 |------|------|------|
 | V2-0 测试基础设施 | 已完成 | Golden G00-G04、架构边界、冻结时钟、双市场 fixture 与性能基线已落地 |
 | V2-1 数据层 | 已完成 | Golden G10-G29/G30-G63、Provider fixture、路由、时点语义、质量、独立 repository、持久化配额续跑、并发、日K跨源漂移审计及真实 Provider smoke 均已通过 |
-| V2-2 特征层 | 已规划，待实现 | `docs/v2/V2_2_FEATURES.md` 已固定合同、公式、F00-F13、双市场与性能验收；当前只授权此阶段 |
+| V2-2 特征层 | 已完成 | FeatureSnapshot、F00-F13、双市场点时特征、migration 5/FeatureStore、架构边界、性能及全量回归已通过 |
 | V2-3 预测层 | 未开始 | 等 FeatureSnapshot 稳定 |
 | V2-4 情景层 | 未开始 | 等 ForecastResult V2 稳定 |
 | V2-5 策略层 | 未开始 | 等 TradingScenario 稳定 |
@@ -1179,16 +1193,6 @@ venv/bin/python -m pytest tests/ -q
 | V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
 | V2-12 迁移/端到端/发布 | 未开始 | 每层单测通过后执行完整矩阵与跨平台烟雾 |
 
-## 16. 当前下一步：V2-2 特征层
+## 16. 当前下一步：V2-3 预测层复审
 
-实现者必须先阅读 [docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md)，再按以下顺序开发：
-
-1. `FeatureValue/FeatureInputs/FeatureSnapshot` 合同、canonical序列化和稳定哈希。
-2. closed技术特征及手工标准答案；不得直接import V1指标模块。
-3. 盘前/盘中quote与closed训练特征物理隔离。
-4. 新闻/基本面point-in-time过滤、字段白名单归一化和缺失诊断。
-5. schema migration 5 与幂等 `FeatureStore`。
-6. F00-F13、A股/美股对称、架构边界、性能、V2全量和全项目回归。
-7. 更新计划与能力清单后停止，等待V2-3复审。
-
-V2-2不得实现预测概率、OOF模型选择、情景、策略、风控、组合决策、LLM或UI。
+V2-2 已完成并按阶段纪律停止。开始 V2-3 前必须另行制定预测层的精确合同、模型注册、OOF 无泄漏规则、诊断标准和 Golden Cases；不得把特征层缺失值解释为模型默认值，也不得提前实现情景、策略、风控、组合决策、LLM 或 UI。

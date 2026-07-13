@@ -116,6 +116,7 @@ FeatureInputs:
 ```
 
 输入必须已经通过 V2-1 合同。特征层仍需再次执行截止时点过滤，不能相信调用方已经过滤。
+同一输入不得包含重复 `trading_date`；重复正式日K属于合同冲突，不能排序后继续计算。
 
 ### 4.4 FeatureSnapshot
 
@@ -140,6 +141,7 @@ FeatureSnapshot:
 - 使用 V2 canonical JSON 和 SHA-256。
 - `input_hash` 包含过滤后的 bars/news/fundamentals/quote、模式、截止时点和质量报告，不包含 `generated_at`。
 - `feature_hash` 包含 `input_hash + feature_set_version + 排序后的 FeatureValue`，不包含 `generated_at`。
+- `generated_at` 是实际构建时间，不得使用历史 `cutoff_at` 冒充快照生成时间。
 - 相同输入在不同进程产生相同哈希；事实、截止时点、模式或算法版本变化必须改变相应哈希。
 
 ## 5. 截止时点规则
@@ -164,10 +166,25 @@ FeatureSnapshot:
 - 每个字段还必须满足 `published_at is None or published_at <= cutoff_at`。
 - `period_end` 不是可见时间，不能仅凭报告期把后来抓到的财务数字回填历史。
 - 同一字段使用 V2-1 已选择并记录的来源，不在特征层再次联网补值。
+- 当前实时分析应在本轮数据刷新完成后冻结 `cutoff_at`；不得把分析开始时间直接复用为特征截止时间，否则几秒后返回且刚被首次观察到的事实会被正确判为不可见。历史回放仍严格使用历史截止时点，不能放宽此规则。
+
+基本面 canonical 化必须显式按“canonical 指标 + 来源 + 原始字段/期间”排序，不能依赖 `Mapping` 的字段顺序或字段名排序：
+
+| canonical 指标 | 美股优先定义 | A股优先定义 |
+|------|------|------|
+| `pe_ttm/pb_mrq/ps_ttm` | Finnhub TTM/MRQ；yfinance 备用 | baostock 交易日估值 |
+| `roe` | Finnhub `roeTTM` | 东方财富经 akshare 的年报加权平均 ROE；baostock `roeAvg` 仅为次级简单平均口径 |
+| `gross_margin` | Finnhub `grossMarginTTM` | baostock 年报毛利率 |
+| `revenue_growth_yoy` | Finnhub `revenueGrowthTTMYoy` | 东方财富经 akshare 的年报营业收入同比；不得用 baostock `MBRevenue` 自行推算 |
+| `net_profit_growth_yoy` | Finnhub TTM；无已注册字段时由 yfinance `earningsGrowth` 补充 | baostock 年报净利润同比 |
+| `debt_ratio` | Finnhub 债务/资产字段，缺失时保持缺失 | baostock 年报负债率 |
+
+同一来源内也必须按期间优先，例如 Finnhub `peTTM > peNormalizedAnnual`、`pb > pbQuarterly`、`roeTTM > roeRfy`、`grossMarginTTM > grossMarginAnnual`。只有候选值通过单位、发布时间和数值有效性检查后才参与排序；主来源值无效时允许选择有效备用值。
 
 ### 5.4 实时快照
 
-- 只有 `freshness_status=fresh` 且 `observed_at <= cutoff_at + 5分钟` 才生成 `current.*`。
+- FeatureBuilder 必须按当前 `mode + cutoff_at + observed_at` 重新判断报价新鲜度，不能沿用缓存中相对于旧截止时点计算的 `fresh` 状态。
+- 只有重新判断为 `freshness_status=fresh` 且 `observed_at <= cutoff_at + 5分钟` 才生成 `current.*`；盘中最大年龄15分钟，其余模式45分钟。
 - stale/future/missing_timestamp 报价生成对应缺失状态，不能退回抓取时间。
 - `current.*` 不进入 `input_hash` 的 closed-only 子指纹，但必须进入完整 `input_hash` 和 `feature_hash`。
 
@@ -223,6 +240,7 @@ FeatureSnapshot:
 | `news.scored_ratio_30d` | 有有效FinBERT标签和分数的新闻占比 |
 
 情绪符号：positive=`+score`、negative=`-score`、neutral=`0`。权重为 `relevance(缺失时1.0) * exp(-ln(2)*age_hours/24)`；分母为权重和。没有可评分新闻时情绪字段为 `missing`，不是0。
+没有可见新闻时 `scored_ratio_30d` 为 `missing`；这是未定义的 `0/0`，不能写成0。新闻计数字段仍为0。
 
 ### 6.4 Fundamentals
 
@@ -243,6 +261,8 @@ fund.debt_ratio
 
 - 建立 `source + raw_field -> canonical_name + scale + unit` 白名单注册表。
 - Finnhub百分数、baostock小数、yfinance小数和akshare字段必须按白名单转换；禁止用“绝对值大于1就除100”的猜测。
+- F08 必须至少有一组测试从真实脱敏 Provider payload 经生产 parser 进入 FeatureSnapshot；不得只构造已经标准化的 `FundamentalValue`。
+- `debtToEquity` 不是 `debt/assets`，不得直接映射为 `fund.debt_ratio`。
 - 估值负值保留为事实，不自动改成缺失；是否可用于模型由V2-3决定。
 - 历史估值分位需要历史 point-in-time 快照；V2-2 没有足够历史时保持缺失，不沿用V1默认50%。
 - 不生成 `Fundamental_Score`、`Tech_Normalized_Score` 或 `Final_Score`。
@@ -321,6 +341,8 @@ period_end为上一季度、available_at晚于cutoff的字段不可见；availab
 
 用Finnhub百分数、baostock小数、yfinance小数fixture得到相同canonical ratio；未知字段/未知单位必须missing并记录原因。
 
+F08 还必须覆盖乱序字段和混合来源：Finnhub TTM/MRQ 字段不得被 Annual/Quarterly 字段或 yfinance 覆盖；A股加权 ROE/营业收入同比选择 akshare 明确定义字段，估值/毛利率/净利润同比/负债率保持 baostock 优先。baostock `MBRevenue` 与发行人营业收入不一致时不得生成 `revenue_growth_yoy`。
+
 ### F09 A股/美股合同对称
 
 600519与AAPL使用相同OHLCV synthetic序列时，所有closed技术特征数值相同；差异只能来自输入事实，不允许按market分叉公式。
@@ -331,7 +353,7 @@ SPCX式新股只有18根bar时仍生成快照，但长期特征不足；零成�
 
 ### F11 FeatureStore
 
-幂等写入不增加行数；冲突不覆盖；按instrument/mode/cutoff可取回相同合同对象；migration 5重复执行安全。
+幂等写入不增加行数；冲突不覆盖；按instrument/mode/cutoff/feature_set_version可取回相同合同对象；migration 5重复执行安全。FeatureStore 默认读取其绑定的特征版本，不能隐式跨版本选择。
 
 ### F12 架构边界
 

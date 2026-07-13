@@ -542,7 +542,19 @@ class DataRefreshService:
                 assess_fundamental_quality(snapshots[0]).quality_status
                 if snapshots else QualityStatus.BLOCKED
             )
-            if current_quality is not QualityStatus.OK:
+            a_share_semantic_supplement = (
+                instrument.market is Market.A
+                and bool(snapshots)
+                and not {"weighted_roe_annual", "revenue_yoy_annual"}.issubset(snapshots[0].fields)
+            )
+            us_growth_supplement = (
+                instrument.market is Market.US
+                and bool(snapshots)
+                and not {
+                    "netIncomeGrowthTTMYoy", "netIncomeGrowthQuarterlyYoy", "net_profit_yoy",
+                }.intersection(snapshots[0].fields)
+            )
+            if current_quality is not QualityStatus.OK or a_share_semantic_supplement or us_growth_supplement:
                 for fallback_loader in fallback_loaders:
                     fallback = self._call_instrument(fallback_loader, instrument, now)
                     attempts.extend(fallback.attempts)

@@ -257,18 +257,17 @@ class _BaostockTransport:
                 period_end = date(report_year, 12, 31)
                 add("roe", current_profit.get("roeAvg"), "ratio", period_end)
                 add("gross_margin", current_profit.get("gpMargin"), "ratio", period_end)
-                add("revenue", current_profit.get("MBRevenue"), "CNY", period_end)
+                # MBRRevenue is baostock's main-business/total-revenue-style
+                # measure.  It does not reconcile to the issuer's reported
+                # operating revenue for every company, so it must not be used
+                # to derive the canonical operating-revenue growth feature.
+                add("main_business_revenue", current_profit.get("MBRevenue"), "CNY", period_end)
                 balance_rows = self._rows(bs.query_balance_data(code=symbol, year=report_year, quarter=4))
                 growth_rows = self._rows(bs.query_growth_data(code=symbol, year=report_year, quarter=4))
                 if balance_rows:
                     add("debt_ratio", balance_rows[-1].get("liabilityToAsset"), "ratio", period_end)
                 if growth_rows:
                     add("net_profit_yoy", growth_rows[-1].get("YOYNI"), "ratio", period_end)
-                previous_rows = self._rows(bs.query_profit_data(code=symbol, year=report_year - 1, quarter=4))
-                current_revenue = self._number(current_profit.get("MBRevenue"))
-                previous_revenue = self._number(previous_rows[-1].get("MBRevenue")) if previous_rows else None
-                if current_revenue is not None and previous_revenue not in (None, 0):
-                    add("revenue_yoy", (current_revenue - previous_revenue) / previous_revenue, "ratio", period_end)
             return {"fields": fields}
         return self._query(callback)
 
@@ -277,15 +276,55 @@ class _AkshareTransport:
     def fundamentals(self, code: str) -> dict[str, Any]:
         import akshare as ak
 
-        frame = (
-            ak.stock_financial_analysis_indicator(symbol=code)
-            if code.isdigit()
-            else ak.stock_financial_us_analysis_indicator_em(symbol=code, indicator="年报")
-        )
+        if code.isdigit():
+            market_code = f"{code}.SH" if code.startswith(("5", "6", "9")) else f"{code}.SZ"
+            frame = ak.stock_financial_analysis_indicator_em(symbol=market_code, indicator="按报告期")
+            rows = _records(frame)
+            annual_rows = [
+                row for row in rows
+                if "年报" in str(row.get("REPORT_DATE_NAME") or row.get("REPORT_TYPE") or "")
+            ]
+            candidates = annual_rows or rows
+            if not candidates:
+                return {}
+            latest = max(candidates, key=lambda row: str(row.get("REPORT_DATE") or "")[:10])
+            period_end = str(latest.get("REPORT_DATE") or "")[:10] or None
+            published_at = latest.get("NOTICE_DATE") or latest.get("UPDATE_DATE")
+            fields: dict[str, dict[str, Any]] = {}
+            for source, target in (
+                ("ROEJQ", "weighted_roe_annual"),
+                ("XSMLL", "gross_margin_annual"),
+                ("TOTALOPERATEREVETZ", "revenue_yoy_annual"),
+                ("PARENTNETPROFITTZ", "net_profit_yoy_annual"),
+                ("ZCFZL", "debt_ratio_annual"),
+            ):
+                value = latest.get(source)
+                if value is None or isinstance(value, bool):
+                    continue
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    continue
+                fields[target] = {
+                    "value": number,
+                    "unit": "percent",
+                    "period_end": period_end,
+                    "published_at": published_at,
+                    "source": "akshare",
+                }
+            return {"fields": fields}
+
+        frame = ak.stock_financial_us_analysis_indicator_em(symbol=code, indicator="年报")
         rows = _records(frame)
         if not rows:
             return {}
-        latest = rows[-1]
+        latest = max(
+            rows,
+            key=lambda row: str(
+                row.get("日期") or row.get("date") or row.get("报告期")
+                or row.get("REPORT_DATE") or row.get("REPORT_DATE_NAME") or ""
+            )[:10],
+        )
         raw_period = (
             latest.get("日期") or latest.get("date") or latest.get("报告期")
             or latest.get("REPORT_DATE") or latest.get("REPORT_DATE_NAME")

@@ -1,10 +1,12 @@
 from datetime import date, datetime, timedelta, timezone
+import sys
+from types import SimpleNamespace
 
 from tradehelper_v2.contracts import DailyBarsRequest, FreshnessStatus, FundamentalSnapshot, FundamentalValue, InstrumentId, ProviderResult, ProviderStatus, StockMetadata
 from tradehelper_v2.contracts.enums import DecisionMode, Market, TradingSession
 from tradehelper_v2.data import DataProviders, DataRefreshService
 from tradehelper_v2.data.cache import DataCache
-from tradehelper_v2.data.composition import _TickFlowTransport
+from tradehelper_v2.data.composition import _AkshareTransport, _TickFlowTransport
 from tradehelper_v2.data.repository import SQLiteRepository
 from tradehelper_v2.config.settings import V2Settings
 
@@ -26,6 +28,44 @@ def test_tickflow_daily_buffers_exclusive_start_boundary(tmp_path) -> None:
 
     expected = datetime(2026, 6, 30, tzinfo=timezone.utc)
     assert captured["start_time"] == int(expected.timestamp() * 1000)
+
+
+def test_akshare_a_fundamentals_select_latest_annual_report_and_explicit_fields(monkeypatch) -> None:
+    rows = [
+        {
+            "REPORT_DATE": "2024-12-31 00:00:00", "REPORT_DATE_NAME": "2024年报",
+            "NOTICE_DATE": "2025-04-01 00:00:00", "ROEJQ": 30.0,
+            "XSMLL": 90.0, "TOTALOPERATEREVETZ": 10.0,
+            "PARENTNETPROFITTZ": 8.0, "ZCFZL": 20.0,
+        },
+        {
+            "REPORT_DATE": "2026-03-31 00:00:00", "REPORT_DATE_NAME": "2026一季报",
+            "NOTICE_DATE": "2026-04-30 00:00:00", "ROEJQ": 99.0,
+            "XSMLL": 99.0, "TOTALOPERATEREVETZ": 99.0,
+            "PARENTNETPROFITTZ": 99.0, "ZCFZL": 99.0,
+        },
+        {
+            "REPORT_DATE": "2025-12-31 00:00:00", "REPORT_DATE_NAME": "2025年报",
+            "NOTICE_DATE": "2026-04-17 00:00:00", "ROEJQ": 32.53,
+            "XSMLL": 91.18, "TOTALOPERATEREVETZ": -1.20,
+            "PARENTNETPROFITTZ": -4.53, "ZCFZL": 16.42,
+        },
+    ]
+    fake = SimpleNamespace(
+        stock_financial_analysis_indicator_em=lambda **_: rows,
+    )
+    monkeypatch.setitem(sys.modules, "akshare", fake)
+
+    result = _AkshareTransport().fundamentals("600519")
+
+    assert set(result["fields"]) == {
+        "weighted_roe_annual", "gross_margin_annual", "revenue_yoy_annual",
+        "net_profit_yoy_annual", "debt_ratio_annual",
+    }
+    assert result["fields"]["revenue_yoy_annual"]["value"] == -1.20
+    assert result["fields"]["weighted_roe_annual"]["period_end"] == "2025-12-31"
+    assert result["fields"]["weighted_roe_annual"]["published_at"] == "2026-04-17 00:00:00"
+    assert all(field["unit"] == "percent" for field in result["fields"].values())
 
 
 def test_g20_us_pre_routes_nasdaq_then_yfinance(us_instrument, quote_factory, now, calendar) -> None:
@@ -234,6 +274,91 @@ def test_incomplete_primary_fundamentals_are_supplemented_per_field(us_instrumen
     assert result.selected_source == "finnhub+yfinance" and result.value.quality_status.value == "ok"
     assert result.value.fields["pe_ttm"].source == "finnhub"
     assert result.value.fields["roe"].source == "yfinance"
+
+
+def test_a_share_semantic_fields_are_supplemented_even_when_primary_quality_is_ok(
+    a_instrument, now, calendar
+) -> None:
+    calls: list[str] = []
+    primary = FundamentalSnapshot(
+        a_instrument,
+        {
+            "pe_ttm": FundamentalValue(18.0, "multiple", date(2026, 7, 10), None, "baostock"),
+            "roe": FundamentalValue(0.34, "ratio", date(2025, 12, 31), None, "baostock"),
+            "gross_margin": FundamentalValue(0.91, "ratio", date(2025, 12, 31), None, "baostock"),
+            "net_profit_yoy": FundamentalValue(-0.045, "ratio", date(2025, 12, 31), None, "baostock"),
+            "debt_ratio": FundamentalValue(0.16, "ratio", date(2025, 12, 31), None, "baostock"),
+        },
+        now, now, "baostock", "ok",
+    )
+    supplement = FundamentalSnapshot(
+        a_instrument,
+        {
+            "weighted_roe_annual": FundamentalValue(32.53, "percent", date(2025, 12, 31), None, "akshare"),
+            "revenue_yoy_annual": FundamentalValue(-1.21, "percent", date(2025, 12, 31), None, "akshare"),
+        },
+        now, now, "akshare", "watch",
+    )
+
+    def baostock(_):
+        calls.append("baostock")
+        return ProviderResult.success(primary, "baostock", now)
+
+    def akshare(_):
+        calls.append("akshare")
+        return ProviderResult.success(supplement, "akshare", now)
+
+    result = DataRefreshService(
+        DataProviders(baostock_fundamentals=baostock, akshare_fundamentals=akshare),
+        calendar,
+        DataCache(),
+    ).refresh_fundamentals(a_instrument, now)
+
+    assert calls == ["baostock", "akshare"]
+    assert result.selected_source == "baostock+akshare"
+    assert result.value is not None
+    assert result.value.fields["roe"].source == "baostock"
+    assert result.value.fields["weighted_roe_annual"].source == "akshare"
+
+
+def test_us_missing_registered_profit_growth_is_supplemented_even_when_raw_quality_is_ok(
+    us_instrument, now, calendar
+) -> None:
+    calls: list[str] = []
+    primary = FundamentalSnapshot(
+        us_instrument,
+        {
+            "peTTM": FundamentalValue(38.0, None, None, None, "finnhub"),
+            "roeTTM": FundamentalValue(140.0, None, None, None, "finnhub"),
+            "revenueGrowthTTMYoy": FundamentalValue(12.0, None, None, None, "finnhub"),
+            "totalDebtToEquityQuarterly": FundamentalValue(80.0, None, None, None, "finnhub"),
+        },
+        now, now, "finnhub", "ok",
+    )
+    supplement = FundamentalSnapshot(
+        us_instrument,
+        {"earningsGrowth": FundamentalValue(0.2, None, None, None, "yfinance")},
+        now, now, "yfinance", "degraded",
+    )
+
+    def finnhub(_):
+        calls.append("finnhub")
+        return ProviderResult.success(primary, "finnhub", now)
+
+    def yfinance(_):
+        calls.append("yfinance")
+        return ProviderResult.success(supplement, "yfinance", now)
+
+    result = DataRefreshService(
+        DataProviders(finnhub_fundamentals=finnhub, yfinance_fundamentals=yfinance),
+        calendar,
+        DataCache(),
+    ).refresh_fundamentals(us_instrument, now)
+
+    assert calls == ["finnhub", "yfinance"]
+    assert result.selected_source == "finnhub+yfinance"
+    assert result.value is not None
+    assert result.value.fields["earningsGrowth"].source == "yfinance"
 
 
 def test_wrong_instrument_fundamentals_are_rejected_before_fallback(

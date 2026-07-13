@@ -1,6 +1,14 @@
 """Stable V2 contracts used by the data layer."""
 
 from .account import AccountSnapshot, AccountValuation, PositionSnapshot, value_account
+from .analysis import (
+    FeatureEvidenceMode,
+    FeatureGroup,
+    FeatureInputs,
+    FeatureSnapshot,
+    FeatureStatus,
+    FeatureValue,
+)
 from .enums import (
     AdjustmentMode,
     DecisionMode,
@@ -42,6 +50,12 @@ __all__ = [
     "DailyBarsRequest",
     "DecisionMode",
     "Exchange",
+    "FeatureEvidenceMode",
+    "FeatureGroup",
+    "FeatureInputs",
+    "FeatureSnapshot",
+    "FeatureStatus",
+    "FeatureValue",
     "FreshnessStatus",
     "FundamentalSnapshot",
     "FundamentalValue",

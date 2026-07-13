@@ -13,6 +13,7 @@ from threading import RLock
 from typing import Iterable, Iterator, Mapping
 
 from tradehelper_v2.contracts.account import AccountSnapshot, PositionSnapshot
+from tradehelper_v2.contracts.analysis import FeatureEvidenceMode, FeatureSnapshot, FeatureStatus, FeatureValue
 from tradehelper_v2.contracts.enums import (
     AdjustmentMode,
     DecisionMode,
@@ -88,6 +89,13 @@ def _fundamental_payload(snapshot: FundamentalSnapshot) -> str:
 
 @dataclass(frozen=True, slots=True)
 class DailyBarWriteResult:
+    inserted: int
+    idempotent: int
+    conflicts: int
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureSnapshotWriteResult:
     inserted: int
     idempotent: int
     conflicts: int
@@ -371,6 +379,79 @@ class SQLiteRepository:
                 status=row["status"], observed_at=_parse_datetime(row["observed_at"]),
             )
             for row in rows
+        )
+
+    @staticmethod
+    def _feature_payload_hash(snapshot: FeatureSnapshot) -> str:
+        payload = snapshot.to_dict()
+        payload.pop("generated_at")
+        return stable_hash(payload)
+
+    def upsert_feature_snapshot(self, snapshot: FeatureSnapshot) -> FeatureSnapshotWriteResult:
+        if not isinstance(snapshot, FeatureSnapshot):
+            raise ContractViolation("feature store only accepts FeatureSnapshot")
+        payload_hash = self._feature_payload_hash(snapshot)
+        key = (snapshot.instrument.stable_key, snapshot.mode.value, utc_iso(snapshot.cutoff_at),
+               snapshot.feature_set_version, snapshot.input_hash)
+        with self._transaction() as connection:
+            row = connection.execute(
+                """SELECT payload_hash FROM feature_snapshots
+                   WHERE instrument_key=? AND mode=? AND cutoff_at=? AND feature_set_version=? AND input_hash=?""", key
+            ).fetchone()
+            if row is not None:
+                if row["payload_hash"] == payload_hash:
+                    return FeatureSnapshotWriteResult(inserted=0, idempotent=1, conflicts=0)
+                connection.execute(
+                    """INSERT INTO quarantine_records(record_type, instrument_key, trading_date, reason, payload_json, created_at)
+                       VALUES (?, ?, NULL, ?, ?, ?)""",
+                    ("feature_snapshot_conflict", snapshot.instrument.stable_key, "CONFLICTING_FEATURE_SNAPSHOT",
+                     canonical_json(snapshot.to_dict()), utc_iso(datetime.now(timezone.utc))),
+                )
+                return FeatureSnapshotWriteResult(inserted=0, idempotent=0, conflicts=1)
+            connection.execute(
+                """INSERT INTO feature_snapshots(
+                       instrument_key, code, market, exchange, mode, cutoff_at, latest_bar_date,
+                       feature_set_version, evidence_mode, input_hash, feature_hash, payload_json,
+                       payload_hash, generated_at, schema_version
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    snapshot.instrument.stable_key, snapshot.instrument.code, snapshot.instrument.market.value,
+                    snapshot.instrument.exchange.value, snapshot.mode.value, utc_iso(snapshot.cutoff_at),
+                    snapshot.latest_bar_date.isoformat() if snapshot.latest_bar_date else None,
+                    snapshot.feature_set_version, snapshot.evidence_mode.value, snapshot.input_hash,
+                    snapshot.feature_hash, canonical_json(snapshot.to_dict()), payload_hash,
+                    utc_iso(snapshot.generated_at), snapshot.schema_version,
+                ),
+            )
+        return FeatureSnapshotWriteResult(inserted=1, idempotent=0, conflicts=0)
+
+    def get_feature_snapshot(
+        self, instrument: InstrumentId, mode: DecisionMode, cutoff_at: datetime, *, feature_set_version: str | None = None,
+    ) -> FeatureSnapshot | None:
+        sql = """SELECT payload_json FROM feature_snapshots WHERE instrument_key=? AND mode=? AND cutoff_at=?"""
+        parameters: tuple[object, ...] = (instrument.stable_key, mode.value, utc_iso(cutoff_at))
+        if feature_set_version is not None:
+            sql += " AND feature_set_version=?"
+            parameters += (feature_set_version,)
+        sql += " ORDER BY generated_at DESC, feature_set_version DESC, input_hash DESC LIMIT 1"
+        row = self._fetchone(sql, parameters)
+        if row is None:
+            return None
+        payload = json.loads(row["payload_json"])
+        values = tuple(
+            FeatureValue(name=item["name"], value=item["value"], status=FeatureStatus(item["status"]), unit=item["unit"],
+                         lookback=item["lookback"], available_at=_parse_datetime(item["available_at"]),
+                         sources=tuple(item["sources"]), model_eligible=bool(item["model_eligible"]),
+                         reason=item["reason"], schema_version=item["schema_version"])
+            for item in payload["values"]
+        )
+        return FeatureSnapshot(
+            instrument=instrument, mode=DecisionMode(payload["mode"]), cutoff_at=_parse_datetime(payload["cutoff_at"]),
+            latest_bar_date=date.fromisoformat(payload["latest_bar_date"]) if payload["latest_bar_date"] else None,
+            quote_observed_at=_parse_datetime(payload["quote_observed_at"]) if payload["quote_observed_at"] else None,
+            feature_set_version=payload["feature_set_version"], evidence_mode=FeatureEvidenceMode(payload["evidence_mode"]),
+            values=values, input_hash=payload["input_hash"], feature_hash=payload["feature_hash"],
+            generated_at=_parse_datetime(payload["generated_at"]), schema_version=payload["schema_version"],
         )
 
     @contextmanager

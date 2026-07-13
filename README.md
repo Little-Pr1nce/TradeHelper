@@ -21,7 +21,7 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-2 特征层规范：[docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 测试基础设施与 V2-1 数据层已经完成；确定性测试、真实 Provider smoke、双市场11股压力测试和A股跨额度窗口补取均已通过。下一步只实施 V2-2 特征层，精确合同和 Golden Cases 已完成规划。
+V2-0 测试基础设施、V2-1 数据层与 V2-2 特征层已经完成并通过审计修复。特征层现提供可复现的 point-in-time `FeatureSnapshot`、真实 Provider payload 到 canonical 基本面特征的跨层验证、按供应商和期间语义选择字段、按截止时点复核的实时价、双市场共用技术/新闻合同、缺失降级与 migration 5 持久化；下一步须先复审 V2-3 预测层合同。
 
 ## 一以贯之的系统目标
 
@@ -98,7 +98,7 @@ venv/bin/python -m pytest tests/ -q
 tests/v2/
 ```
 
-当前下一阶段只授权 V2-2。实现者必须按 `docs/v2/V2_2_FEATURES.md` 完成特征层并更新阶段状态，随后停止，等待复审再进入 V2-3。
+V2-2 已完成并已停止在特征层边界。V2-3 开始前必须先完成预测层合同复审；不得跳过该复审直接实现模型、情景、策略、风控或 UI。
 
 ## 历史资料
 
