@@ -1,0 +1,347 @@
+"""Idempotent schema version 1 for the isolated V2 database."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from hashlib import sha256
+import sqlite3
+
+SCHEMA_VERSION = 4
+
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    checksum TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stock_metadata (
+    instrument_key TEXT PRIMARY KEY,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    name TEXT NOT NULL,
+    industry TEXT,
+    description TEXT,
+    listing_date TEXT,
+    source TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS daily_bars (
+    instrument_key TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    trading_date TEXT NOT NULL,
+    adjustment_mode TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    volume INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    corporate_action_version TEXT,
+    payload_hash TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    PRIMARY KEY (instrument_key, trading_date, adjustment_mode)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_daily_bars_scope
+ON daily_bars(instrument_key, trading_date);
+
+CREATE TABLE IF NOT EXISTS intraday_bars (
+    instrument_key TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    session_date TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    volume INTEGER,
+    source TEXT NOT NULL,
+    evidence_quality TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    PRIMARY KEY (instrument_key, observed_at)
+);
+
+CREATE TABLE IF NOT EXISTS quote_snapshots (
+    instrument_key TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    session TEXT NOT NULL,
+    price REAL NOT NULL,
+    prev_close REAL,
+    open REAL,
+    high REAL,
+    low REAL,
+    volume INTEGER,
+    bid REAL,
+    ask REAL,
+    observed_at TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    freshness_status TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    PRIMARY KEY (instrument_key, session, observed_at)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_quotes_latest
+ON quote_snapshots(instrument_key, session, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS news_snapshots (
+    stable_key TEXT PRIMARY KEY,
+    instrument_key TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    title TEXT NOT NULL,
+    source TEXT NOT NULL,
+    published_at TEXT NOT NULL,
+    available_at TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    content TEXT,
+    is_macro INTEGER NOT NULL,
+    finbert_label TEXT,
+    finbert_score REAL,
+    relevance REAL,
+    schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_news_asof
+ON news_snapshots(instrument_key, available_at);
+
+CREATE TABLE IF NOT EXISTS fundamental_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instrument_key TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    fields_json TEXT NOT NULL,
+    available_at TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    quality_status TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    UNIQUE (instrument_key, available_at, provider)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_fundamentals_asof
+ON fundamental_snapshots(instrument_key, available_at DESC);
+
+CREATE TABLE IF NOT EXISTS account_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    cash TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    UNIQUE (market, captured_at)
+);
+CREATE TABLE IF NOT EXISTS account_positions (
+    account_snapshot_id INTEGER NOT NULL,
+    instrument_key TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    shares TEXT NOT NULL,
+    cost_price TEXT NOT NULL,
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY (account_snapshot_id, instrument_key),
+    FOREIGN KEY (account_snapshot_id) REFERENCES account_snapshots(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS quarantine_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_type TEXT NOT NULL,
+    instrument_key TEXT,
+    trading_date TEXT,
+    reason TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_quarantine_scope
+ON quarantine_records(instrument_key, trading_date);
+""".strip()
+
+_SCHEMA_V2_SQL = """
+CREATE TABLE IF NOT EXISTS provider_rate_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL,
+    market TEXT NOT NULL,
+    data_type TEXT NOT NULL,
+    requested_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_provider_rate_scope
+ON provider_rate_events(provider, market, data_type, requested_at);
+
+CREATE TABLE IF NOT EXISTS refresh_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_type TEXT NOT NULL,
+    instrument_key TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    requested_start TEXT NOT NULL,
+    requested_end TEXT NOT NULL,
+    listing_date TEXT,
+    priority INTEGER NOT NULL,
+    next_retry_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(task_type, instrument_key, requested_start, requested_end, status)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_refresh_queue_due
+ON refresh_queue(status, next_retry_at, priority DESC, created_at);
+
+CREATE TABLE IF NOT EXISTS daily_bar_drift_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instrument_key TEXT NOT NULL,
+    trading_date TEXT NOT NULL,
+    primary_source TEXT NOT NULL,
+    comparator_source TEXT NOT NULL,
+    max_abs_price_diff REAL NOT NULL,
+    volume_ratio REAL,
+    status TEXT NOT NULL,
+    primary_payload_json TEXT NOT NULL,
+    comparator_payload_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    UNIQUE(instrument_key, trading_date, primary_source, comparator_source, observed_at)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_daily_drift_scope
+ON daily_bar_drift_records(instrument_key, trading_date DESC);
+""".strip()
+
+_SCHEMA_V3_SQL = """
+CREATE TABLE IF NOT EXISTS provider_refresh_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_type TEXT NOT NULL,
+    instrument_key TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    mode TEXT,
+    next_retry_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(task_type, instrument_key, mode, status)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_provider_refresh_due
+ON provider_refresh_queue(status, next_retry_at, created_at);
+""".strip()
+
+_SCHEMA_V4_SQL = """
+DROP INDEX IF EXISTS idx_v2_refresh_queue_due;
+ALTER TABLE refresh_queue RENAME TO refresh_queue_legacy_v3;
+CREATE TABLE refresh_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_type TEXT NOT NULL,
+    instrument_key TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    requested_start TEXT NOT NULL,
+    requested_end TEXT NOT NULL,
+    listing_date TEXT,
+    priority INTEGER NOT NULL,
+    next_retry_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(task_type, instrument_key, requested_start, requested_end)
+);
+INSERT OR REPLACE INTO refresh_queue
+SELECT * FROM refresh_queue_legacy_v3
+WHERE id IN (
+    SELECT MAX(id) FROM refresh_queue_legacy_v3
+    GROUP BY task_type, instrument_key, requested_start, requested_end
+);
+DROP TABLE refresh_queue_legacy_v3;
+CREATE INDEX idx_v2_refresh_queue_due
+ON refresh_queue(status, next_retry_at, priority DESC, created_at);
+
+DROP INDEX IF EXISTS idx_v2_provider_refresh_due;
+ALTER TABLE provider_refresh_queue RENAME TO provider_refresh_queue_legacy_v3;
+CREATE TABLE provider_refresh_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_type TEXT NOT NULL,
+    instrument_key TEXT NOT NULL,
+    code TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT '',
+    next_retry_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(task_type, instrument_key, mode)
+);
+INSERT OR REPLACE INTO provider_refresh_queue
+SELECT id, task_type, instrument_key, code, market, exchange, COALESCE(mode, ''),
+       next_retry_at, status, attempts, created_at, updated_at
+FROM provider_refresh_queue_legacy_v3
+WHERE id IN (
+    SELECT MAX(id) FROM provider_refresh_queue_legacy_v3
+    GROUP BY task_type, instrument_key, COALESCE(mode, '')
+);
+DROP TABLE provider_refresh_queue_legacy_v3;
+CREATE INDEX idx_v2_provider_refresh_due
+ON provider_refresh_queue(status, next_retry_at, created_at);
+
+UPDATE news_snapshots SET available_at=fetched_at WHERE available_at < fetched_at;
+""".strip()
+
+
+def schema_checksum() -> str:
+    return sha256(_SCHEMA_SQL.encode("utf-8")).hexdigest()
+
+
+def schema_v2_checksum() -> str:
+    return sha256(_SCHEMA_V2_SQL.encode("utf-8")).hexdigest()
+
+
+def schema_v3_checksum() -> str:
+    return sha256(_SCHEMA_V3_SQL.encode("utf-8")).hexdigest()
+
+
+def schema_v4_checksum() -> str:
+    return sha256(_SCHEMA_V4_SQL.encode("utf-8")).hexdigest()
+
+
+def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, checksum: str) -> None:
+    migrations_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+    ).fetchone()
+    if migrations_exists:
+        existing = connection.execute(
+            "SELECT checksum FROM schema_migrations WHERE version = ?", (version,)
+        ).fetchone()
+        if existing is not None:
+            if existing[0] != checksum:
+                raise RuntimeError(f"V2 schema version {version} checksum changed; create a new migration")
+            return
+    connection.executescript(sql)
+    applied_at = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    connection.execute(
+        "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)",
+        (version, checksum, applied_at),
+    )
+
+
+def apply_schema(connection: sqlite3.Connection) -> None:
+    """Apply versioned V2 schema migrations without touching V1 databases."""
+    connection.execute("PRAGMA foreign_keys = ON")
+    _apply_migration(connection, 1, _SCHEMA_SQL, schema_checksum())
+    _apply_migration(connection, 2, _SCHEMA_V2_SQL, schema_v2_checksum())
+    _apply_migration(connection, 3, _SCHEMA_V3_SQL, schema_v3_checksum())
+    _apply_migration(connection, 4, _SCHEMA_V4_SQL, schema_v4_checksum())
+    connection.commit()

@@ -5,7 +5,8 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 2.0 的目标不是继续堆叠 1.x 功能，而是把系统重建为更清晰的交易决策链：
 
 ```text
-数据事实 -> 特征快照 -> 预测情景 -> 交易计划 -> 风控分级 -> 报告/UI -> 复盘学习
+当前决策：数据事实 -> 特征快照 -> 预测情景 -> 条件计划 -> 风控分级 -> 单股/组合决策 -> 报告/UI
+共享验证：TradePlan + 风控结果 -> 订单预览/成交仿真/到期验证 -> 三本账 -> 复盘学习
 ```
 
 ## 当前状态
@@ -14,7 +15,13 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - 2.0 实施计划：[V2_REFACTOR_PLAN.md](./V2_REFACTOR_PLAN.md)
 - 2.0 架构入口：[DESIGN.md](./DESIGN.md)
 - V1 能力资产清单：[docs/V1_CAPABILITY_INVENTORY.md](./docs/V1_CAPABILITY_INVENTORY.md)
+- V2-0/V2-1 精确合同：[docs/v2/CONTRACTS.md](./docs/v2/CONTRACTS.md)
+- V2-0/V2-1 确定政策：[docs/v2/POLICIES.md](./docs/v2/POLICIES.md)
+- V2-0/V2-1 标准案例：[docs/v2/GOLDEN_CASES.md](./docs/v2/GOLDEN_CASES.md)
+- V2-2 特征层规范：[docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
+
+V2-0 测试基础设施与 V2-1 数据层已经完成；确定性测试、真实 Provider smoke、双市场11股压力测试和A股跨额度窗口补取均已通过。下一步只实施 V2-2 特征层，精确合同和 Golden Cases 已完成规划。
 
 ## 一以贯之的系统目标
 
@@ -32,8 +39,10 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 2. 情景规划器把预测结果转成可交易环境。
 3. 交易策略根据情景生成买入、加仓、减仓、卖出、持有或观察计划。
 4. 风控官只负责事实、风险、仓位和历史证据检查。
-5. 历史复盘拆成预测账、策略账和联合账，方便判断到底是哪一层失效。
-6. LLM 作为研究假设生成器，不能直接生成可执行交易指令。
+5. 同一个 TradePlan 同时用于当前建议、订单预览和历史成交仿真，避免实盘与回测两套逻辑。
+6. Tab3 由组合决策层负责跨股票排序、集中度、相关性、风险容量和替换机会。
+7. 历史复盘拆成预测账、策略账和联合账，方便判断到底是哪一层失效。
+8. LLM 作为研究假设生成器，不能直接生成可执行交易指令，也不能补造基本面事实。
 
 ## 不可丢失的 V1 硬约束
 
@@ -61,6 +70,10 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 | [DESIGN.md](./DESIGN.md) | 2.0 架构设计，说明系统是什么、各层职责和边界 |
 | [V2_REFACTOR_PLAN.md](./V2_REFACTOR_PLAN.md) | 2.0 实施计划，说明按什么顺序开发、每层怎么测试和验收 |
 | [docs/V1_CAPABILITY_INVENTORY.md](./docs/V1_CAPABILITY_INVENTORY.md) | V1 能力资产清单，防止 2.0 重构时丢失已验证能力 |
+| [docs/v2/CONTRACTS.md](./docs/v2/CONTRACTS.md) | V2-0/V2-1 类型、不变量、序列化和 repository 精确合同 |
+| [docs/v2/POLICIES.md](./docs/v2/POLICIES.md) | V2-0/V2-1 数据源、缓存、质量和数据库确定政策 |
+| [docs/v2/GOLDEN_CASES.md](./docs/v2/GOLDEN_CASES.md) | V2-0/V2-1 固定输入与预期结果，防止测试迁就实现 |
+| [docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md) | V2-2 point-in-time 特征合同、公式、实施顺序和 Golden Cases |
 | `AGENTS.md` | Codex 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 | `CLAUDE.md` | Claude Code 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 
@@ -84,6 +97,8 @@ venv/bin/python -m pytest tests/ -q
 ```text
 tests/v2/
 ```
+
+当前下一阶段只授权 V2-2。实现者必须按 `docs/v2/V2_2_FEATURES.md` 完成特征层并更新阶段状态，随后停止，等待复审再进入 V2-3。
 
 ## 历史资料
 
