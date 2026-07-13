@@ -52,10 +52,11 @@ TradeHelper 一以贯之的产品目标，是稳定回答五个问题：
 | [docs/v2/POLICIES.md](./docs/v2/POLICIES.md) | V2-0/V2-1 确定政策：数据源、时段、缓存、质量、数据库和常量 |
 | [docs/v2/GOLDEN_CASES.md](./docs/v2/GOLDEN_CASES.md) | V2-0/V2-1 标准答案：固定输入、预期输出和测试映射 |
 | [docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md) | V2-2 规范：point-in-time 特征合同、公式、缺失语义、存储和 Golden Cases |
+| [docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md) | V2-3 规范：预测目标、标签、模型、OOF、注册、持久化和 Golden Cases |
 | `AGENTS.md` | Codex 本地约定：Codex 开发时先读它，再读 DESIGN 和 V2_REFACTOR_PLAN |
 | `CLAUDE.md` | Claude Code 本地约定：Claude 开发时先读它，再读 DESIGN 和 V2_REFACTOR_PLAN |
 
-V2-0/V2-1 实现发生冲突时，规范优先级为：`CONTRACTS/POLICIES/GOLDEN_CASES` > 本设计和实施计划中的示例 > V1 能力清单 > V1 参考代码。V2-2 以 `V2_2_FEATURES.md` 为规范。未被规范的行为应保持缺失或明确不支持，不能由实现者自由补默认值。
+V2-0/V2-1 实现发生冲突时，规范优先级为：`CONTRACTS/POLICIES/GOLDEN_CASES` > 本设计和实施计划中的示例 > V1 能力清单 > V1 参考代码。V2-2 以 `V2_2_FEATURES.md` 为规范，V2-3 以 `V2_3_FORECAST.md` 为规范。未被规范的行为应保持缺失或明确不支持，不能由实现者自由补默认值。
 
 ## 3. 分层职责
 

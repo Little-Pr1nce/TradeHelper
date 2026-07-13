@@ -19,9 +19,10 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-0/V2-1 确定政策：[docs/v2/POLICIES.md](./docs/v2/POLICIES.md)
 - V2-0/V2-1 标准案例：[docs/v2/GOLDEN_CASES.md](./docs/v2/GOLDEN_CASES.md)
 - V2-2 特征层规范：[docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md)
+- V2-3 预测层规范：[docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 测试基础设施、V2-1 数据层与 V2-2 特征层已经完成并通过审计修复。特征层现提供可复现的 point-in-time `FeatureSnapshot`、真实 Provider payload 到 canonical 基本面特征的跨层验证、按供应商和期间语义选择字段、按截止时点复核的实时价、双市场共用技术/新闻合同、缺失降级与 migration 5 持久化；下一步须先复审 V2-3 预测层合同。
+V2-0 测试基础设施、V2-1 数据层与 V2-2 特征层已经完成并通过审计修复。V2-3 预测层精确合同、标签、OOF、模型注册、Golden Cases 和测试顺序已经完成设计，下一步只按规范实现预测层，不提前进入情景、策略或 UI。
 
 ## 一以贯之的系统目标
 
@@ -74,6 +75,7 @@ V2-0 测试基础设施、V2-1 数据层与 V2-2 特征层已经完成并通过�
 | [docs/v2/POLICIES.md](./docs/v2/POLICIES.md) | V2-0/V2-1 数据源、缓存、质量和数据库确定政策 |
 | [docs/v2/GOLDEN_CASES.md](./docs/v2/GOLDEN_CASES.md) | V2-0/V2-1 固定输入与预期结果，防止测试迁就实现 |
 | [docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md) | V2-2 point-in-time 特征合同、公式、实施顺序和 Golden Cases |
+| [docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md) | V2-3 预测目标、模型、OOF、注册、持久化和 Golden Cases |
 | `AGENTS.md` | Codex 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 | `CLAUDE.md` | Claude Code 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 
@@ -98,7 +100,7 @@ venv/bin/python -m pytest tests/ -q
 tests/v2/
 ```
 
-V2-2 已完成并已停止在特征层边界。V2-3 开始前必须先完成预测层合同复审；不得跳过该复审直接实现模型、情景、策略、风控或 UI。
+V2-2 已完成并冻结。V2-3 只允许按 `docs/v2/V2_3_FORECAST.md` 实现预测合同、模型、OOF、registry 和存储；完成后停止，不得提前实现情景、策略、风控或 UI。
 
 ## 历史资料
 

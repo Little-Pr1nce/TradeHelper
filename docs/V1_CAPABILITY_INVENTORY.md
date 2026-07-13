@@ -130,10 +130,10 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
-| 独立 ForecastResult | 预测不由交易动作反推 | `core/forecast_engine.py` | `forecast/engine.py` | 待迁移 | `tests/v2/test_forecast_feature_sets.py` |
-| 明确目标交易日 | 用户知道预测哪天 | `forecast_log` | `learning/forecast_ledger.py` | 待迁移 | `tests/v2/test_forecast_diagnostics.py` |
-| OOF Champion/Challenger | 只让样本外通过模型参与执行 | `forecast_model_versions` | `forecast/registry.py` | 待迁移 | `tests/v2/test_forecast_model_registry.py` |
-| Brier/LogLoss/ECE/区间命中 | 评价概率预测质量 | `core/forecast_engine.py`, DB metrics | `forecast/diagnostics.py` | 待迁移 | `tests/v2/test_forecast_diagnostics.py` |
+| 独立 ForecastResult | 预测不由交易动作反推 | `core/forecast_engine.py` | `forecast/engine.py` | V2-3已设计，待实现 | `tests/v2/test_forecast_feature_sets.py` |
+| 明确目标交易日 | 用户知道预测哪天 | `forecast_log` | V2-3 `ForecastResult`；到期验证留给 `learning/forecast_ledger.py` | V2-3已设计，待实现 | `tests/v2/test_forecast_diagnostics.py` |
+| OOF Champion/Challenger | 只让样本外通过模型参与执行 | `forecast_model_versions` | `forecast/registry.py` | V2-3已设计，待实现 | `tests/v2/test_forecast_model_registry.py` |
+| Brier/LogLoss/ECE/区间命中 | 评价概率预测质量 | `core/forecast_engine.py`, DB metrics | `forecast/diagnostics.py` | V2-3已设计，待实现 | `tests/v2/test_forecast_diagnostics.py` |
 | 三本账思路 | 区分预测错、策略错、联合错 | `forecast_log`, `trade_plan_log`, `joint_oof_runs` | `learning/` | 待迁移 | `tests/v2/test_learning_ledgers.py` |
 | 联合 OOF | 预测+策略+风控整体回放 | `core/joint_oof.py` | `learning/joint_ledger.py` | 待迁移 | `tests/v2/test_attribution_rules.py` |
 | 五层效果归因 | 分开评价预测、情景、策略、风控和成交贡献 | V1 三本账与 Decision/Broker 分账 | `learning/` attribution | 待迁移 | `tests/v2/test_attribution_rules.py` |

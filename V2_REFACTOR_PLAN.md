@@ -63,10 +63,11 @@ TradePlan + ExecutionDecision
 | [docs/v2/POLICIES.md](./docs/v2/POLICIES.md) | V2-0/V2-1 数据源、时段、缓存、质量和数据库确定政策 |
 | [docs/v2/GOLDEN_CASES.md](./docs/v2/GOLDEN_CASES.md) | V2-0/V2-1 固定输入与预期结果，测试不得迁就实现 |
 | [docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md) | V2-2 特征合同、公式、缺失语义、存储和 Golden Cases |
+| [docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md) | V2-3 预测合同、标签、模型、OOF、注册、持久化和 Golden Cases |
 | `AGENTS.md` | Codex 本地工作约定 |
 | `CLAUDE.md` | Claude Code 本地工作约定 |
 
-V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 以 `docs/v2/V2_2_FEATURES.md` 为准；当前实现授权止于 V2-2，完成后必须停止并等待复审。
+V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 以 `docs/v2/V2_2_FEATURES.md` 为准，V2-3 以 `docs/v2/V2_3_FORECAST.md` 为准；当前实现只授权 V2-3，完成后必须停止并等待复审。
 
 ## 1. V2 分层结构
 
@@ -1182,7 +1183,7 @@ venv/bin/python -m pytest tests/ -q
 | V2-0 测试基础设施 | 已完成 | Golden G00-G04、架构边界、冻结时钟、双市场 fixture 与性能基线已落地 |
 | V2-1 数据层 | 已完成 | Golden G10-G29/G30-G63、Provider fixture、路由、时点语义、质量、独立 repository、持久化配额续跑、并发、日K跨源漂移审计及真实 Provider smoke 均已通过 |
 | V2-2 特征层 | 已完成 | FeatureSnapshot、F00-F13、双市场点时特征、migration 5/FeatureStore、架构边界、性能及全量回归已通过 |
-| V2-3 预测层 | 未开始 | 等 FeatureSnapshot 稳定 |
+| V2-3 预测层 | 已设计，待实现 | `docs/v2/V2_3_FORECAST.md` 已固定合同、标签、模型池、OOF、registry、migration 6、FC00-FC18 和测试顺序 |
 | V2-4 情景层 | 未开始 | 等 ForecastResult V2 稳定 |
 | V2-5 策略层 | 未开始 | 等 TradingScenario 稳定 |
 | V2-6 风控层 | 未开始 | 可并行梳理合同，但实现等 TradePlan 稳定 |
@@ -1193,6 +1194,6 @@ venv/bin/python -m pytest tests/ -q
 | V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
 | V2-12 迁移/端到端/发布 | 未开始 | 每层单测通过后执行完整矩阵与跨平台烟雾 |
 
-## 16. 当前下一步：V2-3 预测层复审
+## 16. 当前下一步：V2-3 预测层实现
 
-V2-2 已完成并按阶段纪律停止。开始 V2-3 前必须另行制定预测层的精确合同、模型注册、OOF 无泄漏规则、诊断标准和 Golden Cases；不得把特征层缺失值解释为模型默认值，也不得提前实现情景、策略、风控、组合决策、LLM 或 UI。
+V2-2 已完成并冻结。实现者必须先阅读 [docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md)，严格按其中的合同、波动率标签、FeatureSet、selection/confirmation 隔离、晋升标准、registry、migration 6 和 FC00-FC18 顺序开发。不得把特征层缺失值解释为真实默认值，也不得提前实现情景、策略、风控、组合决策、LLM 或 UI。
