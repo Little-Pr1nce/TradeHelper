@@ -54,10 +54,11 @@ TradeHelper 一以贯之的产品目标，是稳定回答五个问题：
 | [docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md) | V2-2 规范：point-in-time 特征合同、公式、缺失语义、存储和 Golden Cases |
 | [docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md) | V2-3 规范：预测目标、标签、模型、OOF、注册、持久化和 Golden Cases |
 | [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md) | V2-4 规范：多周期情景、当前事实覆盖、三时段、策略家族政策和 Golden Cases |
+| [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md) | V2-5 规范：TradePlan、条件 DSL、首批模板、V1 迁移矩阵和 Golden Cases |
 | `AGENTS.md` | Codex 本地约定：Codex 开发时先读它，再读 DESIGN 和 V2_REFACTOR_PLAN |
 | `CLAUDE.md` | Claude Code 本地约定：Claude 开发时先读它，再读 DESIGN 和 V2_REFACTOR_PLAN |
 
-V2-0/V2-1 实现发生冲突时，规范优先级为：`CONTRACTS/POLICIES/GOLDEN_CASES` > 本设计和实施计划中的示例 > V1 能力清单 > V1 参考代码。V2-2、V2-3、V2-4 分别以对应阶段规范为准。未被规范的行为应保持缺失或明确不支持，不能由实现者自由补默认值。
+V2-0/V2-1 实现发生冲突时，规范优先级为：`CONTRACTS/POLICIES/GOLDEN_CASES` > 本设计和实施计划中的示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-5 分别以对应阶段规范为准。未被规范的行为应保持缺失或明确不支持，不能由实现者自由补默认值。
 
 ## 3. 分层职责
 
@@ -116,23 +117,22 @@ Tab3 不是 Tab1 批量版。Tab3 输出必须优先回答组合层面的处理�
 
 ### 4.3 决策合同
 
-策略层不能只返回一条买卖信号。每次分析必须生成一个 `DecisionBundle`：
+策略层不能只返回一条买卖信号。每次分析必须生成一个 `StrategyBundle`：
 
 ```text
-DecisionBundle:
-  current_state
-  forecast_scenario
-  entry_or_add_plans[]
-  reduce_or_exit_plans[]
-  hold_condition
+StrategyBundle:
+  scenario_id
+  position_state
+  entry_or_add
+  reduce_or_exit
+  hold
   invalidation
-  valid_session
-  valid_from / expires_at
-  conservative_profile
-  aggressive_profile
+  conservative_plan_ids[]
+  aggressive_plan_ids[]
+  conflict_state
 ```
 
-其中每个 `TradePlan` 必须包含触发条件、触发价、止损、止盈类型、最大亏损、计划仓位、缺失条件和失效条件。保守与激进方案共享同一组事实和预测方向，只允许在确认门槛、风险预算和仓位上不同，不允许生成互相矛盾的市场判断。
+其中每个 `TradePlan` 必须包含动作意图、触发条件、触发价、结构止损、止盈类型、缺失条件、失效条件和计划有效期。`TradePlan` 不包含股数、仓位比例、账户权益或最大亏损金额；V2-6 的 `ExecutionDecision` 必须使用真实账户权益和持仓计算执行等级、股数、仓位与最大亏损。保守与激进计划共享同一组事实和预测方向，V2-5 只允许确认门槛不同；风险预算和仓位差异由 V2-6 负责，不允许生成互相矛盾的市场判断。
 
 盘前、盘中、盘后都必须输出买入/加仓条件、卖出/减仓条件、持有条件和失效条件：
 
@@ -189,7 +189,7 @@ LLM 观察无论被系统确认、反驳、待验证或因数据无效无法判�
 当前只做：
 
 ```text
-V2-4 情景层
+V2-5 策略层
 ```
 
-V2-0 至 V2-3 已完成并冻结。V2-4 只能按 `docs/v2/V2_4_SCENARIOS.md` 把预测和当前事实翻译为 TradingScenario；不得提前生成 TradePlan、风险等级、组合分配或 UI。
+V2-0 至 V2-4 已完成并冻结。V2-5 只能按 `docs/v2/V2_5_STRATEGIES.md` 把 FeatureSnapshot、TradingScenario 和可选 PositionSnapshot 翻译为结构化 TradePlan；不得读取账户现金、计算仓位和最大亏损，也不得提前实现风险等级、成交、组合分配、学习、LLM 或 UI。

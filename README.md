@@ -21,9 +21,10 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-2 特征层规范：[docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md)
 - V2-3 预测层规范：[docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md)
 - V2-4 情景层规范：[docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md)
+- V2-5 策略层规范：[docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 至 V2-4 已完成并复审。V2-4 将 ForecastResult 与当前冻结事实确定性翻译为 TradingScenario，覆盖多周期归并、三时段会话、当前事实覆盖、策略家族兼容性和 migration 8；情景身份排除生成时间，美股盘前只接受 Nasdaq/yfinance，A/美股盘中只接受 TickFlow。该层不生成 TradePlan、订单、仓位或风控结论。
+V2-0 至 V2-4 已完成并复审。V2-5 已完成精确设计，下一步按规范实现结构化条件、首批策略模板、完整四分支 TradePlan 和 migration 9。策略层不计算股数、仓位、账户最大亏损或 A/B/C/D 等级，这些必须由后续风控层基于真实账户生成。
 
 ## 一以贯之的系统目标
 
@@ -78,6 +79,7 @@ V2-0 至 V2-4 已完成并复审。V2-4 将 ForecastResult 与当前冻结事实
 | [docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md) | V2-2 point-in-time 特征合同、公式、实施顺序和 Golden Cases |
 | [docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md) | V2-3 预测目标、模型、OOF、注册、持久化和 Golden Cases |
 | [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md) | V2-4 情景合同、多周期归并、三时段、降级、持久化和 Golden Cases |
+| [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md) | V2-5 TradePlan、条件 DSL、策略模板、V1 迁移矩阵和 SP00-SP29 |
 | `AGENTS.md` | Codex 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 | `CLAUDE.md` | Claude Code 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 
@@ -102,7 +104,7 @@ venv/bin/python -m pytest tests/ -q
 tests/v2/
 ```
 
-V2-4 已完成复审并冻结：SC00-SC21 共 46 条情景测试、V2 全量 183 条测试、项目全量 443 条测试均通过，3 条真实 Provider 冒烟测试另行启用后全部通过。下一阶段必须另行定义 TradePlan 与策略合同；不得从 TradingScenario 直接推导买卖、仓位或订单。
+V2-4 已完成复审并冻结：SC00-SC21 共 46 条情景测试、V2 全量 183 条测试、项目全量 443 条测试均通过，3 条真实 Provider 冒烟测试另行启用后全部通过。V2-5 设计已冻结为 [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md)；当前只实现 V2-5，不提前实现 V2-6 风控、组合决策、学习、LLM 或 UI。
 
 ## 历史资料
 

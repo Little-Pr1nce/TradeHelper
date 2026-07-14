@@ -65,10 +65,11 @@ TradePlan + ExecutionDecision
 | [docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md) | V2-2 特征合同、公式、缺失语义、存储和 Golden Cases |
 | [docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md) | V2-3 预测合同、标签、模型、OOF、注册、持久化和 Golden Cases |
 | [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md) | V2-4 情景合同、多周期归并、三时段、策略家族政策、持久化和 Golden Cases |
+| [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md) | V2-5 TradePlan、条件 DSL、策略模板、V1 迁移矩阵、持久化和 SP00-SP29 |
 | `AGENTS.md` | Codex 本地工作约定 |
 | `CLAUDE.md` | Claude Code 本地工作约定 |
 
-V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2、V2-3、V2-4 分别以对应阶段规范为准；当前实现只授权 V2-4，完成后必须停止并等待复审。
+V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-5 分别以对应阶段规范为准；当前实现只授权 V2-5，完成 SP00-SP29、测试和文档更新后必须停止并等待复审。
 
 ## 1. V2 分层结构
 
@@ -88,7 +89,7 @@ tradehelper_v2/
   contracts/
     market_data.py        # Bar/Quote/News/Fundamental/Account
     analysis.py           # Feature/Forecast/Scenario
-    decisions.py          # TradePlan/DecisionBundle/ExecutionDecision/PortfolioDecision
+    decisions.py          # TradePlan/StrategyBundle/ExecutionDecision/PortfolioDecision
     learning.py           # 三本账和版本事件合同
 
   data/
@@ -485,106 +486,62 @@ V2-4 的规范性合同见 [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.
 venv/bin/python -m pytest tests/v2/test_scenario_*.py -q
 ```
 
-## 6. 策略层重构
+## 6. V2-5 策略层
 
-### 6.1 目标
+V2-5 的规范性合同见 [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md)。本节只保留阶段边界和验收入口；字段、不变量、公式、V1 迁移结论与 Golden Cases 以该规范为准。
 
-策略输入从“只有历史 df/context”升级为：
+### 6.1 输入、输出和边界
 
 ```text
-StrategyInput:
-  feature_snapshot
-  trading_scenario
-  account_snapshot
-  position_snapshot
-  market_rules
-  decision_mode: premarket / intraday / postmarket
-  risk_profile: conservative / aggressive
+FeatureSnapshot + TradingScenario + PositionSnapshot | None
+  -> StrategyEngine
+    -> StrategyBundle（四个完整分支）
+      -> TradePlan[]
 ```
 
-策略输出统一为：
+`StrategyInput` 不包含 AccountSnapshot、账户现金、组合权益、市场成交规则或历史策略健康度。`TradePlan` 只负责动作意图、结构化触发和确认条件、理论触发价、结构止损、止盈方式、持有/失效条件、证据、缺失条件和有效期，明确不包含：
 
 ```text
-TradePlan:
-  plan_id
-  action: buy / add / sell / reduce / hold / watch / invalid
-  scenario_id
-  forecast_horizon
-  strategy_family
-  trigger_condition
-  trigger_price
-  stop_loss
-  take_profit
-  take_profit_mode: fixed / dynamic / conditional / none
-  position_pct
-  max_loss_amount
-  invalidation
-  valid_session
-  valid_from
-  expires_at
-  evidence
-  missing_conditions
+shares / position_pct / account_equity / max_loss_amount
+execution_level / approved / order_type / fees / slippage
 ```
 
-一次分析的最终策略输出不是单条 `TradePlan`，而是：
+这些字段分别属于 V2-6 `ExecutionDecision` 和 V2-7 `OrderIntent`。策略层不能用默认本金补全风险金额，也不能把 A股一手、T+1、涨跌停或美股延伸时段成交规则散落到模板中。
+
+一次分析必须固定输出 `entry_or_add`、`reduce_or_exit`、`hold`、`invalidation` 四个分支。空仓时明确标记持仓分支不适用；持仓时保护退出不能被预测分歧阻断；没有可执行候选时仍输出结构化条件观察计划。
+
+### 6.2 首批模板与 V1 迁移
+
+首批只实现九类可验证模板：
 
 ```text
-DecisionBundle:
-  current_state
-  forecast_scenario
-  entry_or_add_plans[]
-  reduce_or_exit_plans[]
-  hold_condition
-  invalidation
-  conservative_profile
-  aggressive_profile
+TrendContinuation
+TrendPullback
+MA120SupportRebound
+RangeMeanReversion
+BreakoutConfirmation
+ProfitLockAfterHigh
+FailedReboundExit
+ProtectiveExit
+ConditionalObservation
 ```
 
-保守与激进档案必须使用同一组事实、预测和策略方向。二者只允许在确认门槛、最大风险金额和仓位上不同；若触发价相同，报告必须直说“同一触发条件，不同风险预算”，不能伪造两套价格。
+V1 的重复趋势和均值回归策略合并为上述家族；DualThrust、TurtleATR、KeyReversal 因当前特征或事件证据不足暂缓；MomentumNews 等独立新闻交易策略等待 V2-9 OOF 证据；HoldUntilBreakeven 不迁移为可执行策略。完整逐项结论和 feature gap 见 V2-5 规范，不能为追求数量把旧策略机械复制进新架构。
 
-### 6.2 策略家族
+保守与激进共享方向、基础触发、止损和失效事实。V2-5 只允许确认门槛不同；除 profiles 外完整业务 payload 相同时必须合并，触发价相同但确认条件不同时保留两条计划且不伪造价格差异。风险金额和仓位差异由 V2-6 基于真实账户生成。
 
-保留 1.0 中有效策略，但按情景重新归类：
+### 6.3 条件、持久化和测试
 
-```text
-TrendContinuation      趋势延续
-PullbackEntry          趋势回踩
-MA120SupportRebound    半年线支撑
-RangeSupportBounce     区间支撑反弹
-BreakoutEntry          突破买入
-ProfitLock             冲高回落锁利
-FailedPullbackExit     反抽失败退出
-StopLossExit           止损退出
-PositionRiskControl    持仓风控
-ConditionalWatch       条件观察
-```
+条件使用可序列化三值 DSL，不使用 `eval`、lambda 或自然语言代替业务逻辑。`crosses_above/crosses_below` 没有事件序列时必须返回 pending_event，缺失事实必须返回 unknown。migration 9 持久化 TradePlan 和 StrategyBundle，并按业务身份幂等、冲突 quarantine、重启后强类型恢复。
 
-### 6.3 测试方案
+SP00-SP29 覆盖合同身份、九类模板、四分支完备、保守/激进、持仓退出、A/美股等价语义、三时段能力边界、数据库、架构和性能。测试文件与固定预期见 V2-5 规范。
 
-新增测试：
+验收命令：
 
 ```text
-tests/v2/test_strategy_engine_by_scenario.py
-tests/v2/test_trade_plan_contract.py
-tests/v2/test_strategy_stock_specific_learning.py
-```
-
-测试内容：
-
-1. bullish scenario 下允许回踩/突破计划。
-2. bearish scenario 下不允许新开仓计划升级为 A。
-3. range scenario 下优先支撑/压力计划。
-4. 同一个策略在不同股票上的参数和健康度互相隔离。
-5. 没有止损的买入计划不能进入 A/B。
-6. 没有预测 Champion 时，策略仍必须给出“条件观察计划”，不能空白。
-7. 同一次分析必须同时给出买入/加仓、卖出/减仓、持有和失效分支，且分支互斥、可解释。
-8. 盘前计划只在当日常规会话有效，盘中计划只在当日剩余会话有效，盘后计划只在下一交易日有效。
-9. 保守/激进方案不得给出互相矛盾的方向判断；同触发价时必须通过仓位和风险预算体现差异。
-
-验收标准：
-
-```text
-venv/bin/python -m pytest tests/v2/test_strategy_*.py -q
+venv/bin/python -m pytest tests/v2/test_trade_plan_contract.py tests/v2/test_strategy_*.py -q
+venv/bin/python -m pytest tests/v2/ -q -rs
+venv/bin/python -m pytest tests/ -q -rs
 ```
 
 ## 7. 风控层重构
@@ -1087,7 +1044,7 @@ venv/bin/python -m pytest tests/ -q
 
 - 将单一 `contracts.py` 调整为按市场数据、分析、决策和学习分包，避免 V2 再形成合同巨型文件。
 - 新增成交仿真层和组合决策层，明确同一 `TradePlan -> OrderIntent` 同时服务当前建议与历史回放。
-- 新增 `DecisionBundle`、保守/激进风险档案、计划会话和有效期，恢复 V1 已确认的完整条件计划语义。
+- 规划 `StrategyBundle`、保守/激进档案、计划会话和有效期，恢复 V1 已确认的完整条件计划语义；精确合同随后在 V2-5 规范中冻结。
 - 明确预测主要指标与校准护栏、策略绝对超额/风险调整双通道、五层效果归因和受控可回滚优化。
 - 补充交易所日历、时区、复权/公司行动、缺失字段、逐股质量隔离、provider 配额、幂等迁移和 V1 数据保护。
 - 增加 Tab1/Tab3 × A股/美股 × 盘前/盘中/盘后完整验收矩阵，以及前台性能和 macOS/Windows 发布烟雾标准。
@@ -1168,6 +1125,13 @@ venv/bin/python -m pytest tests/ -q
 - 吸收 V1 资产：盘前/盘中/盘后会话边界、预测与当前事实隔离、保护性退出永不被预测阻断。尚未迁移具体策略形态、TradePlan、风控、成交与账户约束。
 - 验证：V2-4 专项 SC00-SC21 `46 passed`；V2 全量 `183 passed, 3 skipped`；项目全量 `443 passed, 3 skipped`。被默认跳过的 3 条真实 Provider 冒烟测试使用 V1 本地配置显式启用后为 `3 passed`，覆盖双市场组合刷新、yfinance 美股基本面后备和 akshare A股年度字段后备。剩余边界：行业/市场预测仍只可作观察证据；新增事实只表示需要重新确认，不在情景层判断利多/利空。
 
+### 2026-07-14 V2-5 设计完成：策略层（待实现）
+
+- 新增规范 [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md)，冻结 StrategyInput、结构化条件 DSL、TradePlan、StrategyBundle、九类首批模板、migration 9 和 SP00-SP29。
+- 明确策略与风控所有权：TradePlan 生成动作、触发、结构止损、止盈、失效和有效期；股数、仓位、账户最大亏损和 A/B/C/D 只能由 V2-6 使用真实账户生成。
+- 完成 V1 策略迁移矩阵：合并重复策略，保留 MA120 支撑、冲高回落锁利、反抽失败退出和条件观察；对证据不足、需独立 OOF 或存在风险缺陷的策略明确暂缓/不迁移原因。
+- 设计双市场与三时段对称验收、四分支完备、保护性退出不被预测阻断、无事件证据不伪造穿越，以及当前预览/历史仿真共用 TradePlan 的边界。本阶段只有设计文档，不包含 V2-5 实现代码。
+
 | 阶段 | 状态 | 说明 |
 |------|------|------|
 | V2-0 测试基础设施 | 已完成 | Golden G00-G04、架构边界、冻结时钟、双市场 fixture 与性能基线已落地 |
@@ -1175,7 +1139,7 @@ venv/bin/python -m pytest tests/ -q
 | V2-2 特征层 | 已完成 | FeatureSnapshot、F00-F13、双市场点时特征、migration 5/FeatureStore、架构边界、性能及全量回归已通过 |
 | V2-3 预测层 | 已完成并复审 | Forecast contracts、波动率标签、FeatureSet/校准、JSON+zlib artifact、20候选、maturity-purged OOF、registry 回退/重启恢复、migration 6/7 和预测快照幂等读写已通过 FC00-FC18；不生成 TradePlan |
 | V2-4 情景层 | 已完成并复审 | TradingScenario 合同、多周期归并、来源/时效降级、当前事实覆盖、三时段会话、策略家族兼容性、migration 8、强校验持久化和 SC00-SC21 共46条测试已通过；不生成 TradePlan |
-| V2-5 策略层 | 未开始 | 等 TradingScenario 稳定 |
+| V2-5 策略层 | 已设计，待实现 | TradePlan/条件 DSL、九类首批模板、V1 迁移矩阵、migration 9 和 SP00-SP29 已冻结；当前只实现该层 |
 | V2-6 风控层 | 未开始 | 可并行梳理合同，但实现等 TradePlan 稳定 |
 | V2-7 成交仿真层 | 未开始 | 等 ExecutionDecision 和市场规则稳定 |
 | V2-8 组合决策层 | 未开始 | 等单股执行决策和冻结估值合同稳定 |
@@ -1184,6 +1148,6 @@ venv/bin/python -m pytest tests/ -q
 | V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
 | V2-12 迁移/端到端/发布 | 未开始 | 每层单测通过后执行完整矩阵与跨平台烟雾 |
 
-## 16. 当前下一步：V2-5 策略层设计
+## 16. 当前下一步：实现 V2-5 策略层
 
-V2-4 已完成复审并冻结。开始 V2-5 前必须先制定 StrategyInput、TradePlan、条件表达式、保守/激进差异和策略迁移清单的精确合同；不得把 TradingScenario 直接当作交易指令，也不得提前实现风控、组合决策、LLM 或 UI。
+V2-4 已完成复审并冻结，V2-5 精确设计已完成。实现必须严格按 [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md) 先固定 SP00-SP29，再完成合同、条件 DSL、registry、九类模板、四分支 engine、migration 9 和全量回归。完成后停止并复审；不得提前实现 V2-6 风控、成交、组合决策、学习、LLM 或 UI。
