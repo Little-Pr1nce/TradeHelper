@@ -1,4 +1,8 @@
-"""Idempotent schema version 1 for the isolated V2 database."""
+"""V2 独立数据库的不可变、可重复执行迁移。
+
+历史迁移 SQL 和 checksum 发布后不得修改；结构演进只能添加新版本，避免
+部署后的 schema_migrations 无法判断旧迁移是否被篡改。
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -323,6 +327,102 @@ CREATE INDEX IF NOT EXISTS idx_v2_features_lookup
 ON feature_snapshots(instrument_key, mode, cutoff_at DESC, feature_set_version);
 """.strip()
 
+_SCHEMA_V6_SQL = """
+CREATE TABLE IF NOT EXISTS forecast_model_versions (
+    version TEXT PRIMARY KEY,
+    market TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    horizon INTEGER NOT NULL,
+    spec_json TEXT NOT NULL,
+    lifecycle TEXT NOT NULL,
+    validation_status TEXT NOT NULL,
+    training_start TEXT NOT NULL,
+    training_end TEXT NOT NULL,
+    selection_start TEXT,
+    selection_end TEXT,
+    confirmation_start TEXT,
+    confirmation_end TEXT,
+    training_data_hash TEXT NOT NULL,
+    artifact_format TEXT NOT NULL,
+    artifact_hash TEXT NOT NULL,
+    artifact BLOB NOT NULL,
+    random_seed INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    promoted_at TEXT,
+    schema_version INTEGER NOT NULL,
+    UNIQUE(market, scope, scope_key, horizon, version)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_forecast_one_champion
+ON forecast_model_versions(market, scope, scope_key, horizon)
+WHERE lifecycle = 'champion';
+
+CREATE TABLE IF NOT EXISTS forecast_model_evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_version TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    data_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(model_version, phase, data_hash),
+    FOREIGN KEY(model_version) REFERENCES forecast_model_versions(version)
+);
+
+CREATE TABLE IF NOT EXISTS forecast_snapshots (
+    event_key TEXT PRIMARY KEY,
+    instrument_key TEXT NOT NULL,
+    origin_session_date TEXT NOT NULL,
+    target_session_date TEXT NOT NULL,
+    horizon INTEGER NOT NULL,
+    model_version TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_forecast_snapshots_lookup
+ON forecast_snapshots(instrument_key, origin_session_date, horizon);
+
+CREATE TABLE IF NOT EXISTS forecast_promotion_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    horizon INTEGER NOT NULL,
+    previous_version TEXT,
+    promoted_version TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(promoted_version),
+    FOREIGN KEY(promoted_version) REFERENCES forecast_model_versions(version)
+);
+""".strip()
+
+_SCHEMA_V7_SQL = """
+ALTER TABLE forecast_model_versions ADD COLUMN sample_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE forecast_model_versions ADD COLUMN oof_sample_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE forecast_snapshots RENAME TO forecast_snapshots_legacy_v6;
+CREATE TABLE forecast_snapshots (
+    event_key TEXT PRIMARY KEY,
+    instrument_key TEXT NOT NULL,
+    origin_session_date TEXT NOT NULL,
+    target_session_date TEXT,
+    horizon INTEGER NOT NULL,
+    model_version TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL
+);
+INSERT INTO forecast_snapshots
+SELECT event_key, instrument_key, origin_session_date, target_session_date, horizon,
+       model_version, payload_json, payload_hash, generated_at, schema_version
+FROM forecast_snapshots_legacy_v6;
+DROP TABLE forecast_snapshots_legacy_v6;
+CREATE INDEX idx_v2_forecast_snapshots_lookup
+ON forecast_snapshots(instrument_key, origin_session_date, horizon);
+""".strip()
+
 
 def schema_checksum() -> str:
     return sha256(_SCHEMA_SQL.encode("utf-8")).hexdigest()
@@ -344,7 +444,16 @@ def schema_v5_checksum() -> str:
     return sha256(_SCHEMA_V5_SQL.encode("utf-8")).hexdigest()
 
 
+def schema_v6_checksum() -> str:
+    return sha256(_SCHEMA_V6_SQL.encode("utf-8")).hexdigest()
+
+
+def schema_v7_checksum() -> str:
+    return sha256(_SCHEMA_V7_SQL.encode("utf-8")).hexdigest()
+
+
 def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, checksum: str) -> None:
+    """执行一次迁移并固化 checksum；重复执行只校验，不重放旧 SQL。"""
     migrations_exists = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
     ).fetchone()
@@ -365,11 +474,13 @@ def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, che
 
 
 def apply_schema(connection: sqlite3.Connection) -> None:
-    """Apply versioned V2 schema migrations without touching V1 databases."""
+    """按序应用 V2 迁移，不读取、更不修改 V1 数据库。"""
     connection.execute("PRAGMA foreign_keys = ON")
     _apply_migration(connection, 1, _SCHEMA_SQL, schema_checksum())
     _apply_migration(connection, 2, _SCHEMA_V2_SQL, schema_v2_checksum())
     _apply_migration(connection, 3, _SCHEMA_V3_SQL, schema_v3_checksum())
     _apply_migration(connection, 4, _SCHEMA_V4_SQL, schema_v4_checksum())
     _apply_migration(connection, 5, _SCHEMA_V5_SQL, schema_v5_checksum())
+    _apply_migration(connection, 6, _SCHEMA_V6_SQL, schema_v6_checksum())
+    _apply_migration(connection, 7, _SCHEMA_V7_SQL, schema_v7_checksum())
     connection.commit()

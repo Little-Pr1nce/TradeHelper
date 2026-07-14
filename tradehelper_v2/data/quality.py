@@ -1,4 +1,4 @@
-"""Deterministic V2 data-quality and freshness rules."""
+"""确定性的 V2 数据质量与新鲜度规则，避免质量判断随调用顺序漂移。"""
 
 from __future__ import annotations
 

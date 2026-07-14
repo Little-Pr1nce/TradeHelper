@@ -22,7 +22,7 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-3 预测层规范：[docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 测试基础设施、V2-1 数据层与 V2-2 特征层已经完成并通过审计修复。V2-3 预测层精确合同、标签、OOF、模型注册、Golden Cases 和测试顺序已经完成设计，下一步只按规范实现预测层，不提前进入情景、策略或 UI。
+V2-0 测试基础设施、V2-1 数据层、V2-2 特征层与 V2-3 预测层已经完成。V2-3 已通过复审修复：预测合同、交易日标签、概率校准、真实 regime-analog、滚动 OOF、模型注册/回退、重启恢复和 migration 6/7 均由 FC00-FC18 固定验证；它只产生 ForecastResult，不产生交易动作。下一步须先设计 V2-4 情景层，不能提前进入策略或 UI。
 
 ## 一以贯之的系统目标
 
@@ -100,7 +100,7 @@ venv/bin/python -m pytest tests/ -q
 tests/v2/
 ```
 
-V2-2 已完成并冻结。V2-3 只允许按 `docs/v2/V2_3_FORECAST.md` 实现预测合同、模型、OOF、registry 和存储；完成后停止，不得提前实现情景、策略、风控或 UI。
+V2-3 已完成复审并冻结。后续不得改写其预测合同或直接把预测当交易指令；V2-4 必须先建立 TradingScenario 精确合同，仍不得提前实现策略、风控或 UI。
 
 ## 历史资料
 

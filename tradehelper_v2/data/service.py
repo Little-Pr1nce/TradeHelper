@@ -1,4 +1,7 @@
-"""V2 data-routing service.
+"""V2 数据路由服务。
+
+本模块负责来源选择与缓存刷新，并刻意止步于事实层：不能在这里计算指标、
+预测或交易计划。这样 Provider 失败会以状态传播，而不是被高层猜测掩盖。
 
 This module owns source selection and cache refresh.  It deliberately stops at
 facts: it never calculates indicators, forecasts, strategies, or trade plans.

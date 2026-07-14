@@ -1178,12 +1178,22 @@ venv/bin/python -m pytest tests/ -q
 - 验证：`venv/bin/python -m pytest tests/v2/ -q -rs` -> `102 passed, 3 skipped`；`venv/bin/python -m pytest tests/ -q -rs` -> `362 passed, 3 skipped`。三个 skip 是默认关闭的真实网络 smoke；显式使用 V1 本地凭据运行 `TRADEHELPER_LIVE_TESTS=1 TRADEHELPER_LIVE_USE_V1_SETTINGS=1 venv/bin/python -m pytest tests/v2/integration/test_live_providers.py -vv -rs` -> `3 passed in 44.69s`，覆盖 AAPL Finnhub/Nasdaq/新闻、600519 baostock/TickFlow/新闻、yfinance 基本面降级与 akshare 明确年报字段。
 - 剩余风险：V2-1 的基础事实没有逐次修订历史，因此从当前 canonical 数据回放的历史快照必须保持 `reconstructed_history`；新闻 FinBERT 标签仅在已有事实提供时参与情绪均值；市场/行业上下文尚无权威输入，仍明确缺失。V2-3 之前需要复审预测层合同，不能直接把当前缺失特征编码或填补。
 
+### 2026-07-14 V2-3 完成：预测层（复审修复通过）
+
+- 新增不可变 ForecastRequest/Result、方向概率、收益区间、训练样本和模型版本合同；预测只接受 EOD 特征快照和前复权收盘 reference bar，固定支持 1/3/5/10 个交易日。
+- 实现波动率缩放三分类标签、到期样本 purge、显式 FeatureSet、训练折中位数/IQR 缩放与缺失指示列。`current.*`、绝对 MA 和未登记文本不会进入矩阵。
+- 实现经验基线、analog、logistic、概率树、ensemble 和真实 regime-analog 候选；修复近邻权重归一化，概率温度校准进入 artifact 和推理，Tree 叶节点下限、20 个候选及 class-mixture 收益区间均按规范执行；artifact 仅为 canonical JSON + zlib，不使用 pickle/joblib。
+- 实现 expanding-window OOF、完整交易日 selection/confirmation 隔离、Brier/LogLoss/ECE/区间覆盖和固定种子的向量化时间块 bootstrap。模型每 20 个交易日重训、期间每日继续样本外预测；只有确认通过的 stock Champion 才能标记为 execution eligible。
+- schema 升至 migration 7：migration 6 保持 checksum 不变，migration 7 增加模型样本证据并允许日历失败时目标日为空。模型、评估、预测结果和 Champion 均支持幂等读写与重启恢复；仅 generated_at 不同不会误入 quarantine。
+- 验证：`venv/bin/python -m pytest tests/v2/test_forecast_*.py -q` -> `34 passed in 31.27s`；`venv/bin/python -m pytest tests/v2/ -q -rs` -> `137 passed, 3 skipped in 37.01s`；`venv/bin/python -m pytest tests/ -q -rs` -> `397 passed, 3 skipped in 67.23s`。FC00-FC18 已覆盖合同、日历、点时样本、校准、真实状态近邻、可预测/随机 synthetic、双市场对称、完整 fallback、重启持久化、双市场 FeatureSnapshot smoke、取消和性能；500 点×4 horizon×完整候选池为 `2 passed in 29.94s`。
+- 剩余风险：正式行业/市场 Champion 仍依赖未来可获得的 point-in-time 行业历史；已有 `reconstructed_history` 不得被用于跨股票确认。V2-3 不验证到期事实、不记录预测/策略/联合账，均明确留给 V2-9。
+
 | 阶段 | 状态 | 说明 |
 |------|------|------|
 | V2-0 测试基础设施 | 已完成 | Golden G00-G04、架构边界、冻结时钟、双市场 fixture 与性能基线已落地 |
 | V2-1 数据层 | 已完成 | Golden G10-G29/G30-G63、Provider fixture、路由、时点语义、质量、独立 repository、持久化配额续跑、并发、日K跨源漂移审计及真实 Provider smoke 均已通过 |
 | V2-2 特征层 | 已完成 | FeatureSnapshot、F00-F13、双市场点时特征、migration 5/FeatureStore、架构边界、性能及全量回归已通过 |
-| V2-3 预测层 | 已设计，待实现 | `docs/v2/V2_3_FORECAST.md` 已固定合同、标签、模型池、OOF、registry、migration 6、FC00-FC18 和测试顺序 |
+| V2-3 预测层 | 已完成并复审 | Forecast contracts、波动率标签、FeatureSet/校准、JSON+zlib artifact、20候选、maturity-purged OOF、registry 回退/重启恢复、migration 6/7 和预测快照幂等读写已通过 FC00-FC18；不生成 TradePlan |
 | V2-4 情景层 | 未开始 | 等 ForecastResult V2 稳定 |
 | V2-5 策略层 | 未开始 | 等 TradingScenario 稳定 |
 | V2-6 风控层 | 未开始 | 可并行梳理合同，但实现等 TradePlan 稳定 |
@@ -1194,6 +1204,6 @@ venv/bin/python -m pytest tests/ -q
 | V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
 | V2-12 迁移/端到端/发布 | 未开始 | 每层单测通过后执行完整矩阵与跨平台烟雾 |
 
-## 16. 当前下一步：V2-3 预测层实现
+## 16. 当前下一步：设计 V2-4 情景层
 
-V2-2 已完成并冻结。实现者必须先阅读 [docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md)，严格按其中的合同、波动率标签、FeatureSet、selection/confirmation 隔离、晋升标准、registry、migration 6 和 FC00-FC18 顺序开发。不得把特征层缺失值解释为真实默认值，也不得提前实现情景、策略、风控、组合决策、LLM 或 UI。
+V2-3 已完成复审并冻结。开始 V2-4 前必须另行制定 `TradingScenario` 精确合同，明确如何把独立概率预测、当前事实和报告时段翻译为可交易环境；不得在情景层直接生成订单，也不得提前实现策略、风控、组合决策、LLM 或 UI。行业/市场 Champion 仍只能作为非执行 fallback，直到后续风控合同明确其证据等级。

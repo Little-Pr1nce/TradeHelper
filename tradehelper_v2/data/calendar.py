@@ -1,4 +1,4 @@
-"""Exchange-session services with deterministic test calendars."""
+"""交易所 session 服务与确定性测试日历；预测目标日绝不退化为自然日。"""
 
 from __future__ import annotations
 

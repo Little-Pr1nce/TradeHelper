@@ -1,4 +1,4 @@
-"""Data-quality contracts independent from any trading decision."""
+"""独立于交易决策的数据质量合同；质量降级必须可解释、可审计。"""
 
 from __future__ import annotations
 

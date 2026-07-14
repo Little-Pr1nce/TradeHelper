@@ -1,4 +1,9 @@
-"""SQLite persistence boundary for the isolated V2 data store."""
+"""隔离的 V2 SQLite 持久化边界。
+
+此模块是唯一允许写入 V2 数据库的低层边界：它负责幂等、冲突 quarantine、
+事务和时间序列身份，绝不在这里计算指标、预测或交易建议。V1 数据库只可
+通过只读预检访问，不能被本模块迁移或覆盖。
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
@@ -40,6 +46,20 @@ from tradehelper_v2.contracts.market_data import (
     utc_iso,
 )
 from tradehelper_v2.contracts.providers import DailyBarsRequest, MigrationPreflight
+from tradehelper_v2.contracts.forecast import (
+    DirectionProbabilities,
+    ForecastAvailability,
+    ForecastDirection,
+    ForecastDriver,
+    ForecastModelVersion,
+    ForecastResult,
+    ForecastScope,
+    ModelFamily,
+    ModelLifecycle,
+    ModelSpec,
+    ReturnDistribution,
+    ValidationStatus,
+)
 from .migrations.schema import apply_schema
 
 
@@ -102,6 +122,13 @@ class FeatureSnapshotWriteResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ForecastWriteResult:
+    inserted: int
+    idempotent: int
+    conflicts: int
+
+
+@dataclass(frozen=True, slots=True)
 class QueuedDailyRefresh:
     queue_id: int
     request: DailyBarsRequest
@@ -133,7 +160,7 @@ class QueuedProviderRefresh:
 
 
 class SQLiteRepository:
-    """Repository that only writes the V2 database path supplied by the caller."""
+    """只写调用方显式提供的 V2 路径，避免误碰用户已有 V1 数据库。"""
 
     def __init__(self, database_path: Path | str) -> None:
         self.database_path = Path(database_path)
@@ -157,7 +184,7 @@ class SQLiteRepository:
         limit: int,
         window: timedelta,
     ) -> datetime | None:
-        """Reserve a durable rate-limit slot, or return its precise next retry time."""
+        """原子预留一个持久化 Provider 配额，或返回可重试的精确时间。"""
         now = ensure_utc(as_of, "as_of")
         cutoff = utc_iso(now - window)
         with self._transaction() as connection:
@@ -388,6 +415,7 @@ class SQLiteRepository:
         return stable_hash(payload)
 
     def upsert_feature_snapshot(self, snapshot: FeatureSnapshot) -> FeatureSnapshotWriteResult:
+        """按冻结输入身份幂等保存特征；同 key 不同事实进入 quarantine。"""
         if not isinstance(snapshot, FeatureSnapshot):
             raise ContractViolation("feature store only accepts FeatureSnapshot")
         payload_hash = self._feature_payload_hash(snapshot)
@@ -454,8 +482,231 @@ class SQLiteRepository:
             generated_at=_parse_datetime(payload["generated_at"]), schema_version=payload["schema_version"],
         )
 
+    @staticmethod
+    def _forecast_model_payload(version: ForecastModelVersion) -> dict[str, object]:
+        return {
+            "spec_id": version.spec.spec_id, "family": version.spec.family.value,
+            "feature_set_id": version.spec.feature_set_id, "hyperparameters": dict(version.spec.hyperparameters),
+            "primary_metric": version.spec.primary_metric, "label_policy_version": version.spec.label_policy_version,
+            "preprocessing_version": version.spec.preprocessing_version, "complexity_rank": version.spec.complexity_rank,
+        }
+
+    def save_forecast_model_version(self, version: ForecastModelVersion) -> ForecastWriteResult:
+        """保存不可变模型版本，并再次校验 artifact 字节哈希。"""
+        if version.lifecycle is ModelLifecycle.CHAMPION:
+            raise ContractViolation("champion versions must use atomic promote_forecast_model")
+        if sha256(version.artifact).hexdigest() != version.artifact_hash:
+            raise ContractViolation("forecast model artifact hash does not match artifact bytes")
+        payload = self._forecast_model_payload(version)
+        with self._transaction() as connection:
+            existing = connection.execute("SELECT artifact_hash FROM forecast_model_versions WHERE version=?", (version.version,)).fetchone()
+            if existing is not None:
+                if existing["artifact_hash"] == version.artifact_hash:
+                    return ForecastWriteResult(0, 1, 0)
+                connection.execute("INSERT INTO quarantine_records(record_type, instrument_key, trading_date, reason, payload_json, created_at) VALUES (?, NULL, NULL, ?, ?, ?)", ("forecast_model_conflict", "CONFLICTING_FORECAST_MODEL", canonical_json(version), utc_iso(datetime.now(timezone.utc))))
+                return ForecastWriteResult(0, 0, 1)
+            connection.execute(
+                """INSERT INTO forecast_model_versions(version, market, scope, scope_key, horizon, spec_json, lifecycle,
+                   validation_status, training_start, training_end, selection_start, selection_end, confirmation_start,
+                   confirmation_end, training_data_hash, artifact_format, artifact_hash, artifact, random_seed,
+                   sample_count, oof_sample_count, created_at, promoted_at, schema_version)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (version.version, version.market.value, version.scope.value, version.scope_key, version.horizon,
+                 canonical_json(payload), version.lifecycle.value, version.validation_status.value,
+                 version.training_start.isoformat(), version.training_end.isoformat(),
+                 version.selection_start.isoformat() if version.selection_start else None,
+                 version.selection_end.isoformat() if version.selection_end else None,
+                 version.confirmation_start.isoformat() if version.confirmation_start else None,
+                 version.confirmation_end.isoformat() if version.confirmation_end else None,
+                 version.training_data_hash, version.artifact_format, version.artifact_hash, version.artifact,
+                 version.random_seed, version.sample_count, version.oof_sample_count,
+                 utc_iso(version.created_at), utc_iso(version.promoted_at) if version.promoted_at else None,
+                 version.schema_version),
+            )
+        return ForecastWriteResult(1, 0, 0)
+
+    def promote_forecast_model(self, version: ForecastModelVersion) -> None:
+        """单事务退役旧 Champion、晋升新版本并追加不可变事件记录。"""
+        if version.lifecycle is not ModelLifecycle.CHAMPION or version.validation_status.value != "confirmation_passed":
+            raise ContractViolation("only confirmation-passed champion can be promoted")
+        if sha256(version.artifact).hexdigest() != version.artifact_hash:
+            raise ContractViolation("forecast model artifact hash does not match artifact bytes")
+        with self._transaction() as connection:
+            existing = connection.execute("SELECT artifact_hash FROM forecast_model_versions WHERE version=?", (version.version,)).fetchone()
+            if existing is None:
+                payload = self._forecast_model_payload(version)
+                # Insert as candidate first; this permits the partial unique champion
+                # index to enforce the one-champion invariant throughout the transaction.
+                connection.execute(
+                    """INSERT INTO forecast_model_versions(version, market, scope, scope_key, horizon, spec_json, lifecycle,
+                       validation_status, training_start, training_end, selection_start, selection_end, confirmation_start,
+                       confirmation_end, training_data_hash, artifact_format, artifact_hash, artifact, random_seed,
+                       sample_count, oof_sample_count, created_at, promoted_at, schema_version)
+                       VALUES (?, ?, ?, ?, ?, ?, 'candidate', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+                    (version.version, version.market.value, version.scope.value, version.scope_key, version.horizon,
+                     canonical_json(payload), version.validation_status.value, version.training_start.isoformat(),
+                     version.training_end.isoformat(), version.selection_start.isoformat() if version.selection_start else None,
+                     version.selection_end.isoformat() if version.selection_end else None,
+                     version.confirmation_start.isoformat() if version.confirmation_start else None,
+                     version.confirmation_end.isoformat() if version.confirmation_end else None, version.training_data_hash,
+                     version.artifact_format, version.artifact_hash, version.artifact, version.random_seed,
+                     version.sample_count, version.oof_sample_count, utc_iso(version.created_at), version.schema_version),
+                )
+            elif existing["artifact_hash"] != version.artifact_hash:
+                raise ContractViolation("existing forecast version conflicts with promoted artifact")
+            prior = connection.execute("SELECT version FROM forecast_model_versions WHERE market=? AND scope=? AND scope_key=? AND horizon=? AND lifecycle='champion'", (version.market.value, version.scope.value, version.scope_key, version.horizon)).fetchone()
+            if prior and prior["version"] != version.version:
+                connection.execute("UPDATE forecast_model_versions SET lifecycle='retired' WHERE version=?", (prior["version"],))
+            connection.execute("UPDATE forecast_model_versions SET lifecycle='champion', validation_status='confirmation_passed', promoted_at=? WHERE version=?", (utc_iso(version.promoted_at or datetime.now(timezone.utc)), version.version))
+            connection.execute("INSERT OR IGNORE INTO forecast_promotion_events(market, scope, scope_key, horizon, previous_version, promoted_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (version.market.value, version.scope.value, version.scope_key, version.horizon, prior["version"] if prior else None, version.version, utc_iso(datetime.now(timezone.utc))))
+
+    @staticmethod
+    def _forecast_model_from_row(row: sqlite3.Row) -> ForecastModelVersion:
+        spec_payload = json.loads(row["spec_json"])
+        spec = ModelSpec(
+            spec_id=spec_payload["spec_id"], family=ModelFamily(spec_payload["family"]),
+            feature_set_id=spec_payload["feature_set_id"], hyperparameters=spec_payload["hyperparameters"],
+            primary_metric=spec_payload["primary_metric"], label_policy_version=spec_payload["label_policy_version"],
+            preprocessing_version=spec_payload["preprocessing_version"], complexity_rank=int(spec_payload["complexity_rank"]),
+        )
+        return ForecastModelVersion(
+            version=row["version"], scope=ForecastScope(row["scope"]), scope_key=row["scope_key"],
+            market=Market(row["market"]), horizon=int(row["horizon"]), spec=spec,
+            lifecycle=ModelLifecycle(row["lifecycle"]), validation_status=ValidationStatus(row["validation_status"]),
+            training_start=date.fromisoformat(row["training_start"]), training_end=date.fromisoformat(row["training_end"]),
+            selection_start=date.fromisoformat(row["selection_start"]) if row["selection_start"] else None,
+            selection_end=date.fromisoformat(row["selection_end"]) if row["selection_end"] else None,
+            confirmation_start=date.fromisoformat(row["confirmation_start"]) if row["confirmation_start"] else None,
+            confirmation_end=date.fromisoformat(row["confirmation_end"]) if row["confirmation_end"] else None,
+            training_data_hash=row["training_data_hash"], artifact_format=row["artifact_format"],
+            artifact_hash=row["artifact_hash"], artifact=bytes(row["artifact"]), random_seed=int(row["random_seed"]),
+            sample_count=int(row["sample_count"]), oof_sample_count=int(row["oof_sample_count"]),
+            created_at=_parse_datetime(row["created_at"]),
+            promoted_at=_parse_datetime(row["promoted_at"]) if row["promoted_at"] else None,
+            schema_version=int(row["schema_version"]),
+        )
+
+    def get_forecast_model_version(self, version: str) -> ForecastModelVersion | None:
+        row = self._fetchone("SELECT * FROM forecast_model_versions WHERE version=?", (version,))
+        return self._forecast_model_from_row(row) if row is not None else None
+
+    def list_forecast_champions(self) -> tuple[ForecastModelVersion, ...]:
+        rows = self._fetchall(
+            "SELECT * FROM forecast_model_versions WHERE lifecycle='champion' ORDER BY market, scope, scope_key, horizon",
+            (),
+        )
+        return tuple(self._forecast_model_from_row(row) for row in rows)
+
+    def save_forecast_model_evaluation(
+        self, *, model_version: str, phase: str, data_hash: str, payload: Mapping[str, object], created_at: datetime,
+    ) -> ForecastWriteResult:
+        if phase not in {"selection", "confirmation"} or len(data_hash) != 64:
+            raise ContractViolation("invalid forecast model evaluation identity")
+        payload_json = canonical_json(payload)
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT payload_json FROM forecast_model_evaluations WHERE model_version=? AND phase=? AND data_hash=?",
+                (model_version, phase, data_hash),
+            ).fetchone()
+            if existing is not None:
+                if existing["payload_json"] == payload_json:
+                    return ForecastWriteResult(0, 1, 0)
+                connection.execute(
+                    "INSERT INTO quarantine_records(record_type, instrument_key, trading_date, reason, payload_json, created_at) VALUES (?, NULL, NULL, ?, ?, ?)",
+                    ("forecast_evaluation_conflict", "CONFLICTING_FORECAST_EVALUATION", payload_json, utc_iso(datetime.now(timezone.utc))),
+                )
+                return ForecastWriteResult(0, 0, 1)
+            connection.execute(
+                "INSERT INTO forecast_model_evaluations(model_version, phase, data_hash, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+                (model_version, phase, data_hash, payload_json, utc_iso(created_at)),
+            )
+        return ForecastWriteResult(1, 0, 0)
+
+    def list_forecast_model_evaluations(self, model_version: str) -> tuple[dict[str, object], ...]:
+        rows = self._fetchall(
+            "SELECT phase, data_hash, payload_json, created_at FROM forecast_model_evaluations WHERE model_version=? ORDER BY created_at, phase",
+            (model_version,),
+        )
+        return tuple({"phase": row["phase"], "data_hash": row["data_hash"], "payload": json.loads(row["payload_json"]), "created_at": _parse_datetime(row["created_at"])} for row in rows)
+
+    @staticmethod
+    def _forecast_result_from_payload(payload: Mapping[str, object]) -> ForecastResult:
+        instrument_payload = payload["instrument"]
+        assert isinstance(instrument_payload, Mapping)
+        instrument = InstrumentId(
+            str(instrument_payload["code"]), Market(str(instrument_payload["market"])), Exchange(str(instrument_payload["exchange"])),
+        )
+        probabilities_payload = payload.get("probabilities")
+        distribution_payload = payload.get("return_distribution")
+        drivers_payload = payload.get("drivers") or ()
+        probabilities = DirectionProbabilities(**probabilities_payload) if isinstance(probabilities_payload, Mapping) else None
+        distribution = ReturnDistribution(**distribution_payload) if isinstance(distribution_payload, Mapping) else None
+        drivers = tuple(
+            ForecastDriver(
+                feature_name=str(item["feature_name"]), observed_value=float(item["observed_value"]),
+                winning_probability_effect=float(item["winning_probability_effect"]),
+                direction=ForecastDirection(str(item["direction"])), rank=int(item["rank"]),
+            )
+            for item in drivers_payload if isinstance(item, Mapping)
+        )
+        target = payload.get("target_session_date")
+        return ForecastResult(
+            instrument=instrument, cutoff_at=_parse_datetime(str(payload["cutoff_at"])),
+            origin_session_date=date.fromisoformat(str(payload["origin_session_date"])),
+            target_session_date=date.fromisoformat(str(target)) if target else None,
+            horizon=int(payload["horizon"]), reference_price=float(payload["reference_price"]),
+            availability=ForecastAvailability(str(payload["availability"])), probabilities=probabilities,
+            return_distribution=distribution,
+            direction=ForecastDirection(str(payload["direction"])) if payload.get("direction") else None,
+            confidence_margin=float(payload["confidence_margin"]) if payload.get("confidence_margin") is not None else None,
+            model_scope=ForecastScope(str(payload["model_scope"])), scope_key=str(payload["scope_key"]),
+            model_family=ModelFamily(str(payload["model_family"])), model_version=str(payload["model_version"]),
+            lifecycle=ModelLifecycle(str(payload["lifecycle"])), validation_status=ValidationStatus(str(payload["validation_status"])),
+            execution_eligible=bool(payload["execution_eligible"]), feature_set_id=str(payload["feature_set_id"]),
+            feature_set_version=str(payload["feature_set_version"]), model_input_hash=str(payload["model_input_hash"]),
+            training_data_hash=str(payload["training_data_hash"]) if payload.get("training_data_hash") else None,
+            sample_count=int(payload["sample_count"]), oof_sample_count=int(payload["oof_sample_count"]), drivers=drivers,
+            calendar_source=str(payload["calendar_source"]), reason=str(payload["reason"]) if payload.get("reason") else None,
+            event_key=str(payload["event_key"]), generated_at=_parse_datetime(str(payload["generated_at"])),
+            schema_version=int(payload.get("schema_version", 1)),
+        )
+
+    def get_forecast_result(self, event_key: str) -> ForecastResult | None:
+        row = self._fetchone("SELECT payload_json FROM forecast_snapshots WHERE event_key=?", (event_key,))
+        return self._forecast_result_from_payload(json.loads(row["payload_json"])) if row is not None else None
+
+    def list_forecast_results(self, instrument: InstrumentId, *, horizon: int | None = None) -> tuple[ForecastResult, ...]:
+        sql = "SELECT payload_json FROM forecast_snapshots WHERE instrument_key=?"
+        parameters: tuple[object, ...] = (instrument.stable_key,)
+        if horizon is not None:
+            sql += " AND horizon=?"
+            parameters += (horizon,)
+        sql += " ORDER BY origin_session_date, horizon, event_key"
+        return tuple(self._forecast_result_from_payload(json.loads(row["payload_json"])) for row in self._fetchall(sql, parameters))
+
+    def save_forecast_result(self, result: ForecastResult) -> ForecastWriteResult:
+        """按 event_key 幂等记录预测发行事实；冲突不覆盖而是 quarantine。"""
+        identity_payload = json.loads(canonical_json(result))
+        identity_payload.pop("generated_at", None)
+        payload_hash = stable_hash(identity_payload)
+        with self._transaction() as connection:
+            existing = connection.execute("SELECT payload_hash, payload_json FROM forecast_snapshots WHERE event_key=?", (result.event_key,)).fetchone()
+            if existing is not None:
+                if existing["payload_hash"] == payload_hash:
+                    return ForecastWriteResult(0, 1, 0)
+                stored_payload = json.loads(existing["payload_json"])
+                stored_payload.pop("generated_at", None)
+                if stable_hash(stored_payload) == payload_hash:
+                    connection.execute("UPDATE forecast_snapshots SET payload_hash=? WHERE event_key=?", (payload_hash, result.event_key))
+                    return ForecastWriteResult(0, 1, 0)
+                connection.execute("INSERT INTO quarantine_records(record_type, instrument_key, trading_date, reason, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", ("forecast_snapshot_conflict", result.instrument.stable_key, result.origin_session_date.isoformat(), "CONFLICTING_FORECAST_SNAPSHOT", canonical_json(result), utc_iso(datetime.now(timezone.utc))))
+                return ForecastWriteResult(0, 0, 1)
+            connection.execute("INSERT INTO forecast_snapshots(event_key, instrument_key, origin_session_date, target_session_date, horizon, model_version, payload_json, payload_hash, generated_at, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (result.event_key, result.instrument.stable_key, result.origin_session_date.isoformat(), result.target_session_date.isoformat() if result.target_session_date else None, result.horizon, result.model_version, canonical_json(result), payload_hash, utc_iso(result.generated_at), result.schema_version))
+        return ForecastWriteResult(1, 0, 0)
+
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
+        """统一事务边界：任意异常回滚，成功才提交，且受可重入锁保护。"""
         with self._lock:
             try:
                 self._connection.execute("BEGIN")

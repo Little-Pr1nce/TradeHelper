@@ -1,4 +1,4 @@
-"""Account contracts kept separate from market observations."""
+"""账户合同：与行情观察严格分离，禁止虚构本金或用成本价冒充市值。"""
 
 from __future__ import annotations
 

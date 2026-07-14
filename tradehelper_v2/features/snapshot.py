@@ -1,4 +1,8 @@
-"""FeatureSnapshot orchestration: filtering, hashing, and pure feature assembly."""
+"""FeatureSnapshot 编排：按截止时点过滤事实、计算哈希并纯本地组装特征。
+
+本模块不调用 Provider；它只消费已取得的事实，保证同一输入在任何机器上
+生成相同特征快照，并明确区分观察快照与历史重建证据。
+"""
 
 from __future__ import annotations
 
@@ -70,7 +74,7 @@ def _quality_payload(report):
 
 
 class FeatureBuilder:
-    """Build point-in-time feature facts without calling providers or upper layers."""
+    """在不联网且不越过特征层边界的前提下构建点时特征事实。"""
 
     def __init__(
         self,
@@ -89,6 +93,7 @@ class FeatureBuilder:
         return inputs.cutoff_at.astimezone(zone).date()
 
     def _filtered_bars(self, inputs: FeatureInputs):
+        """EOD 只取已收盘 session；盘前/盘中不能偷看当日未收盘日 K。"""
         if inputs.mode.value == "eod":
             latest = self._calendar.latest_completed_session(inputs.instrument.market, inputs.cutoff_at)
         else:
@@ -138,6 +143,7 @@ class FeatureBuilder:
         return tuple(defaults.values())
 
     def build(self, inputs: FeatureInputs, *, generated_at: datetime | None = None) -> FeatureSnapshot:
+        """组装并哈希快照；缺失保留状态，绝不以零或中性值伪造事实。"""
         if inputs.evidence_mode.value == "observed_snapshot" and (
             self._observed_input_verifier is None or not self._observed_input_verifier(inputs)
         ):

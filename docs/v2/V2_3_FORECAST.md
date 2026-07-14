@@ -1,6 +1,6 @@
 # TradeHelper V2-3 预测层规范
 
-> 状态：设计完成，待实现。本文档是 V2-3 的规范性合同。实现者必须先完成本文列出的测试，不得根据实现结果反向修改 Golden Cases。发生冲突时，本文件优先于 `V2_REFACTOR_PLAN.md` 中的概念示例；V2-0/V2-1 数据合同和 V2-2 特征合同继续有效。
+> 状态：已实现、已复审、已冻结。本文档是 V2-3 的规范性合同。实现者必须保持本文列出的 Golden Cases，不得根据实现结果反向修改标准答案。发生冲突时，本文件优先于 `V2_REFACTOR_PLAN.md` 中的概念示例；V2-0/V2-1 数据合同和 V2-2 特征合同继续有效。
 
 ## 1. 阶段目标和边界
 
@@ -160,6 +160,7 @@ ForecastRequest:
   reference_bar: CanonicalBar
   horizons: tuple[int, ...] = (1, 3, 5, 10)
   requested_at: datetime
+  data_quality: DataQualityReport | None = None
 ```
 
 不变量：
@@ -172,6 +173,7 @@ ForecastRequest:
 - `current.*` 即使存在于 FeatureSnapshot，也不得进入预测模型输入。
 - 当前 quote 不能替代 `reference_bar.close`。盘前/盘中分析复用最近完成交易日的 EOD 预测；实时价、隔夜增量新闻和报告运行模式留给 V2-4/V2-5 作为情景输入。
 - V2-3 不训练盘前/盘中专属模型。没有可回放的历史同时间点快照时，把当前增量事实塞进只用 EOD 历史训练的模型会造成训练/推理口径漂移。
+- data_quality 为 blocked 时只能返回 `data_blocked`，不得继续输出概率；None 只用于离线 synthetic/已由上游验证的调用。
 
 ### 3.6 ForecastResult
 
@@ -180,7 +182,7 @@ ForecastResult:
   instrument: InstrumentId
   cutoff_at: datetime
   origin_session_date: date
-  target_session_date: date
+  target_session_date: date | None
   horizon: int
   reference_price: float
   availability: ForecastAvailability
@@ -213,6 +215,7 @@ ForecastResult:
 
 - `availability=available` 时，probabilities、return_distribution、direction 和 confidence_margin 必须存在。
 - 其他状态下 probabilities、return_distribution、direction 和 confidence_margin 必须为 `None`。
+- 只有 `calendar_unavailable` 允许 `target_session_date=None`；此时 event identity 使用固定标记 `calendar-unavailable`，不得用自然日伪造目标交易日。
 - `direction` 是最大概率类别；并列时固定优先级为 `neutral > bearish > bullish`，避免无证据时偏向做多。
 - `confidence_margin = 最大概率 - 第二大概率`，范围 `[0, 1]`。
 - `execution_eligible=True` 仅允许 `lifecycle=champion` 且 `validation_status=confirmation_passed`。
@@ -260,6 +263,8 @@ ForecastModelVersion:
   artifact_hash: str
   artifact: bytes
   random_seed: int
+  sample_count: int
+  oof_sample_count: int
   created_at: datetime
   promoted_at: datetime | None
   schema_version: int = 1
@@ -287,10 +292,11 @@ ForecastTrainingSample:
   feature_hash: str
   evidence_mode: FeatureEvidenceMode
   matured_at: date
+  scope_membership_available_at: Mapping[ForecastScope, datetime]
   schema_version: int = 1
 ```
 
-不变量：target 必须是 origin 后第 horizon 个正式交易日；`matured_at=target_session_date`；reference/target 价格来自同市场、同标的、同一前复权 canonical 序列；FeatureSnapshot 的 instrument/latest_bar_date 必须匹配样本。训练器只接收按 origin 排序且无重复 `(instrument, origin, horizon)` 的样本。
+不变量：target 必须是 origin 后第 horizon 个正式交易日；`matured_at=target_session_date`；reference/target 价格来自同市场、同标的、同一前复权 canonical 序列；FeatureSnapshot 的 instrument/latest_bar_date 必须匹配样本且 mode 必须为 EOD；future_return、direction、flat_band 必须彼此自洽。行业/市场 membership 必须携带不晚于快照 cutoff 的 point-in-time `available_at`。训练器只接收按 origin 排序且无重复 `(instrument, origin, horizon)` 的样本。
 
 样本装配只能读取调用方提供的 FeatureStore、canonical bars、交易日历和 point-in-time metadata，不得在训练期间联网。技术历史可以调用 V2-2 FeatureBuilder 重建并标记 `reconstructed_history`；新闻和基本面只能读取 cutoff 当时已经存在的 repository snapshot。
 
@@ -459,10 +465,11 @@ s.feature_snapshot.cutoff_at <= s.origin_session 收盘后的合法 EOD 截止�
 ### 7.2 OOF 结构
 
 - 使用按交易日排序的 expanding-window walk-forward。
+- OOF 每个交易日都发行预测，但候选模型按固定 `OOF_REFIT_INTERVAL=20` 个交易日重训；两次重训之间复用上一次只看过历史的模型。这对应生产月度重训节奏，不改变样本外边界，并避免假设桌面程序每天深度重训。
 - stock 最少 80 条成熟训练样本后才能产生第一个 OOF 点。
 - industry/market 最少 200 条成熟训练样本，且至少覆盖 5 只股票。
 - 可评估 OOF 点少于 60 时为 `insufficient_sample`。
-- 最后 `max(30, ceil(OOF点数 × 25%))` 个点为 confirmation，其余为 selection；selection 也必须至少 30 点。
+- 最后至少 `max(30, ceil(OOF点数 × 25%))` 个点为 confirmation，其余为 selection；切分必须移动到完整交易日边界，不能拆开同日横截面；selection 也必须至少 30 点。
 - 所有候选只在 selection 比较。只能把 selection 排名第一的一个候选带入 confirmation。
 - confirmation 不能用于改特征、改标签、调参数、换主要指标或选择另一个候选。
 - 同一天的跨股票样本必须作为一个时间组移动，不能把同日股票随机拆到训练和测试两侧。
@@ -586,7 +593,7 @@ stock champion
 
 1/3/5/10 日拥有独立版本、样本、指标和状态。1日 Champion 不得使 5日结果变成已验证。报告层以后可以展示多周期共识，但 V2-3 不合并方向。
 
-## 10. 持久化和 migration 6
+## 10. 持久化和 migration 6/7
 
 新增：
 
@@ -605,6 +612,9 @@ forecast_promotion_events
 - promotion events 只追加，不更新。
 - repository 读取默认要求明确 horizon/scope/version，禁止“取最新一条”代替明确查询。
 - migration 6 重复执行安全，并保留 migration 1-5 数据。
+- migration 7 是 V2-3 复审修复：为模型版本补充 sample/oof_sample 计数，并允许 `calendar_unavailable` 预测以 NULL 保存未知目标日；不得修改已发布的 migration 6 checksum。
+- repository 必须支持按明确 version/scope/horizon 恢复 Champion、读取 ForecastResult 以及幂等保存/读取 selection 和 confirmation 评估；程序重启后不能丢失内存 registry。
+- ForecastResult 的幂等 payload hash 排除 `generated_at`；同一 event_key 仅生成时间不同必须返回 idempotent，不能进入 quarantine。
 - V2-3 只保存预测发行事实，不验证实际结果；实际价格、对错和预测账归 V2-9。
 
 ## 11. 确定性和性能
@@ -614,7 +624,7 @@ forecast_promotion_events
 - Logistic 必须检查收敛状态；未收敛候选记为评估失败，不保存为可用模型。
 - Tree 必须固定 random_state，禁止不受控并行。
 - 候选评估初始使用单线程，避免桌面应用并发占满 CPU。
-- 单只股票 500 个历史快照、4 个 horizon、最多 20 个候选的确定性测试目标为 30 秒内；性能测试不得联网。
+- 单只股票每个 horizon 500 个历史样本、4 个 horizon、最多 20 个候选的确定性测试目标为 30 秒内；使用向量化 Bootstrap/温度搜索/预处理和固定月度重训节奏，性能测试不得联网。2026-07-14 本机完整候选池回归为 `2 passed in 29.94s`。
 - 深度训练将来可放后台，但 V2-3 当前 trainer 必须支持进度回调和取消检查，不实现 UI。
 
 ## 12. 数据质量和降级
@@ -692,7 +702,7 @@ A股与美股使用相同 synthetic 特征和等价交易日日历时，标签�
 
 ### FC15 持久化
 
-migration 6 幂等；ModelVersion/ForecastResult 幂等写入；冲突 quarantine；promotion 原子替换唯一 Champion。
+migration 6/7 幂等；ModelVersion/ForecastResult 幂等写入和读取；仅 generated_at 不同仍幂等；冲突 quarantine；promotion 原子替换唯一 Champion；重启后可恢复 registry 和模型评估。
 
 ### FC16 artifact 安全
 
@@ -714,14 +724,17 @@ artifact 是 canonical JSON+zlib，可校验 hash；禁止 pickle/joblib，损�
 tests/v2/test_forecast_contracts.py
 tests/v2/test_forecast_labels.py
 tests/v2/test_forecast_feature_sets.py
+tests/v2/test_forecast_preprocessing.py
 tests/v2/test_forecast_oof_no_leakage.py
 tests/v2/test_forecast_models.py
 tests/v2/test_forecast_diagnostics.py
+tests/v2/test_forecast_engine.py
 tests/v2/test_forecast_model_registry.py
 tests/v2/test_forecast_fallback_hierarchy.py
 tests/v2/test_forecast_repository.py
 tests/v2/test_forecast_market_parity.py
 tests/v2/test_forecast_performance.py
+tests/v2/forecast_helpers.py
 ```
 
 架构边界测试必须禁止 `tradehelper_v2/forecast` 导入 V1 `core/forecast_engine.py`、策略、回测、LLM、UI 和报告模块。模型测试不得联网。
@@ -734,7 +747,7 @@ tests/v2/test_forecast_performance.py
 4. 实现 empirical/analog/logistic/tree/ensemble/regime 候选和确定性测试。
 5. 实现 walk-forward selection/confirmation、指标和 Bootstrap。
 6. 实现 registry、fallback 和 atomic promotion。
-7. 实现 migration 6、repository 和 forecast snapshot 幂等存储。
+7. 实现 migration 6/7、repository、重启恢复和 forecast snapshot 幂等读写。
 8. 完成 FC00-FC18、V2 全量、全项目回归和真实 FeatureSnapshot smoke。
 9. 更新 README、V1 能力清单和 V2_REFACTOR_PLAN 阶段状态后停止。
 

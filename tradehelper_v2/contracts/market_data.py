@@ -1,4 +1,4 @@
-"""Immutable, validated market-data contracts for V2."""
+"""V2 不可变市场数据合同：统一双市场身份、时间、复权和哈希语义。"""
 
 from __future__ import annotations
 

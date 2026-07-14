@@ -1,4 +1,4 @@
-"""Provider outcome contracts; adapters never leak raw payloads upward."""
+"""Provider 结果合同：适配器不能把未经验证的原始 payload 泄漏到上层。"""
 
 from __future__ import annotations
 

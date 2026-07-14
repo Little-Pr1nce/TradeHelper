@@ -1,4 +1,8 @@
-"""Point-in-time feature contracts for the V2 analysis chain."""
+"""V2 分析链的点时特征合同。
+
+每个字段同时记录可用状态、来源和可见时间，使历史回放不能偷看未来新闻、
+财报或收盘事实。
+"""
 
 from __future__ import annotations
 

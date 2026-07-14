@@ -46,3 +46,20 @@ def test_f12_features_have_no_provider_or_upper_layer_dependencies() -> None:
             if module.split(".")[0] in banned:
                 findings.append(f"{path}:{node.lineno}:{module}")
     assert findings == []
+
+
+def test_fc00_forecast_has_no_v1_or_upper_layer_dependencies() -> None:
+    forecast_root = ROOT / "tradehelper_v2" / "forecast"
+    banned = {"core", "services", "strategies", "backtest", "scenario", "risk", "learning", "reports", "report", "ui", "openai", "requests", "httpx"}
+    findings: list[str] = []
+    for path in forecast_root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            module = getattr(node, "module", "") or ""
+            if module.split(".")[0] in banned:
+                findings.append(f"{path}:{node.lineno}:{module}")
+            for alias in getattr(node, "names", ()):
+                name = getattr(alias, "name", "")
+                if name.split(".")[0] in banned:
+                    findings.append(f"{path}:{node.lineno}:{name}")
+    assert findings == []
