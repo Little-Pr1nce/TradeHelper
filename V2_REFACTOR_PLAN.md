@@ -64,10 +64,11 @@ TradePlan + ExecutionDecision
 | [docs/v2/GOLDEN_CASES.md](./docs/v2/GOLDEN_CASES.md) | V2-0/V2-1 固定输入与预期结果，测试不得迁就实现 |
 | [docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md) | V2-2 特征合同、公式、缺失语义、存储和 Golden Cases |
 | [docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md) | V2-3 预测合同、标签、模型、OOF、注册、持久化和 Golden Cases |
+| [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md) | V2-4 情景合同、多周期归并、三时段、策略家族政策、持久化和 Golden Cases |
 | `AGENTS.md` | Codex 本地工作约定 |
 | `CLAUDE.md` | Claude Code 本地工作约定 |
 
-V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 以 `docs/v2/V2_2_FEATURES.md` 为准，V2-3 以 `docs/v2/V2_3_FORECAST.md` 为准；当前实现只授权 V2-3，完成后必须停止并等待复审。
+V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2、V2-3、V2-4 分别以对应阶段规范为准；当前实现只授权 V2-4，完成后必须停止并等待复审。
 
 ## 1. V2 分层结构
 
@@ -119,6 +120,8 @@ tradehelper_v2/
 
   scenario/
     planner.py            # ForecastResult -> TradingScenario
+    policy.py             # 冻结的多周期归并和策略家族兼容规则
+    facts.py              # 预测发行后的新闻/基本面点时事实差集
 
   strategies/
     templates/
@@ -465,64 +468,21 @@ venv/bin/python -m pytest tests/v2/test_forecast_*.py -q
 
 ## 5. 情景规划层
 
-### 5.1 目标
+V2-4 的规范性合同见 [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md)。该层固定保留 1/3 日战术轴与 5/10 日波段轴，把 ForecastResult、当前 FeatureSnapshot、数据质量和正式交易会话翻译为 TradingScenario；不得生成具体交易动作、价格条件、仓位或订单。
 
-新增 `TradingScenario`，作为预测和策略之间的桥。
+核心验收：
 
-核心输出：
+1. 多周期一致、回撤、反弹、震荡、冲突和无 Champion 都有确定结果。
+2. 当前价格使用严格 remaining-return 公式，不篡改原预测。
+3. 新新闻/基本面事实只形成 unmodeled update 和降级，不由情景层解释好坏。
+4. A股/美股三时段使用同一情景算法，差异集中在 session 与认可 quote 来源。
+5. 保护性退出家族不被任何预测、冲突或数据阻断删除。
+6. migration 8、哈希、幂等读写、架构边界和 SC00-SC21 全部通过。
 
-```text
-TradingScenario:
-  bias: bullish / bearish / range / uncertain
-  horizon_alignment: aligned / mixed / conflict / unavailable
-  allowed_strategy_families
-  blocked_strategy_families
-  entry_policy
-  exit_policy
-  confidence_note
-  forecast_evidence
-```
-
-### 5.2 情景规则
-
-示例：
+验收命令：
 
 ```text
-1/3/5日均偏多且无冲突：
-  允许趋势延续、突破、回踩；禁止逆势做空式退出。
-
-短期震荡、中期偏多：
-  禁止追高；优先回踩确认和支撑反弹。
-
-短中期偏空：
-  禁止新开仓；已有持仓优先止损、减仓、锁利。
-
-预测冲突：
-  只输出条件计划，不给 A 级新开仓。
-
-预测不可验证：
-  策略可给观察计划，但预测不参与执行升级。
-```
-
-### 5.3 测试方案
-
-新增测试：
-
-```text
-tests/v2/test_scenario_planner.py
-```
-
-测试内容：
-
-1. 多周期预测一致偏多时，输出 bullish scenario。
-2. 1日偏空、5日偏多时，输出 mixed，不允许追高。
-3. 没有 Champion 预测时，输出 uncertain，不允许用预测升级策略。
-4. bearish scenario 下，风险退出策略不被阻止。
-
-验收标准：
-
-```text
-venv/bin/python -m pytest tests/v2/test_scenario_planner.py -q
+venv/bin/python -m pytest tests/v2/test_scenario_*.py -q
 ```
 
 ## 6. 策略层重构
@@ -1188,13 +1148,21 @@ venv/bin/python -m pytest tests/ -q
 - 验证：`venv/bin/python -m pytest tests/v2/test_forecast_*.py -q` -> `34 passed in 31.27s`；`venv/bin/python -m pytest tests/v2/ -q -rs` -> `137 passed, 3 skipped in 37.01s`；`venv/bin/python -m pytest tests/ -q -rs` -> `397 passed, 3 skipped in 67.23s`。FC00-FC18 已覆盖合同、日历、点时样本、校准、真实状态近邻、可预测/随机 synthetic、双市场对称、完整 fallback、重启持久化、双市场 FeatureSnapshot smoke、取消和性能；500 点×4 horizon×完整候选池为 `2 passed in 29.94s`。
 - 剩余风险：正式行业/市场 Champion 仍依赖未来可获得的 point-in-time 行业历史；已有 `reconstructed_history` 不得被用于跨股票确认。V2-3 不验证到期事实、不记录预测/策略/联合账，均明确留给 V2-9。
 
+### 2026-07-14 V2-4 设计完成：情景层（待实现）
+
+- 新增规范 [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md)，固定 ScenarioRequest、DecisionSession、HorizonAssessment、CurrentOverlay 和 TradingScenario 合同。
+- 多周期不再粗暴平均：1/3 日为战术轴，5/10 日为波段轴；短期回撤与波段偏多解释为 bullish_pullback，真正的同轴矛盾才标记 conflict。
+- 当前价只转换剩余收益区间，不修改原预测；盘前/盘中新增新闻或基本面必须携带显式 ScenarioFactUpdate，标记为 unmodeled update 并要求重新确认，不能靠时间衰减后的特征变化猜测。
+- 固定 A/美股三时段会话、日历不可用、无 Champion、数据质量阻断、策略家族兼容性和保护性退出不可阻断规则。
+- 设计 migration 8、SC00-SC21、双市场对称、架构边界和性能标准；本阶段只完成文档，不包含 V2-4 实现代码。
+
 | 阶段 | 状态 | 说明 |
 |------|------|------|
 | V2-0 测试基础设施 | 已完成 | Golden G00-G04、架构边界、冻结时钟、双市场 fixture 与性能基线已落地 |
 | V2-1 数据层 | 已完成 | Golden G10-G29/G30-G63、Provider fixture、路由、时点语义、质量、独立 repository、持久化配额续跑、并发、日K跨源漂移审计及真实 Provider smoke 均已通过 |
 | V2-2 特征层 | 已完成 | FeatureSnapshot、F00-F13、双市场点时特征、migration 5/FeatureStore、架构边界、性能及全量回归已通过 |
 | V2-3 预测层 | 已完成并复审 | Forecast contracts、波动率标签、FeatureSet/校准、JSON+zlib artifact、20候选、maturity-purged OOF、registry 回退/重启恢复、migration 6/7 和预测快照幂等读写已通过 FC00-FC18；不生成 TradePlan |
-| V2-4 情景层 | 未开始 | 等 ForecastResult V2 稳定 |
+| V2-4 情景层 | 已设计，待实现 | `docs/v2/V2_4_SCENARIOS.md` 已冻结合同、多周期规则、三时段、策略家族政策、migration 8 和 SC00-SC21 |
 | V2-5 策略层 | 未开始 | 等 TradingScenario 稳定 |
 | V2-6 风控层 | 未开始 | 可并行梳理合同，但实现等 TradePlan 稳定 |
 | V2-7 成交仿真层 | 未开始 | 等 ExecutionDecision 和市场规则稳定 |
@@ -1204,6 +1172,6 @@ venv/bin/python -m pytest tests/ -q
 | V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
 | V2-12 迁移/端到端/发布 | 未开始 | 每层单测通过后执行完整矩阵与跨平台烟雾 |
 
-## 16. 当前下一步：设计 V2-4 情景层
+## 16. 当前下一步：实现 V2-4 情景层
 
-V2-3 已完成复审并冻结。开始 V2-4 前必须另行制定 `TradingScenario` 精确合同，明确如何把独立概率预测、当前事实和报告时段翻译为可交易环境；不得在情景层直接生成订单，也不得提前实现策略、风控、组合决策、LLM 或 UI。行业/市场 Champion 仍只能作为非执行 fallback，直到后续风控合同明确其证据等级。
+V2-3 已完成复审并冻结。实现者必须先阅读 [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md)，严格按 SC00-SC21 顺序实现 contracts、纯函数 planner、当前事实覆盖、交易会话和 migration 8。行业/市场 Champion 只能形成 observation；不得在情景层直接生成订单，也不得提前实现策略、风控、组合决策、LLM 或 UI。

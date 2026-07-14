@@ -34,7 +34,7 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 | 条件触发计划 | 不能操作时告诉用户等什么条件 | `strategies/conditional_trigger.py`, `services/portfolio_service.py` | `scenario/planner.py`, `strategies/engine.py` | 待迁移 | `tests/v2/test_scenario_planner.py` |
 | 最大亏损和失效条件 | 用户知道错了亏多少、哪里错 | `strategies/base.py`, `core/signal_check.py` | `risk/sizing.py`, `risk/officer.py` | 待迁移 | `tests/v2/test_risk_officer.py` |
 | 历史正期望和可信度 | 建议不能只靠当下判断 | `prediction_log`, `trade_plan_log`, `joint_oof_runs` | `learning/` 三本账 | 待迁移 | `tests/v2/test_learning_ledgers.py` |
-| 明确目标日预测 | 预测必须说清预测哪一天 | `forecast_log`, `core/forecast_engine.py` | `forecast/engine.py`, `learning/forecast_ledger.py` | 待迁移 | `tests/v2/test_forecast_diagnostics.py` |
+| 明确目标日预测 | 预测必须说清预测哪一天 | `forecast_log`, `core/forecast_engine.py` | `forecast/engine.py`, `learning/forecast_ledger.py` | 预测发行已迁移；到期记账待V2-9 | `tests/v2/test_forecast_contracts.py` |
 
 ## P0 数据源与市场支持
 
@@ -69,9 +69,9 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
 | Tab1 单股完整研究 | 单只股票深度分析入口 | `services/analysis_service.py`, `ui/main_page.py` | V2 single-stock use case | 待迁移 | `tests/v2/test_e2e_single_stock.py` |
-| Tab1 三时段模式 | 盘前/盘中/盘后语义不同 | `analysis_service.py`, `core/pipeline.py` | V2 use cases + data session | 待迁移 | `tests/v2/test_e2e_single_stock.py` |
+| Tab1 三时段模式 | 盘前/盘中/盘后语义不同 | `analysis_service.py`, `core/pipeline.py` | V2 use cases + data session | V2-4会话与情景已设计，待实现 | `tests/v2/test_scenario_sessions.py` |
 | Tab3 组合工作台 | 真实持仓决策，不是批量单股 | `services/portfolio_service.py`, `ui/portfolio_page.py` | V2 portfolio use case | 待迁移 | `tests/v2/test_e2e_portfolio.py` |
-| Tab3 三时段模式 | 组合盘前/盘中/盘后使用对应数据和计划有效期 | `portfolio_service.py`, `core/pipeline.py` | `use_cases/portfolio.py`, `portfolio/` | 待迁移 | `tests/v2/test_e2e_mode_matrix.py` |
+| Tab3 三时段模式 | 组合盘前/盘中/盘后使用对应数据和计划有效期 | `portfolio_service.py`, `core/pipeline.py` | `use_cases/portfolio.py`, `portfolio/` | V2-4逐股情景已设计；组合编排待V2-8 | `tests/v2/test_scenario_degradation.py` |
 | Tab3 真实余额/持仓/成本 | 禁止虚构10万本金 | `data/database.py`, `portfolio_service.py` | `contracts/market_data.py`, `risk/sizing.py` | 待迁移 | `tests/v2/test_risk_officer.py` |
 | Tab3 持仓行内编辑 | 用户卖一部分后可直接修改 | `ui/portfolio_page.py` | V2 UI portfolio component | 待迁移 | `tests/v2/test_ui_state_flow.py` |
 | Tab3 组合集中度/风险容量 | 单票集中度、现金和剩余风险 | `portfolio_service.py` | `risk/sizing.py`, portfolio use case | 待迁移 | `tests/v2/test_position_sizing.py` |
@@ -108,7 +108,7 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 | 冲高回落锁利 | 持仓止盈/减仓关键策略 | `strategies/profit_lock.py` | `strategies/templates/` | 待迁移 | `tests/v2/test_strategy_engine_by_scenario.py` |
 | 持仓风险管理 | 成本、亏损、集中度、禁止加仓 | `strategies/position_risk.py` | `risk/`, `strategies/templates/` | 待迁移 | `tests/v2/test_position_sizing.py` |
 | 反抽失败退出 | 跌破均线后退出逻辑 | `strategies/pullback_failed_exit.py` | `strategies/templates/` | 待迁移 | `tests/v2/test_strategy_engine_by_scenario.py` |
-| 条件触发策略 | 不操作时给等待条件 | `strategies/conditional_trigger.py` | `scenario/`, `strategies/engine.py` | 待迁移 | `tests/v2/test_scenario_planner.py` |
+| 条件触发策略 | 不操作时给等待条件 | `strategies/conditional_trigger.py` | `scenario/`, `strategies/engine.py` | V2-4家族兼容性已设计；具体条件待V2-5 | `tests/v2/test_scenario_planner.py` |
 | 策略无信号诊断 | 告诉用户还差什么条件 | `diagnose_no_signal()` | `TradePlan.missing_conditions` | 待迁移 | `tests/v2/test_trade_plan_contract.py` |
 
 ## P0 回测、市场规则与审计资产
@@ -134,6 +134,8 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 | 明确目标交易日 | 用户知道预测哪天 | `forecast_log` | V2-3 `ForecastResult`；到期验证留给 `learning/forecast_ledger.py` | V2-3已完成；交易日历目标固定 | `tests/v2/test_forecast_labels.py` |
 | OOF Champion/Challenger | 只让样本外通过模型参与执行 | `forecast_model_versions` | `forecast/registry.py` | V2-3已完成并复审；selection/confirmation按完整交易日隔离、重启可恢复 | `tests/v2/test_forecast_oof_no_leakage.py`, `tests/v2/test_forecast_repository.py` |
 | Brier/LogLoss/ECE/区间命中 | 评价概率预测质量 | `core/forecast_engine.py`, DB metrics | `forecast/diagnostics.py` | V2-3已完成并复审；温度校准和向量化时间块Bootstrap进入真实训练链 | `tests/v2/test_forecast_diagnostics.py`, `tests/v2/test_forecast_models.py` |
+| 独立 TradingScenario | 预测与策略强绑定但不混为同一信号 | V1 无清晰独立层 | `scenario/planner.py` | V2-4已完成精确设计，待实现 | `tests/v2/test_scenario_planner.py` |
+| 预测后新增事实显式证据 | 避免新闻时间衰减被误判为新消息 | V1 当前/预测上下文混合 | `ScenarioFactUpdate` | V2-4已设计点时事实更新合同，待实现 | `tests/v2/test_scenario_current_overlay.py` |
 | 三本账思路 | 区分预测错、策略错、联合错 | `forecast_log`, `trade_plan_log`, `joint_oof_runs` | `learning/` | 待迁移 | `tests/v2/test_learning_ledgers.py` |
 | 联合 OOF | 预测+策略+风控整体回放 | `core/joint_oof.py` | `learning/joint_ledger.py` | 待迁移 | `tests/v2/test_attribution_rules.py` |
 | 五层效果归因 | 分开评价预测、情景、策略、风控和成交贡献 | V1 三本账与 Decision/Broker 分账 | `learning/` attribution | 待迁移 | `tests/v2/test_attribution_rules.py` |

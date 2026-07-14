@@ -53,10 +53,11 @@ TradeHelper 一以贯之的产品目标，是稳定回答五个问题：
 | [docs/v2/GOLDEN_CASES.md](./docs/v2/GOLDEN_CASES.md) | V2-0/V2-1 标准答案：固定输入、预期输出和测试映射 |
 | [docs/v2/V2_2_FEATURES.md](./docs/v2/V2_2_FEATURES.md) | V2-2 规范：point-in-time 特征合同、公式、缺失语义、存储和 Golden Cases |
 | [docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md) | V2-3 规范：预测目标、标签、模型、OOF、注册、持久化和 Golden Cases |
+| [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md) | V2-4 规范：多周期情景、当前事实覆盖、三时段、策略家族政策和 Golden Cases |
 | `AGENTS.md` | Codex 本地约定：Codex 开发时先读它，再读 DESIGN 和 V2_REFACTOR_PLAN |
 | `CLAUDE.md` | Claude Code 本地约定：Claude 开发时先读它，再读 DESIGN 和 V2_REFACTOR_PLAN |
 
-V2-0/V2-1 实现发生冲突时，规范优先级为：`CONTRACTS/POLICIES/GOLDEN_CASES` > 本设计和实施计划中的示例 > V1 能力清单 > V1 参考代码。V2-2 以 `V2_2_FEATURES.md` 为规范，V2-3 以 `V2_3_FORECAST.md` 为规范。未被规范的行为应保持缺失或明确不支持，不能由实现者自由补默认值。
+V2-0/V2-1 实现发生冲突时，规范优先级为：`CONTRACTS/POLICIES/GOLDEN_CASES` > 本设计和实施计划中的示例 > V1 能力清单 > V1 参考代码。V2-2、V2-3、V2-4 分别以对应阶段规范为准。未被规范的行为应保持缺失或明确不支持，不能由实现者自由补默认值。
 
 ## 3. 分层职责
 
@@ -183,13 +184,12 @@ LLM 观察无论被系统确认、反驳、待验证或因数据无效无法判�
 - 若极少数外部 I/O client 需要临时借用，必须用显式 compatibility shim 包住，并在对应 V2 阶段计划里写清替换目标和退出条件；预测、策略、风控、学习主链路不得依赖这些 shim。
 - 每层必须有自己的测试，端到端测试不能替代单层测试。
 
-## 6. 当前第一阶段
+## 6. 当前阶段
 
 当前只做：
 
 ```text
-V2-0 测试基础设施
-V2-1 数据层
+V2-4 情景层
 ```
 
-在数据合同、数据质量和 provider fallback 测试稳定之前，不进入预测层或策略层重构。
+V2-0 至 V2-3 已完成并冻结。V2-4 只能按 `docs/v2/V2_4_SCENARIOS.md` 把预测和当前事实翻译为 TradingScenario；不得提前生成 TradePlan、风险等级、组合分配或 UI。
