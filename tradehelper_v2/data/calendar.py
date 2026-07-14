@@ -7,7 +7,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from tradehelper_v2.contracts.enums import Market
+from tradehelper_v2.contracts.enums import Exchange, Market
+from tradehelper_v2.contracts.scenario import DecisionSession
 
 
 class TradingCalendarUnavailable(RuntimeError):
@@ -20,12 +21,16 @@ class TradingCalendar(Protocol):
     def target_dates(self, market: Market, as_of: date, horizons: tuple[int, ...]) -> dict[int, date]: ...
 
     def latest_completed_session(self, market: Market, as_of: datetime) -> date: ...
+    def session_window(self, market: Market, exchange: Exchange, session_date: date) -> DecisionSession: ...
+    def next_session(self, market: Market, exchange: Exchange, after_date: date) -> date: ...
+    def session_containing(self, market: Market, exchange: Exchange, as_of: datetime) -> DecisionSession | None: ...
 
 
 @dataclass(frozen=True, slots=True)
 class StaticTradingCalendar:
     sessions: tuple[date, ...]
     completed_sessions: tuple[date, ...] | None = None
+    windows: dict[tuple[Market, Exchange, date], DecisionSession] | None = None
 
     def __post_init__(self) -> None:
         ordered = tuple(sorted(set(self.sessions)))
@@ -49,6 +54,23 @@ class StaticTradingCalendar:
         if not candidates:
             raise TradingCalendarUnavailable("injected calendar has no completed session")
         return candidates[-1]
+
+    def session_window(self, market: Market, exchange: Exchange, session_date: date) -> DecisionSession:
+        if self.windows and (market, exchange, session_date) in self.windows:return self.windows[(market,exchange,session_date)]
+        raise TradingCalendarUnavailable("injected calendar has no explicit session window")
+    def next_session(self, market: Market, exchange: Exchange, after_date: date) -> date:
+        values=[item for item in self.sessions if item>after_date]
+        if not values: raise TradingCalendarUnavailable("injected calendar has no next session")
+        return values[0]
+    def session_containing(self, market: Market, exchange: Exchange, as_of: datetime) -> DecisionSession | None:
+        if as_of.tzinfo is None:
+            raise TradingCalendarUnavailable("as_of must be timezone-aware")
+        zone = ZoneInfo("Asia/Shanghai" if market is Market.A else "America/New_York")
+        local_date = as_of.astimezone(zone).date()
+        if local_date not in self.sessions:
+            return None
+        window=self.session_window(market,exchange,local_date)
+        return window if window.regular_open<=as_of<=window.regular_close else None
 
 
 class ExchangeTradingCalendar:
@@ -106,3 +128,40 @@ class ExchangeTradingCalendar:
                 raise
             raise TradingCalendarUnavailable("unable to calculate latest completed session") from exc
         raise TradingCalendarUnavailable("no completed exchange session was found")
+
+    def _exchange(self, exchange: Exchange) -> str:
+        if exchange is Exchange.XSHG: return "XSHG"
+        if exchange in {Exchange.XSHE, Exchange.XBSE}: return "XSHE"
+        if exchange in {Exchange.XNYS, Exchange.XNAS}: return "XNYS"
+        raise TradingCalendarUnavailable("unknown exchange has no session calendar")
+
+    def session_window(self, market: Market, exchange: Exchange, session_date: date) -> DecisionSession:
+        """从交易所日历读取真实开收盘和午间 break，覆盖半日市/DST。"""
+        try:
+            import pandas as pd
+            calendar = self._calendar(market) if self._exchange(exchange) == ("XSHG" if market is Market.A else "XNYS") else __import__("exchange_calendars").get_calendar(self._exchange(exchange))
+            label = session_date.isoformat()
+            if not calendar.is_session(label): raise TradingCalendarUnavailable("requested date is not a session")
+            opened = calendar.session_open(label).to_pydatetime(); closed = calendar.session_close(label).to_pydatetime()
+            start = calendar.session_break_start(label); end = calendar.session_break_end(label)
+            breaks = () if pd.isna(start) or pd.isna(end) else ((start.to_pydatetime(), end.to_pydatetime()),)
+            return DecisionSession(market, exchange, session_date, opened, closed, breaks, f"exchange_calendars:{self._exchange(exchange)}")
+        except TradingCalendarUnavailable: raise
+        except Exception as exc: raise TradingCalendarUnavailable("unable to load exchange session window") from exc
+
+    def next_session(self, market: Market, exchange: Exchange, after_date: date) -> date:
+        try:
+            calendar = __import__("exchange_calendars").get_calendar(self._exchange(exchange))
+            sessions = calendar.sessions_in_range((after_date + timedelta(days=1)).isoformat(), (after_date + timedelta(days=14)).isoformat())
+            if len(sessions) == 0: raise TradingCalendarUnavailable("no next session")
+            return sessions[0].date()
+        except TradingCalendarUnavailable: raise
+        except Exception as exc: raise TradingCalendarUnavailable("unable to calculate next session") from exc
+
+    def session_containing(self, market: Market, exchange: Exchange, as_of: datetime) -> DecisionSession | None:
+        if as_of.tzinfo is None: raise TradingCalendarUnavailable("as_of must be timezone-aware")
+        local_date = as_of.astimezone(self._zone(market)).date()
+        if not self.is_session(market, local_date):
+            return None
+        window = self.session_window(market, exchange, local_date)
+        return window if window.regular_open <= as_of.astimezone(timezone.utc) <= window.regular_close else None

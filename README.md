@@ -23,7 +23,7 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-4 情景层规范：[docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 测试基础设施、V2-1 数据层、V2-2 特征层与 V2-3 预测层已经完成。V2-4 情景层已完成精确设计，下一步只按 `V2_4_SCENARIOS.md` 实现 ForecastResult 到 TradingScenario 的确定性翻译、三时段会话、当前事实覆盖、策略家族兼容性和 migration 8；不得提前进入策略、风控或 UI。
+V2-0 至 V2-4 已完成并复审。V2-4 将 ForecastResult 与当前冻结事实确定性翻译为 TradingScenario，覆盖多周期归并、三时段会话、当前事实覆盖、策略家族兼容性和 migration 8；情景身份排除生成时间，美股盘前只接受 Nasdaq/yfinance，A/美股盘中只接受 TickFlow。该层不生成 TradePlan、订单、仓位或风控结论。
 
 ## 一以贯之的系统目标
 
@@ -102,7 +102,7 @@ venv/bin/python -m pytest tests/ -q
 tests/v2/
 ```
 
-V2-3 已完成复审并冻结。V2-4 已设计、待实现；实现只能生成 TradingScenario，不能生成 TradePlan、交易动作、仓位或订单。
+V2-4 已完成复审并冻结：SC00-SC21 共 46 条情景测试、V2 全量 183 条测试、项目全量 443 条测试均通过，3 条真实 Provider 冒烟测试另行启用后全部通过。下一阶段必须另行定义 TradePlan 与策略合同；不得从 TradingScenario 直接推导买卖、仓位或订单。
 
 ## 历史资料
 

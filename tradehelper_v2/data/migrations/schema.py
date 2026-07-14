@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import sqlite3
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -423,6 +423,28 @@ CREATE INDEX idx_v2_forecast_snapshots_lookup
 ON forecast_snapshots(instrument_key, origin_session_date, horizon);
 """.strip()
 
+_SCHEMA_V8_SQL = """
+CREATE TABLE IF NOT EXISTS trading_scenarios (
+    scenario_id TEXT PRIMARY KEY,
+    event_key TEXT UNIQUE NOT NULL,
+    instrument_key TEXT NOT NULL,
+    market TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    origin_session_date TEXT NOT NULL,
+    decision_session_date TEXT,
+    forecast_bundle_hash TEXT NOT NULL,
+    current_feature_hash TEXT NOT NULL,
+    fact_update_hash TEXT NOT NULL,
+    quality_hash TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_scenarios_lookup ON trading_scenarios(instrument_key, mode, decision_session_date);
+""".strip()
+
 
 def schema_checksum() -> str:
     return sha256(_SCHEMA_SQL.encode("utf-8")).hexdigest()
@@ -450,6 +472,8 @@ def schema_v6_checksum() -> str:
 
 def schema_v7_checksum() -> str:
     return sha256(_SCHEMA_V7_SQL.encode("utf-8")).hexdigest()
+def schema_v8_checksum() -> str:
+    return sha256(_SCHEMA_V8_SQL.encode("utf-8")).hexdigest()
 
 
 def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, checksum: str) -> None:
@@ -483,4 +507,5 @@ def apply_schema(connection: sqlite3.Connection) -> None:
     _apply_migration(connection, 5, _SCHEMA_V5_SQL, schema_v5_checksum())
     _apply_migration(connection, 6, _SCHEMA_V6_SQL, schema_v6_checksum())
     _apply_migration(connection, 7, _SCHEMA_V7_SQL, schema_v7_checksum())
+    _apply_migration(connection, 8, _SCHEMA_V8_SQL, schema_v8_checksum())
     connection.commit()

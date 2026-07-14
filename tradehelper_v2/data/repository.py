@@ -60,6 +60,7 @@ from tradehelper_v2.contracts.forecast import (
     ReturnDistribution,
     ValidationStatus,
 )
+from tradehelper_v2.contracts.scenario import (BandSignal, CurrentOverlay, CurrentPriceState, DecisionSession, EntryPosture, ExitPosture, ForecastEvidenceGrade, ForecastSupportLevel, HorizonAlignment, HorizonAssessment, HorizonSignal, NewsDeltaState, PriceLocation, ScenarioBias, ScenarioState, ScenarioStatus, StrategyFamily, TradingScenario, VolatilityShock)
 from .migrations.schema import apply_schema
 
 
@@ -703,6 +704,69 @@ class SQLiteRepository:
                 return ForecastWriteResult(0, 0, 1)
             connection.execute("INSERT INTO forecast_snapshots(event_key, instrument_key, origin_session_date, target_session_date, horizon, model_version, payload_json, payload_hash, generated_at, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (result.event_key, result.instrument.stable_key, result.origin_session_date.isoformat(), result.target_session_date.isoformat() if result.target_session_date else None, result.horizon, result.model_version, canonical_json(result), payload_hash, utc_iso(result.generated_at), result.schema_version))
         return ForecastWriteResult(1, 0, 0)
+
+    def save_trading_scenario(self, scenario: TradingScenario) -> ForecastWriteResult:
+        """保存情景事实；仅 generated_at 不同视为同一业务发行。"""
+        payload = json.loads(canonical_json(scenario)); identity = dict(payload); identity.pop("generated_at", None)
+        payload_hash = stable_hash(identity)
+        with self._transaction() as connection:
+            row = connection.execute("SELECT payload_json FROM trading_scenarios WHERE scenario_id=? OR event_key=?", (scenario.scenario_id, scenario.event_key)).fetchone()
+            if row is not None:
+                old = json.loads(row["payload_json"]); old.pop("generated_at", None)
+                if stable_hash(old) == payload_hash: return ForecastWriteResult(0, 1, 0)
+                connection.execute("INSERT INTO quarantine_records(record_type, instrument_key, trading_date, reason, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", ("trading_scenario_conflict", scenario.instrument.stable_key, scenario.origin_session_date.isoformat(), "CONFLICTING_TRADING_SCENARIO", canonical_json(scenario), utc_iso(datetime.now(timezone.utc))))
+                return ForecastWriteResult(0, 0, 1)
+            connection.execute("INSERT INTO trading_scenarios(scenario_id,event_key,instrument_key,market,exchange,mode,origin_session_date,decision_session_date,forecast_bundle_hash,current_feature_hash,fact_update_hash,quality_hash,policy_version,payload_json,generated_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (scenario.scenario_id,scenario.event_key,scenario.instrument.stable_key,scenario.instrument.market.value,scenario.instrument.exchange.value,scenario.mode.value,scenario.origin_session_date.isoformat(),scenario.decision_session.session_date.isoformat() if scenario.decision_session else None,scenario.forecast_bundle_hash,scenario.current_feature_hash,scenario.fact_update_hash,scenario.quality_hash,scenario.policy_version,canonical_json(scenario),utc_iso(scenario.generated_at),scenario.schema_version))
+        return ForecastWriteResult(1,0,0)
+
+    @staticmethod
+    def _scenario_from_payload(payload: dict) -> TradingScenario:
+        instrument = InstrumentId(payload["instrument"]["code"], Market(payload["instrument"]["market"]), Exchange(payload["instrument"]["exchange"]))
+        session_raw = payload["decision_session"]
+        session = None if session_raw is None else DecisionSession(Market(session_raw["market"]), Exchange(session_raw["exchange"]), date.fromisoformat(session_raw["session_date"]), _parse_datetime(session_raw["regular_open"]), _parse_datetime(session_raw["regular_close"]), tuple((_parse_datetime(left),_parse_datetime(right)) for left,right in session_raw["breaks"]), session_raw["source"], int(session_raw.get("schema_version",1)))
+        assessments=[]
+        for item in payload["horizon_assessments"]:
+            prob=None if item["probabilities"] is None else DirectionProbabilities(**item["probabilities"])
+            def dist(value): return None if value is None else ReturnDistribution(value["p10"],value["p50"],value["p90"],value["method"])
+            assessments.append(HorizonAssessment(int(item["horizon"]),date.fromisoformat(item["target_session_date"]) if item["target_session_date"] else None,item["forecast_event_key"],ForecastEvidenceGrade(item["evidence_grade"]),HorizonSignal(item["signal"]),prob,dist(item["original_distribution"]),dist(item["remaining_distribution"]),item["confidence_margin"],PriceLocation(item["price_location"]),tuple(item["reason_codes"])))
+        overlay_raw=payload["current_overlay"]
+        overlay=CurrentOverlay(CurrentPriceState(overlay_raw["price_state"]),overlay_raw["current_price"],overlay_raw["price_source"],_parse_datetime(overlay_raw["observed_at"]) if overlay_raw["observed_at"] else None,overlay_raw["realized_return_from_origin"],PriceLocation(overlay_raw["tactical_price_location"]),VolatilityShock(overlay_raw["volatility_shock"]),NewsDeltaState(overlay_raw["news_delta"]),bool(overlay_raw["news_update_present"]),bool(overlay_raw["fundamental_update_present"]),int(overlay_raw["fact_update_count"]),bool(overlay_raw["unmodeled_fact_update"]),tuple(overlay_raw["reason_codes"]))
+        return TradingScenario(payload["scenario_id"],payload["event_key"],instrument,DecisionMode(payload["mode"]),_parse_datetime(payload["as_of"]),date.fromisoformat(payload["origin_session_date"]),session,_parse_datetime(payload["valid_from"]) if payload["valid_from"] else None,_parse_datetime(payload["expires_at"]) if payload["expires_at"] else None,ScenarioBias(payload["bias"]),BandSignal(payload["tactical_signal"]),BandSignal(payload["swing_signal"]),HorizonAlignment(payload["alignment"]),ScenarioState(payload["state"]),ForecastSupportLevel(payload["forecast_support"]),ScenarioStatus(payload["status"]),tuple(assessments),overlay,tuple(StrategyFamily(item) for item in payload["allowed_strategy_families"]),tuple(StrategyFamily(item) for item in payload["blocked_strategy_families"]),EntryPosture(payload["entry_posture"]),ExitPosture(payload["exit_posture"]),tuple(payload["reason_codes"]),payload["forecast_bundle_hash"],payload["current_feature_hash"],payload["fact_update_hash"],payload["quality_hash"],payload["policy_version"],_parse_datetime(payload["generated_at"]),int(payload.get("schema_version",1)))
+
+    @classmethod
+    def _scenario_from_row(cls, row: sqlite3.Row) -> TradingScenario:
+        scenario = cls._scenario_from_payload(json.loads(row["payload_json"]))
+        expected = {
+            "scenario_id": scenario.scenario_id,
+            "event_key": scenario.event_key,
+            "instrument_key": scenario.instrument.stable_key,
+            "market": scenario.instrument.market.value,
+            "exchange": scenario.instrument.exchange.value,
+            "mode": scenario.mode.value,
+            "origin_session_date": scenario.origin_session_date.isoformat(),
+            "decision_session_date": (
+                scenario.decision_session.session_date.isoformat()
+                if scenario.decision_session
+                else None
+            ),
+            "forecast_bundle_hash": scenario.forecast_bundle_hash,
+            "current_feature_hash": scenario.current_feature_hash,
+            "fact_update_hash": scenario.fact_update_hash,
+            "quality_hash": scenario.quality_hash,
+            "policy_version": scenario.policy_version,
+            "schema_version": scenario.schema_version,
+        }
+        if any(row[name] != value for name, value in expected.items()):
+            raise ContractViolation("stored trading scenario columns do not match payload identity")
+        return scenario
+
+    def get_trading_scenario(self, scenario_id: str) -> TradingScenario | None:
+        row=self._fetchone("SELECT * FROM trading_scenarios WHERE scenario_id=?",(scenario_id,))
+        return self._scenario_from_row(row) if row else None
+
+    def list_trading_scenarios(self, instrument: InstrumentId, mode: DecisionMode, decision_session_date: date | None) -> tuple[TradingScenario,...]:
+        sql="SELECT * FROM trading_scenarios WHERE instrument_key=? AND mode=? AND decision_session_date IS ? ORDER BY generated_at, scenario_id"
+        return tuple(self._scenario_from_row(row) for row in self._fetchall(sql,(instrument.stable_key,mode.value,decision_session_date.isoformat() if decision_session_date else None)))
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:

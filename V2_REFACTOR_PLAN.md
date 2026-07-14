@@ -1156,13 +1156,25 @@ venv/bin/python -m pytest tests/ -q
 - 固定 A/美股三时段会话、日历不可用、无 Champion、数据质量阻断、策略家族兼容性和保护性退出不可阻断规则。
 - 设计 migration 8、SC00-SC21、双市场对称、架构边界和性能标准；本阶段只完成文档，不包含 V2-4 实现代码。
 
+### 2026-07-14 V2-4 完成并复审：情景层
+
+- 新增不可变 `DecisionSession`、`ScenarioFactUpdate`、`ScenarioRequest`、`HorizonAssessment`、`CurrentOverlay` 和 `TradingScenario` 合同。情景层只输出预测环境与策略家族兼容性，未创建 TradePlan、订单、仓位、止损或风险评级。
+- 实现 1/3 日战术轴、5/10 日波段轴的确定性归并：短期回撤与波段趋势可同时表达为 `bullish_pullback`/`bearish_rebound`，同轴冲突明确降级为 `forecast_conflict`，不做概率平均掩盖分歧。
+- 实现三时段当前覆盖、quote 时效与会话匹配、剩余收益区间、ATR 偏离、显式新闻/基本面事实更新，以及新事实不改写 V2-3 ForecastResult 的边界。
+- 扩展注入式与 exchange-calendars 会话窗口；schema 升至 migration 8，TradingScenario 以业务身份幂等写入，冲突 quarantine，重启后可按强类型读取。
+- 复审修正身份与政策边界：ForecastResult.generated_at 不进入 forecast bundle/scenario 身份；波段震荡与战术方向组合保持 mixed；美股盘前只接受 Nasdaq/yfinance，A/美股盘中只接受 TickFlow；盘前陈旧报价至少 degraded，blocked/observation 姿态不会被覆盖规则弱化。
+- 强化输入、输出和持久化合同：校验报价载荷、质量时间、注册特征、reason code、SHA-256、策略家族、不变量和 scenario 身份；读取时复核数据库索引列与业务 payload，日历故障不再伪装为普通休市。
+- 显式新闻更新按加入该事实前后的特征语义差异记录 affected_features，不再把所有新闻固定写成 `news.count_1d`。
+- 吸收 V1 资产：盘前/盘中/盘后会话边界、预测与当前事实隔离、保护性退出永不被预测阻断。尚未迁移具体策略形态、TradePlan、风控、成交与账户约束。
+- 验证：V2-4 专项 SC00-SC21 `46 passed`；V2 全量 `183 passed, 3 skipped`；项目全量 `443 passed, 3 skipped`。被默认跳过的 3 条真实 Provider 冒烟测试使用 V1 本地配置显式启用后为 `3 passed`，覆盖双市场组合刷新、yfinance 美股基本面后备和 akshare A股年度字段后备。剩余边界：行业/市场预测仍只可作观察证据；新增事实只表示需要重新确认，不在情景层判断利多/利空。
+
 | 阶段 | 状态 | 说明 |
 |------|------|------|
 | V2-0 测试基础设施 | 已完成 | Golden G00-G04、架构边界、冻结时钟、双市场 fixture 与性能基线已落地 |
 | V2-1 数据层 | 已完成 | Golden G10-G29/G30-G63、Provider fixture、路由、时点语义、质量、独立 repository、持久化配额续跑、并发、日K跨源漂移审计及真实 Provider smoke 均已通过 |
 | V2-2 特征层 | 已完成 | FeatureSnapshot、F00-F13、双市场点时特征、migration 5/FeatureStore、架构边界、性能及全量回归已通过 |
 | V2-3 预测层 | 已完成并复审 | Forecast contracts、波动率标签、FeatureSet/校准、JSON+zlib artifact、20候选、maturity-purged OOF、registry 回退/重启恢复、migration 6/7 和预测快照幂等读写已通过 FC00-FC18；不生成 TradePlan |
-| V2-4 情景层 | 已设计，待实现 | `docs/v2/V2_4_SCENARIOS.md` 已冻结合同、多周期规则、三时段、策略家族政策、migration 8 和 SC00-SC21 |
+| V2-4 情景层 | 已完成并复审 | TradingScenario 合同、多周期归并、来源/时效降级、当前事实覆盖、三时段会话、策略家族兼容性、migration 8、强校验持久化和 SC00-SC21 共46条测试已通过；不生成 TradePlan |
 | V2-5 策略层 | 未开始 | 等 TradingScenario 稳定 |
 | V2-6 风控层 | 未开始 | 可并行梳理合同，但实现等 TradePlan 稳定 |
 | V2-7 成交仿真层 | 未开始 | 等 ExecutionDecision 和市场规则稳定 |
@@ -1172,6 +1184,6 @@ venv/bin/python -m pytest tests/ -q
 | V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
 | V2-12 迁移/端到端/发布 | 未开始 | 每层单测通过后执行完整矩阵与跨平台烟雾 |
 
-## 16. 当前下一步：实现 V2-4 情景层
+## 16. 当前下一步：V2-5 策略层设计
 
-V2-3 已完成复审并冻结。实现者必须先阅读 [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md)，严格按 SC00-SC21 顺序实现 contracts、纯函数 planner、当前事实覆盖、交易会话和 migration 8。行业/市场 Champion 只能形成 observation；不得在情景层直接生成订单，也不得提前实现策略、风控、组合决策、LLM 或 UI。
+V2-4 已完成复审并冻结。开始 V2-5 前必须先制定 StrategyInput、TradePlan、条件表达式、保守/激进差异和策略迁移清单的精确合同；不得把 TradingScenario 直接当作交易指令，也不得提前实现风控、组合决策、LLM 或 UI。

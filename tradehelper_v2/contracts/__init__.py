@@ -52,6 +52,7 @@ from .market_data import (
 )
 from .providers import DailyBarsBatchResult, DailyBarsRequest, MigrationPreflight, ProviderAttempt, ProviderResult, QuoteBatch
 from .quality import DataCapabilities, DataQualityIssue, DataQualityReport
+from .scenario import (BandSignal, CurrentOverlay, CurrentPriceState, DecisionSession, EntryPosture, ExitPosture, ForecastEvidenceGrade, ForecastSupportLevel, HorizonAlignment, HorizonAssessment, HorizonSignal, NewsDeltaState, PriceLocation, ScenarioBias, ScenarioFactKind, ScenarioFactUpdate, ScenarioRequest, ScenarioState, ScenarioStatus, StrategyFamily, TradingScenario, VolatilityShock)
 
 __all__ = [
     "AccountSnapshot",
@@ -108,4 +109,5 @@ __all__ = [
     "canonical_json",
     "stable_hash",
     "value_account",
+    "BandSignal", "CurrentOverlay", "CurrentPriceState", "DecisionSession", "EntryPosture", "ExitPosture", "ForecastEvidenceGrade", "ForecastSupportLevel", "HorizonAlignment", "HorizonAssessment", "HorizonSignal", "NewsDeltaState", "PriceLocation", "ScenarioBias", "ScenarioFactKind", "ScenarioFactUpdate", "ScenarioRequest", "ScenarioState", "ScenarioStatus", "StrategyFamily", "TradingScenario", "VolatilityShock",
 ]
