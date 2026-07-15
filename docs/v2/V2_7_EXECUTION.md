@@ -1,6 +1,6 @@
 # TradeHelper V2-7 成交仿真层精确设计
 
-> 状态：设计完成，待实现。本文是 V2-7 的规范性合同。实现必须建立在已冻结的 [V2_5_STRATEGIES.md](./V2_5_STRATEGIES.md) 和 [V2_6_RISK.md](./V2_6_RISK.md) 之上，不得修改 TradePlan 或放宽 ExecutionDecision，也不得提前实现 V2-8 组合分配、V2-9 学习或券商自动下单。
+> 状态：已完成并复审（2026-07-15）。本文是 V2-7 的规范性合同。实现建立在已冻结的 [V2_5_STRATEGIES.md](./V2_5_STRATEGIES.md) 和 [V2_6_RISK.md](./V2_6_RISK.md) 之上，不修改 TradePlan 或放宽 ExecutionDecision，也不包含 V2-8 组合分配、V2-9 学习或券商自动下单。
 
 ## 1. 阶段目标
 
@@ -835,7 +835,7 @@ EX49 架构、禁止字段、性能和 execution_hard_v1 不可关闭
 验收命令：
 
 ```bash
-venv/bin/python -m pytest tests/v2/test_order_intent.py tests/v2/test_trigger_engine.py tests/v2/test_execution_costs.py tests/v2/test_fill_simulator.py tests/v2/test_execution_market_rules.py tests/v2/test_execution_repository.py tests/v2/test_execution_parity.py tests/v2/test_execution_architecture.py tests/v2/test_execution_performance.py tests/v2/test_schema_migrations.py -q
+venv/bin/python -m pytest tests/v2/test_order_intent.py tests/v2/test_trigger_engine.py tests/v2/test_execution_costs.py tests/v2/test_fill_simulator.py tests/v2/test_execution_market_rules.py tests/v2/test_execution_repository.py tests/v2/test_execution_preview.py tests/v2/test_execution_smoke.py tests/v2/test_execution_parity.py tests/v2/test_execution_architecture.py tests/v2/test_execution_performance.py tests/v2/test_execution_golden_cases.py tests/v2/test_schema_migrations.py -q
 venv/bin/python -m pytest tests/v2/ -q -rs
 venv/bin/python -m pytest tests/ -q -rs
 ```
@@ -861,3 +861,11 @@ V2-7 完成后停止。不得顺手实现：
 - 报告、UI 或券商自动交易。
 
 开始 V2-8 前必须另行冻结组合输入批次、现金争用、跨股票优先级、相关性、最终股数和替换机会合同。
+
+## 28. 完成记录
+
+- EX00-EX49 已全部落为具名可执行验收矩阵；成交层专项 `125 passed`。
+- V2 全量回归 `389 passed, 3 skipped`，项目全量回归 `649 passed, 3 skipped`。
+- 默认关闭的 3 条真实 Provider 冒烟测试使用本地脱敏配置显式启用后为 `3 passed`。
+- 复审修复了跨股票/账户快照串线、未来事件与流动性证据、冻结静态条件丢失、跳空仍按触发价成交、同 bar 顺序伪造、A股 T+1/涨跌停边界、成交状态增量和 run/fill 非原子写入。
+- 已知边界保持显式降级：缺分钟事件时不声称盘中路径可验证；缺 Level2/队列证据时不保证成交；当前预览不产生历史 Fill。

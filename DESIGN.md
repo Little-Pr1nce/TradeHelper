@@ -57,10 +57,11 @@ TradeHelper 一以贯之的产品目标，是稳定回答五个问题：
 | [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md) | V2-5 规范：TradePlan、条件 DSL、首批模板、V1 迁移矩阵和 Golden Cases |
 | [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) | V2-6 规范：真实账户冻结估值、A/B/C/D、Decimal sizing、双市场规则和 RK00-RK42 |
 | [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) | V2-7 规范：OrderIntent、触发状态机、成交证据、费用/滑点、migration 11 和 EX00-EX49 |
+| [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) | V2-8 规范：组合冻结批次、排序、现金/heat/相关性分配、最终股数、migration 12 和 PO00-PO49 |
 | `AGENTS.md` | Codex 本地约定：Codex 开发时先读它，再读 DESIGN 和 V2_REFACTOR_PLAN |
 | `CLAUDE.md` | Claude Code 本地约定：Claude 开发时先读它，再读 DESIGN 和 V2_REFACTOR_PLAN |
 
-V2-0/V2-1 实现发生冲突时，规范优先级为：`CONTRACTS/POLICIES/GOLDEN_CASES` > 本设计和实施计划中的示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-7 分别以对应阶段规范为准。未被规范的行为应保持缺失或明确不支持，不能由实现者自由补默认值。
+V2-0/V2-1 实现发生冲突时，规范优先级为：`CONTRACTS/POLICIES/GOLDEN_CASES` > 本设计和实施计划中的示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-8 分别以对应阶段规范为准。未被规范的行为应保持缺失或明确不支持，不能由实现者自由补默认值。
 
 ## 3. 分层职责
 
@@ -191,7 +192,7 @@ LLM 观察无论被系统确认、反驳、待验证或因数据无效无法判�
 当前实施边界：
 
 ```text
-V2-6 风控层已完成并复审；V2-7 成交仿真层设计已冻结、待实现
+V2-7 成交仿真层已完成并复审；V2-8 组合决策合同已冻结，当前只实现 V2-8
 ```
 
-V2-0 至 V2-6 已完成并复审。V2-7 必须按 `docs/v2/V2_7_EXECUTION.md` 从同一份 `TradePlan + ExecutionDecision` 生成订单意图、当前预览和历史成交证据；不得把风控参考入场价误作限价，不得使用未来数据或用日K伪造盘中路径，也不得提前实现组合分配、学习、LLM 或 UI。
+V2-0 至 V2-7 已完成并复审。V2-8 按 `docs/v2/V2_8_PORTFOLIO.md` 实现：V2-6 先给每个单股计划最大批准量，V2-8 在同一冻结账户批次内只做保护退出优先、跨股票排序和缩量，随后 V2-7 才从最终股数构造订单意图。预计卖出回款不能作为本轮可用现金；A股和美股分批处理；当前不得实现 V2-9 学习、LLM、报告或 UI。

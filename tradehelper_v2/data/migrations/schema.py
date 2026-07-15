@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import sqlite3
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -485,6 +485,39 @@ CREATE TABLE IF NOT EXISTS risk_decision_bundles (
 CREATE INDEX IF NOT EXISTS idx_v2_risk_bundles_lookup ON risk_decision_bundles(instrument_key, scenario_id);
 """.strip()
 
+_SCHEMA_V11_SQL = """
+CREATE TABLE IF NOT EXISTS order_intents (
+    intent_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, instrument_key TEXT NOT NULL,
+    risk_bundle_id TEXT NOT NULL, plan_id TEXT NOT NULL, decision_id TEXT NOT NULL,
+    profile TEXT NOT NULL, action TEXT NOT NULL, state TEXT NOT NULL, requested_shares TEXT NOT NULL,
+    payload_json TEXT NOT NULL, generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_order_intents_lookup ON order_intents(instrument_key, risk_bundle_id, plan_id);
+CREATE TABLE IF NOT EXISTS order_intent_build_records (
+    build_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, decision_id TEXT NOT NULL, plan_id TEXT NOT NULL,
+    status TEXT NOT NULL, intent_id TEXT, payload_json TEXT NOT NULL, generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_intent_records_decision ON order_intent_build_records(decision_id);
+CREATE TABLE IF NOT EXISTS trigger_evaluations (
+    trigger_evaluation_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, intent_id TEXT NOT NULL,
+    state TEXT NOT NULL, triggered_at TEXT, evidence_grade TEXT NOT NULL, payload_json TEXT NOT NULL,
+    generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_trigger_evaluations_intent ON trigger_evaluations(intent_id);
+CREATE TABLE IF NOT EXISTS execution_runs (
+    run_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, intent_id TEXT NOT NULL, mode TEXT NOT NULL,
+    initial_state_hash TEXT NOT NULL, event_batch_hash TEXT NOT NULL, outcome TEXT NOT NULL,
+    evidence_grade TEXT NOT NULL, payload_json TEXT NOT NULL, generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_execution_runs_intent ON execution_runs(intent_id);
+CREATE TABLE IF NOT EXISTS fill_evidence (
+    fill_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, run_id TEXT NOT NULL, intent_id TEXT NOT NULL,
+    instrument_key TEXT NOT NULL, outcome TEXT NOT NULL, filled_at TEXT, payload_json TEXT NOT NULL,
+    generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL, FOREIGN KEY(run_id) REFERENCES execution_runs(run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_fill_evidence_run ON fill_evidence(run_id);
+""".strip()
+
 
 def schema_checksum() -> str:
     return sha256(_SCHEMA_SQL.encode("utf-8")).hexdigest()
@@ -518,6 +551,8 @@ def schema_v9_checksum() -> str:
     return sha256(_SCHEMA_V9_SQL.encode("utf-8")).hexdigest()
 def schema_v10_checksum() -> str:
     return sha256(_SCHEMA_V10_SQL.encode("utf-8")).hexdigest()
+def schema_v11_checksum() -> str:
+    return sha256(_SCHEMA_V11_SQL.encode("utf-8")).hexdigest()
 
 
 def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, checksum: str) -> None:
@@ -554,4 +589,5 @@ def apply_schema(connection: sqlite3.Connection) -> None:
     _apply_migration(connection, 8, _SCHEMA_V8_SQL, schema_v8_checksum())
     _apply_migration(connection, 9, _SCHEMA_V9_SQL, schema_v9_checksum())
     _apply_migration(connection, 10, _SCHEMA_V10_SQL, schema_v10_checksum())
+    _apply_migration(connection, 11, _SCHEMA_V11_SQL, schema_v11_checksum())
     connection.commit()

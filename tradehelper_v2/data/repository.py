@@ -63,6 +63,7 @@ from tradehelper_v2.contracts.forecast import (
 from tradehelper_v2.contracts.scenario import (BandSignal, CurrentOverlay, CurrentPriceState, DecisionSession, EntryPosture, ExitPosture, ForecastEvidenceGrade, ForecastSupportLevel, HorizonAlignment, HorizonAssessment, HorizonSignal, NewsDeltaState, PriceLocation, ScenarioBias, ScenarioState, ScenarioStatus, StrategyFamily, TradingScenario, VolatilityShock)
 from tradehelper_v2.contracts.strategy import (ConditionEvaluation, ConditionExpression, ConditionOperand, ConditionOperator, ConditionResult, DerivedPriceLevel, EvidenceRequirement, ObservedValue, OperandKind, PlanAction, PlanProfile, PlanReadiness, PositionState, QuantityIntent, StopMode, StopSpec, StrategyBranch, StrategyBundle, TakeProfitMode, TakeProfitSpec, TradePlan)
 from tradehelper_v2.contracts.risk import (ConstraintResult, DecisionDisposition, EvidenceStatus, ExecutionDecision, ExecutionLevel, FrozenAccountValuation, MarketEligibility, PositionValuation, RiskAdjustment, RiskConstraintKind, RiskDecisionBundle, RiskProfile, ValuationStatus)
+from tradehelper_v2.contracts.execution import (ExecutionEvidenceGrade, ExecutionMode, ExecutionRun, ExecutionStateDelta, EventGranularity, FillEvidence, FillOutcome, IntentBuildStatus, IntentState, OrderIntent, OrderIntentBuildRecord, OrderSide, OrderStyle, PathAssumption, TriggerEvaluation, TriggerState)
 from .migrations.schema import apply_schema
 
 
@@ -76,6 +77,11 @@ def _instrument_from_row(row: sqlite3.Row) -> InstrumentId:
         market=Market(row["market"]),
         exchange=Exchange(row["exchange"]),
     )
+
+
+class _ExecutionBatchConflict(Exception):
+    def __init__(self, records: tuple[object, ...]) -> None:
+        self.records = records
 
 
 def _bar_hash(bar: CanonicalBar) -> str:
@@ -963,6 +969,158 @@ class SQLiteRepository:
         sql="SELECT risk_bundle_id FROM risk_decision_bundles WHERE instrument_key=?"; params:tuple[object,...]=(instrument.stable_key,)
         if scenario_id:sql+=" AND scenario_id=?";params+=(scenario_id,)
         return tuple(self.get_risk_decision_bundle(row["risk_bundle_id"]) for row in self._fetchall(sql+" ORDER BY generated_at,risk_bundle_id",params))
+
+    def _save_execution_record(self, *, table: str, id_column: str, record, columns: tuple[str, ...], values: tuple[object, ...], record_type: str, instrument_key: str | None, connection: sqlite3.Connection | None = None) -> ForecastWriteResult:
+        """V2-7 的统一幂等/冲突隔离写入边界。"""
+        if connection is None:
+            with self._transaction() as active:
+                return self._save_execution_record(table=table,id_column=id_column,record=record,columns=columns,values=values,record_type=record_type,instrument_key=instrument_key,connection=active)
+        payload = json.loads(canonical_json(record)); payload_hash = stable_hash(_without_generated_at(payload))
+        record_id, event_key = getattr(record, id_column), getattr(record, "event_key", getattr(record, id_column))
+        row = connection.execute(f"SELECT payload_json FROM {table} WHERE {id_column}=? OR event_key=?", (record_id, event_key)).fetchone()
+        if row is not None:
+            if stable_hash(_without_generated_at(json.loads(row["payload_json"]))) == payload_hash: return ForecastWriteResult(0, 1, 0)
+            connection.execute("INSERT INTO quarantine_records(record_type,instrument_key,trading_date,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)", (record_type, instrument_key, None, "CONFLICTING_EXECUTION_RECORD", canonical_json(record), utc_iso(datetime.now(timezone.utc))))
+            return ForecastWriteResult(0, 0, 1)
+        placeholders = ",".join("?" for _ in columns)
+        connection.execute(f"INSERT INTO {table}({','.join(columns)}) VALUES ({placeholders})", values + (canonical_json(record), utc_iso(record.generated_at), record.schema_version))
+        return ForecastWriteResult(1, 0, 0)
+
+    def save_order_intent(self, intent: OrderIntent) -> ForecastWriteResult:
+        return self._save_execution_record(table="order_intents", id_column="intent_id", record=intent, columns=("intent_id","event_key","instrument_key","risk_bundle_id","plan_id","decision_id","profile","action","state","requested_shares","payload_json","generated_at","schema_version"), values=(intent.intent_id,intent.event_key,intent.instrument.stable_key,intent.risk_bundle_id,intent.plan_id,intent.decision_id,intent.profile.value,intent.action.value,intent.state.value,str(intent.requested_shares)), record_type="order_intent_conflict", instrument_key=intent.instrument.stable_key)
+
+    def save_order_intent_build_record(self, record: OrderIntentBuildRecord) -> ForecastWriteResult:
+        # build record 没有独立 event_key，使用 build_id 作为稳定审计事件键。
+        payload = json.loads(canonical_json(record)); payload["event_key"] = record.build_id
+        with self._transaction() as connection:
+            row=connection.execute("SELECT payload_json FROM order_intent_build_records WHERE build_id=? OR event_key=?",(record.build_id,record.build_id)).fetchone()
+            if row:
+                old=json.loads(row["payload_json"]); old.pop("event_key",None)
+                if stable_hash(_without_generated_at(old))==stable_hash(_without_generated_at(json.loads(canonical_json(record)))): return ForecastWriteResult(0,1,0)
+                connection.execute("INSERT INTO quarantine_records(record_type,instrument_key,trading_date,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)",("order_intent_build_record_conflict",None,None,"CONFLICTING_EXECUTION_RECORD",canonical_json(record),utc_iso(datetime.now(timezone.utc)))); return ForecastWriteResult(0,0,1)
+            connection.execute("INSERT INTO order_intent_build_records(build_id,event_key,decision_id,plan_id,status,intent_id,payload_json,generated_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?)",(record.build_id,record.build_id,record.decision_id,record.plan_id,record.status.value,record.intent_id,canonical_json(record),utc_iso(record.generated_at),record.schema_version))
+        return ForecastWriteResult(1,0,0)
+
+    def save_trigger_evaluation(self, value: TriggerEvaluation) -> ForecastWriteResult:
+        return self._save_execution_record(table="trigger_evaluations", id_column="trigger_evaluation_id", record=value, columns=("trigger_evaluation_id","event_key","intent_id","state","triggered_at","evidence_grade","payload_json","generated_at","schema_version"), values=(value.trigger_evaluation_id,value.event_key,value.intent_id,value.state.value,utc_iso(value.triggered_at) if value.triggered_at else None,value.evidence_grade.value), record_type="trigger_evaluation_conflict", instrument_key=None)
+
+    def save_execution_run(self, run: ExecutionRun) -> ForecastWriteResult:
+        return self._save_execution_record(table="execution_runs", id_column="run_id", record=run, columns=("run_id","event_key","intent_id","mode","initial_state_hash","event_batch_hash","outcome","evidence_grade","payload_json","generated_at","schema_version"), values=(run.run_id,run.run_id,run.intent_id,run.mode.value,run.initial_state_hash,run.event_batch_hash,run.outcome.value,run.evidence_grade.value), record_type="execution_run_conflict", instrument_key=None)
+
+    def save_fill_evidence(self, fill: FillEvidence) -> ForecastWriteResult:
+        return self._save_execution_record(table="fill_evidence", id_column="fill_id", record=fill, columns=("fill_id","event_key","run_id","intent_id","instrument_key","outcome","filled_at","payload_json","generated_at","schema_version"), values=(fill.fill_id,fill.event_key,fill.run_id,fill.intent_id,fill.instrument.stable_key,fill.outcome.value,utc_iso(fill.filled_at) if fill.filled_at else None), record_type="fill_evidence_conflict", instrument_key=fill.instrument.stable_key)
+
+    def save_execution_result(self, run: ExecutionRun, fills: tuple[FillEvidence, ...]) -> tuple[ForecastWriteResult, tuple[ForecastWriteResult, ...]]:
+        """保存一次回放前复核 run/fill 的双向引用。"""
+        if (tuple(sorted(item.fill_id for item in fills)) != run.fill_ids or any(item.run_id != run.run_id or item.intent_id != run.intent_id or item.market_rule_version != run.market_rule_version or item.execution_policy_version != run.execution_policy_version for item in fills)):
+            raise ContractViolation("execution run and fills have inconsistent references")
+        try:
+            with self._transaction() as connection:
+                run_result = self._save_execution_record(table="execution_runs",id_column="run_id",record=run,columns=("run_id","event_key","intent_id","mode","initial_state_hash","event_batch_hash","outcome","evidence_grade","payload_json","generated_at","schema_version"),values=(run.run_id,run.run_id,run.intent_id,run.mode.value,run.initial_state_hash,run.event_batch_hash,run.outcome.value,run.evidence_grade.value),record_type="execution_run_conflict",instrument_key=None,connection=connection)
+                fill_results = tuple(self._save_execution_record(table="fill_evidence",id_column="fill_id",record=item,columns=("fill_id","event_key","run_id","intent_id","instrument_key","outcome","filled_at","payload_json","generated_at","schema_version"),values=(item.fill_id,item.event_key,item.run_id,item.intent_id,item.instrument.stable_key,item.outcome.value,utc_iso(item.filled_at) if item.filled_at else None),record_type="fill_evidence_conflict",instrument_key=item.instrument.stable_key,connection=connection) for item in fills)
+                conflicts = ((run,) if run_result.conflicts else ()) + tuple(item for item, result in zip(fills, fill_results) if result.conflicts)
+                if conflicts:
+                    raise _ExecutionBatchConflict(conflicts)
+                return run_result, fill_results
+        except _ExecutionBatchConflict as conflict:
+            # 主事务已经回滚；单独重放冲突对象，只保存 quarantine，不留下半条 run/fill。
+            for item in conflict.records:
+                if isinstance(item, ExecutionRun): self.save_execution_run(item)
+                else: self.save_fill_evidence(item)
+            return ForecastWriteResult(0,0,1), tuple(ForecastWriteResult(0,0,1) for _ in fills)
+
+    @staticmethod
+    def _execution_expression(payload):
+        def operand(value): return None if value is None else ConditionOperand(OperandKind(value["kind"]), value["key"], value["value"], value["unit"], tuple(value["source_features"]))
+        def expression(value): return None if value is None else ConditionExpression(value["condition_id"],ConditionOperator(value["operator"]),operand(value["left"]),operand(value["right"]),operand(value["lower"]),operand(value["upper"]),tuple(expression(item) for item in value["children"]),EvidenceRequirement(value["evidence_requirement"]),value["reason_code"],int(value.get("schema_version",1)))
+        return expression(payload)
+
+    @classmethod
+    def _intent_from_payload(cls, payload: dict) -> OrderIntent:
+        instrument=InstrumentId(payload["instrument"]["code"],Market(payload["instrument"]["market"]),Exchange(payload["instrument"]["exchange"]))
+        money=lambda name: Decimal(payload[name]) if payload[name] is not None else None
+        def evaluation(item):
+            def observed(value):
+                raw=value["status"]
+                try: status=FeatureStatus(raw)
+                except ValueError: status=ConditionResult(raw)
+                return ObservedValue(value["key"],value["value"],status,_parse_datetime(value["available_at"]) if value["available_at"] else None)
+            return ConditionEvaluation(item["condition_id"],ConditionResult(item["result"]),tuple(observed(value) for value in item["observed_values"]),tuple(item["missing_features"]),_parse_datetime(item["evaluated_at"]))
+        return OrderIntent(payload["intent_id"],payload["event_key"],instrument,payload["scenario_id"],payload["strategy_bundle_id"],payload["risk_bundle_id"],payload["plan_id"],payload["decision_id"],RiskProfile(payload["profile"]),PlanAction(payload["action"]),QuantityIntent(payload["quantity_intent"]),OrderSide(payload["side"]),OrderStyle(payload["order_style"]),IntentState(payload["state"]),Decimal(payload["requested_shares"]),Decimal(payload["risk_approved_shares"]),cls._execution_expression(payload["trigger_condition"]),cls._execution_expression(payload["confirmation_condition"]),cls._execution_expression(payload["invalidation_condition"]),tuple(evaluation(item) for item in payload["condition_evaluations"]),money("trigger_level"),money("stop"),money("take_profit"),_parse_datetime(payload["valid_from"]),_parse_datetime(payload["expires_at"]),_parse_datetime(payload["earliest_execution_at"]),payload["account_hash"],payload["valuation_id"],payload["quality_hash"],payload["evidence_hash"],payload["market_rule_version"],payload["risk_policy_version"],payload["execution_policy_version"],_parse_datetime(payload["generated_at"]),int(payload.get("schema_version",1)))
+
+    def get_order_intent(self, intent_id: str) -> OrderIntent | None:
+        row=self._fetchone("SELECT * FROM order_intents WHERE intent_id=?",(intent_id,))
+        if row is None:return None
+        value=self._intent_from_payload(json.loads(row["payload_json"]))
+        expected={"event_key":value.event_key,"instrument_key":value.instrument.stable_key,"risk_bundle_id":value.risk_bundle_id,"plan_id":value.plan_id,"decision_id":value.decision_id,"profile":value.profile.value,"action":value.action.value,"state":value.state.value,"requested_shares":str(value.requested_shares),"generated_at":utc_iso(value.generated_at),"schema_version":value.schema_version}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored order intent columns do not match payload")
+        return value
+
+    def list_order_intents(self, instrument: InstrumentId, risk_bundle_id: str | None = None) -> tuple[OrderIntent,...]:
+        sql="SELECT intent_id FROM order_intents WHERE instrument_key=?"; params=(instrument.stable_key,)
+        if risk_bundle_id is not None: sql+=" AND risk_bundle_id=?"; params+=(risk_bundle_id,)
+        return tuple(self.get_order_intent(item["intent_id"]) for item in self._fetchall(sql+" ORDER BY generated_at,intent_id",params))
+
+    def get_order_intent_build_record(self, build_id: str) -> OrderIntentBuildRecord | None:
+        row=self._fetchone("SELECT * FROM order_intent_build_records WHERE build_id=?",(build_id,))
+        if row is None:return None
+        payload=json.loads(row["payload_json"]); value=OrderIntentBuildRecord(payload["build_id"],payload["decision_id"],payload["plan_id"],IntentBuildStatus(payload["status"]),payload["intent_id"],tuple(payload["reasons"]),_parse_datetime(payload["generated_at"]),int(payload.get("schema_version",1)))
+        if row["event_key"]!=value.build_id or row["decision_id"]!=value.decision_id or row["plan_id"]!=value.plan_id or row["status"]!=value.status.value or row["intent_id"]!=value.intent_id: raise ContractViolation("stored intent build record columns do not match payload")
+        return value
+
+    def list_order_intent_build_records(self, decision_id: str) -> tuple[OrderIntentBuildRecord,...]:
+        return tuple(self.get_order_intent_build_record(item["build_id"]) for item in self._fetchall("SELECT build_id FROM order_intent_build_records WHERE decision_id=? ORDER BY generated_at,build_id",(decision_id,)))
+
+    @staticmethod
+    def _trigger_from_payload(payload: dict) -> TriggerEvaluation:
+        return TriggerEvaluation(payload["trigger_evaluation_id"],payload["event_key"],payload["intent_id"],TriggerState(payload["state"]),tuple(payload["evaluated_event_ids"]),payload["event_batch_hash"],payload["trigger_event_id"],payload["invalidation_event_id"],_parse_datetime(payload["evaluated_from"]) if payload["evaluated_from"] else None,_parse_datetime(payload["evaluated_to"]) if payload["evaluated_to"] else None,_parse_datetime(payload["triggered_at"]) if payload["triggered_at"] else None,_parse_datetime(payload["invalidated_at"]) if payload["invalidated_at"] else None,payload["source"],EventGranularity(payload["granularity"]) if payload["granularity"] else None,PathAssumption(payload["path_assumption"]),ExecutionEvidenceGrade(payload["evidence_grade"]),payload["execution_policy_version"],tuple(payload["reason_codes"]),_parse_datetime(payload["generated_at"]),int(payload.get("schema_version",1)))
+
+    def get_trigger_evaluation(self, trigger_evaluation_id: str) -> TriggerEvaluation | None:
+        row=self._fetchone("SELECT * FROM trigger_evaluations WHERE trigger_evaluation_id=?",(trigger_evaluation_id,))
+        if row is None:return None
+        value=self._trigger_from_payload(json.loads(row["payload_json"]))
+        expected={"event_key":value.event_key,"intent_id":value.intent_id,"state":value.state.value,"triggered_at":utc_iso(value.triggered_at) if value.triggered_at else None,"evidence_grade":value.evidence_grade.value,"generated_at":utc_iso(value.generated_at),"schema_version":value.schema_version}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored trigger evaluation columns do not match payload")
+        return value
+
+    def list_trigger_evaluations(self, intent_id: str) -> tuple[TriggerEvaluation,...]:
+        return tuple(self.get_trigger_evaluation(item["trigger_evaluation_id"]) for item in self._fetchall("SELECT trigger_evaluation_id FROM trigger_evaluations WHERE intent_id=? ORDER BY generated_at,trigger_evaluation_id",(intent_id,)))
+
+    @staticmethod
+    def _fill_from_payload(payload: dict) -> FillEvidence:
+        instrument=InstrumentId(payload["instrument"]["code"],Market(payload["instrument"]["market"]),Exchange(payload["instrument"]["exchange"]))
+        money=lambda name: Decimal(payload[name]) if payload[name] is not None else None
+        return FillEvidence(payload["fill_id"],payload["event_key"],payload["run_id"],payload["intent_id"],payload["decision_id"],payload["plan_id"],instrument,PlanAction(payload["action"]),OrderSide(payload["side"]),FillOutcome(payload["outcome"]),Decimal(payload["requested_shares"]),Decimal(payload["filled_shares"]),Decimal(payload["unfilled_shares"]),money("raw_price"),money("slippage_rate"),money("fill_price"),money("gross_value"),money("commission"),money("sell_tax"),money("total_fee"),money("cash_delta"),_parse_datetime(payload["triggered_at"]) if payload["triggered_at"] else None,_parse_datetime(payload["filled_at"]) if payload["filled_at"] else None,payload["source"],EventGranularity(payload["granularity"]) if payload["granularity"] else None,PathAssumption(payload["path_assumption"]),ExecutionEvidenceGrade(payload["evidence_grade"]),payload["market_rule_version"],payload["execution_policy_version"],tuple(payload["reason_codes"]),_parse_datetime(payload["generated_at"]),int(payload.get("schema_version",1)))
+
+    def get_fill_evidence(self, fill_id: str) -> FillEvidence | None:
+        row=self._fetchone("SELECT * FROM fill_evidence WHERE fill_id=?",(fill_id,))
+        if row is None:return None
+        value=self._fill_from_payload(json.loads(row["payload_json"]))
+        expected={"event_key":value.event_key,"run_id":value.run_id,"intent_id":value.intent_id,"instrument_key":value.instrument.stable_key,"outcome":value.outcome.value,"filled_at":utc_iso(value.filled_at) if value.filled_at else None,"generated_at":utc_iso(value.generated_at),"schema_version":value.schema_version}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored fill evidence columns do not match payload")
+        return value
+
+    def list_fill_evidence(self, run_id: str) -> tuple[FillEvidence,...]:
+        return tuple(self.get_fill_evidence(item["fill_id"]) for item in self._fetchall("SELECT fill_id FROM fill_evidence WHERE run_id=? ORDER BY fill_id",(run_id,)))
+
+    @staticmethod
+    def _run_from_payload(payload: dict) -> ExecutionRun:
+        delta=payload["final_state_delta"]
+        state_delta=ExecutionStateDelta(Decimal(delta["cash_delta"]),Decimal(delta["position_delta"]),Decimal(delta["sellable_delta"]) if delta["sellable_delta"] is not None else None,Decimal(delta["average_cost"]) if delta["average_cost"] is not None else None,Decimal(delta["active_stop"]) if delta["active_stop"] is not None else None,Decimal(delta["active_take_profit"]) if delta["active_take_profit"] is not None else None,tuple(delta["reason_codes"]),date.fromisoformat(delta["acquired_session_date"]) if delta.get("acquired_session_date") else None)
+        return ExecutionRun(payload["run_id"],payload["intent_id"],ExecutionMode(payload["mode"]),payload["initial_state_hash"],payload["event_batch_hash"],_parse_datetime(payload["replay_as_of"]),payload["market_rule_version"],payload["execution_policy_version"],payload["trigger_evaluation_id"],tuple(payload["fill_ids"]),state_delta,FillOutcome(payload["outcome"]),ExecutionEvidenceGrade(payload["evidence_grade"]),tuple(payload["reason_codes"]),_parse_datetime(payload["generated_at"]),int(payload.get("schema_version",1)))
+
+    def get_execution_run(self, run_id: str) -> ExecutionRun | None:
+        row=self._fetchone("SELECT * FROM execution_runs WHERE run_id=?",(run_id,))
+        if row is None:return None
+        value=self._run_from_payload(json.loads(row["payload_json"]))
+        fills=self.list_fill_evidence(value.run_id)
+        expected={"event_key":value.run_id,"intent_id":value.intent_id,"mode":value.mode.value,"initial_state_hash":value.initial_state_hash,"event_batch_hash":value.event_batch_hash,"outcome":value.outcome.value,"evidence_grade":value.evidence_grade.value,"generated_at":utc_iso(value.generated_at),"schema_version":value.schema_version}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored execution run columns do not match payload")
+        if tuple(item.fill_id for item in fills)!=value.fill_ids or any(item.intent_id!=value.intent_id or item.market_rule_version!=value.market_rule_version or item.execution_policy_version!=value.execution_policy_version for item in fills):raise ContractViolation("stored execution run and fills do not have bidirectional references")
+        return value
+
+    def list_execution_runs(self, intent_id: str) -> tuple[ExecutionRun,...]:
+        return tuple(self.get_execution_run(item["run_id"]) for item in self._fetchall("SELECT run_id FROM execution_runs WHERE intent_id=? ORDER BY generated_at,run_id",(intent_id,)))
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:

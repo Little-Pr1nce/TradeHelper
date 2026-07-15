@@ -11,7 +11,7 @@ from tradehelper_v2.contracts import (DecisionMode, FreshnessStatus, InstrumentC
 def default_market_rules(market: Market, exchange, as_of: datetime, classification: InstrumentClassification = InstrumentClassification.ORDINARY) -> MarketRuleSet:
     if market is Market.US:
         return MarketRuleSet("us_rules_v1", market, exchange, Decimal("1"), False, Decimal("0.0003"), Decimal("0"), Decimal("0"), Decimal("0.003"), None, classification, "v2_policy", as_of, None)
-    limits = {InstrumentClassification.ORDINARY: .099, InstrumentClassification.ST: .049, InstrumentClassification.GROWTH: .199, InstrumentClassification.STAR: .199, InstrumentClassification.BSE: .299}
+    limits = {InstrumentClassification.ORDINARY: .10, InstrumentClassification.ST: .05, InstrumentClassification.GROWTH: .20, InstrumentClassification.STAR: .20, InstrumentClassification.BSE: .30}
     return MarketRuleSet("a_rules_v1", market, exchange, Decimal("100"), True, Decimal("0.0003"), Decimal("5"), Decimal("0.0005"), Decimal("0.003"), limits.get(classification), classification, "v2_policy", as_of, None)
 
 

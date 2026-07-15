@@ -70,14 +70,14 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 |------|---------|---------|-------------|---------|----------|
 | Tab1 单股完整研究 | 单只股票深度分析入口 | `services/analysis_service.py`, `ui/main_page.py` | V2 single-stock use case | 待迁移 | `tests/v2/test_e2e_single_stock.py` |
 | Tab1 三时段模式 | 盘前/盘中/盘后语义不同 | `analysis_service.py`, `core/pipeline.py` | V2 use cases + data session | V2-4逐股会话与情景已迁移；Tab1编排待V2-11/12 | `tests/v2/test_scenario_sessions.py` |
-| Tab3 组合工作台 | 真实持仓决策，不是批量单股 | `services/portfolio_service.py`, `ui/portfolio_page.py` | V2 portfolio use case | 待迁移 | `tests/v2/test_e2e_portfolio.py` |
-| Tab3 三时段模式 | 组合盘前/盘中/盘后使用对应数据和计划有效期 | `portfolio_service.py`, `core/pipeline.py` | `use_cases/portfolio.py`, `portfolio/` | V2-4逐股情景已迁移；组合编排待V2-8 | `tests/v2/test_scenario_degradation.py` |
+| Tab3 组合工作台 | 真实持仓决策，不是批量单股 | `services/portfolio_service.py`, `ui/portfolio_page.py` | V2 portfolio use case | V2-8组合决策设计已冻结；UI/端到端留待V2-11/12 | `tests/v2/test_portfolio_allocator.py`, `tests/v2/test_e2e_portfolio.py` |
+| Tab3 三时段模式 | 组合盘前/盘中/盘后使用对应数据和计划有效期 | `portfolio_service.py`, `core/pipeline.py` | `use_cases/portfolio.py`, `portfolio/` | V2-4逐股情景已迁移；V2-8冻结同模式/同as_of组合批次合同 | `tests/v2/test_portfolio_contracts.py`, `tests/v2/test_scenario_degradation.py` |
 | Tab3 真实余额/持仓/成本 | 禁止虚构10万本金 | `data/database.py`, `portfolio_service.py` | `contracts/account.py`, `risk/valuation.py`, `risk/sizing.py` | V2-6冻结估值和单计划 sizing 已迁移 | `tests/v2/test_risk_valuation.py` |
 | Tab3 持仓行内编辑 | 用户卖一部分后可直接修改 | `ui/portfolio_page.py` | V2 UI portfolio component | 待迁移 | `tests/v2/test_ui_state_flow.py` |
-| Tab3 组合集中度/风险容量 | 单票集中度、现金和剩余风险 | `portfolio_service.py` | `risk/sizing.py`, `portfolio/allocator.py` | V2-6单计划上限已迁移；V2-8最终组合分配待迁移 | `tests/v2/test_risk_sizing.py` |
-| Tab3 冻结估值 | 同一批现价计算权益、市值和仓位，避免伪 103.6% | `portfolio_service.py` | `risk/valuation.py`, `portfolio/allocator.py` | V2-6账户冻结估值已迁移；V2-8消费同一估值快照 | `tests/v2/test_risk_valuation.py` |
-| Tab3 跨股票排序与冲突消解 | 先处理风险，再比较关注股替换机会 | `portfolio_service.py` | `portfolio/ranking.py` | 待迁移 | `tests/v2/test_portfolio_ranking.py` |
-| Tab3 关注股替换机会 | 组合视角比较持仓与关注股 | `portfolio_service.py` | portfolio scenario/plans | 待迁移 | `tests/v2/test_e2e_portfolio.py` |
+| Tab3 组合集中度/风险容量 | 单票集中度、现金和剩余风险 | `portfolio_service.py` | `risk/sizing.py`, `portfolio/allocator.py` | V2-6单计划上限已迁移；V2-8现金/heat/相关性最终分配设计已冻结 | `tests/v2/test_portfolio_allocator.py`, `tests/v2/test_risk_sizing.py` |
+| Tab3 冻结估值 | 同一批现价计算权益、市值和仓位，避免伪 103.6% | `portfolio_service.py` | `risk/valuation.py`, `portfolio/allocator.py` | V2-6账户冻结估值已迁移；V2-8冻结只读消费和 reservation 合同 | `tests/v2/test_portfolio_evidence.py`, `tests/v2/test_risk_valuation.py` |
+| Tab3 跨股票排序与冲突消解 | 先处理风险，再比较关注股替换机会 | `portfolio_service.py` | `portfolio/ranking.py` | V2-8结构化词典序排序和保护退出优先设计已冻结，待实现 | `tests/v2/test_portfolio_ranking.py` |
+| Tab3 关注股替换机会 | 组合视角比较持仓与关注股 | `portfolio_service.py` | `portfolio/replacement.py` | V2-8仅研究候选、独立退出和不复用预计回款合同已冻结，待实现 | `tests/v2/test_portfolio_replacements.py` |
 | Tab3 历史评估 | 用户看系统能力是否变好 | `ui/portfolio_page.py`, `portfolio_service.py` | `learning/`, V2 UI | 待迁移 | `tests/v2/test_learning_ledgers.py` |
 
 ## P0 特征资产
@@ -115,13 +115,13 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
-| T 日决策、T+1 开盘成交 | 避免未来函数 | `backtest/engine.py` | `execution/simulator.py` | V2-7设计已冻结，待实现 | `tests/v2/test_fill_simulator.py` |
-| 当前/回放共用订单意图 | 同一 TradePlan 生成当前预览和历史成交，不维护双路径 | `StrategyDecision -> Order` | `execution/orders.py` | V2-7设计已冻结，待实现 | `tests/v2/test_order_intent.py`, `tests/v2/test_execution_parity.py` |
-| 跳空止损按开盘价 | 回测更接近真实风险 | `backtest/broker.py` | `execution/simulator.py` | V2-7设计已冻结，待实现 | `tests/v2/test_fill_simulator.py` |
-| 动态滑点 | 高波动/低流动性不乐观 | `backtest/broker.py` | `execution/costs.py` | V2-7设计已冻结，待实现 | `tests/v2/test_execution_costs.py` |
-| 无分钟证据不伪造路径 | 盘中方案不能用整日K冒充信号后走势 | `intraday_bar_log`, trade plan verifier | `execution/simulator.py` | V2-7设计已冻结，待实现 | `tests/v2/test_fill_simulator.py` |
-| Decision/Broker 分账 | 保留策略建议与成交/拒单差异 | `joint_oof_runs` | `execution/`, `learning/joint_ledger.py` | V2-7先迁移成交证据分账，学习归因待V2-9 | `tests/v2/test_fill_simulator.py` |
-| A股一手、T+1、涨跌停、费用 | A股交易规则不能缺 | `utils/market_rules.py` | `risk/market_rules.py`, `execution/` | V2-6预检已迁移；V2-7最终成交规则设计已冻结，待实现 | `tests/v2/test_execution_market_rules.py`, `tests/v2/test_execution_costs.py` |
+| T 日决策、T+1 开盘成交 | 避免未来函数 | `backtest/engine.py` | `execution/simulator.py` | V2-7 回放边界已开始实现；EX20 及完整专项待补齐 | `tests/v2/test_execution_smoke.py`, `tests/v2/test_fill_simulator.py` |
+| 当前/回放共用订单意图 | 同一 TradePlan 生成当前预览和历史成交，不维护双路径 | `StrategyDecision -> Order` | `execution/orders.py` | V2-7 OrderIntentFactory 已实现；完整 parity 专项待补齐 | `tests/v2/test_execution_smoke.py`, `tests/v2/test_order_intent.py`, `tests/v2/test_execution_parity.py` |
+| 跳空止损按开盘价 | 回测更接近真实风险 | `backtest/broker.py` | `execution/simulator.py` | V2-7 历史仿真已开始实现，需继续补齐 EX21-EX27 | `tests/v2/test_execution_smoke.py`, `tests/v2/test_fill_simulator.py` |
+| 动态滑点 | 高波动/低流动性不乐观 | `backtest/broker.py` | `execution/costs.py` | V2-7 Decimal 成本模型已实现；专项 Golden Cases 待补齐 | `tests/v2/test_execution_costs.py` |
+| 无分钟证据不伪造路径 | 盘中方案不能用整日K冒充信号后走势 | `intraday_bar_log`, trade plan verifier | `execution/simulator.py` | V2-7 strict 触发证据边界已实现；同 bar 覆盖待补齐 | `tests/v2/test_trigger_engine.py`, `tests/v2/test_fill_simulator.py` |
+| Decision/Broker 分账 | 保留策略建议与成交/拒单差异 | `joint_oof_runs` | `execution/`, `learning/joint_ledger.py` | V2-7 已开始保存成交证据；学习归因仍待 V2-9 | `tests/v2/test_execution_smoke.py`, `tests/v2/test_fill_simulator.py` |
+| A股一手、T+1、涨跌停、费用 | A股交易规则不能缺 | `utils/market_rules.py` | `risk/market_rules.py`, `execution/` | V2-7 最终一手、T+1、涨跌停/停牌与费用检查已开始实现；专项双市场覆盖待补齐 | `tests/v2/test_execution_market_rules.py`, `tests/v2/test_execution_costs.py` |
 | 策略审计 Bootstrap | 样本外置信区间 | `core/strategy_audit.py` | `learning/strategy_ledger.py` | 待迁移 | `tests/v2/test_attribution_rules.py` |
 | 参数 walk-forward 晋升 | 防止未来数据选参数 | `core/strategy_pool.py` | `learning/optimizer.py` | 待迁移 | `tests/v2/test_stock_specific_optimizer.py` |
 | 负期望 recovery | 策略自我修复 | `core/strategy_pool.py` | `learning/optimizer.py` | 待迁移 | `tests/v2/test_stock_specific_optimizer.py` |

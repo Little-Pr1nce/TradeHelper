@@ -68,10 +68,11 @@ TradePlan + ExecutionDecision
 | [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md) | V2-5 TradePlan、条件 DSL、策略模板、V1 迁移矩阵、持久化和 SP00-SP29 |
 | [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) | V2-6 ExecutionDecision、真实账户估值、A/B/C/D、sizing、市场规则、migration 10 和 RK00-RK42 |
 | [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) | V2-7 OrderIntent、触发状态机、当前预览、历史成交、费用/滑点、migration 11 和 EX00-EX49 |
+| [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) | V2-8 组合批次、排序、现金/heat/相关性分配、最终股数、migration 12 和 PO00-PO49 |
 | `AGENTS.md` | Codex 本地工作约定 |
 | `CLAUDE.md` | Claude Code 本地工作约定 |
 
-V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-7 分别以对应阶段规范为准；当前实现只授权 V2-7，完成 EX00-EX49、测试和文档更新后必须停止并等待复审。
+V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-8 分别以对应阶段规范为准；当前实现只授权 V2-8，完成 PO00-PO49、测试和文档更新后必须停止并等待复审。
 
 ## 1. V2 分层结构
 
@@ -621,6 +622,8 @@ venv/bin/python -m pytest tests/v2/test_order_intent.py tests/v2/test_trigger_en
 
 ## 9. 组合决策层
 
+本节只保留总体目标。V2-8 的字段、算法、不变量、migration 和测试编号全部以 [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) 为准；下面的 `PortfolioDecision` 是早期概念示意，不能据此另建一套合同。
+
 ### 9.1 目标
 
 Tab3 不是逐股报告拼接。组合决策层接收所有单股 `ExecutionDecision` 和同一时点冻结的 `AccountSnapshot`，统一生成：
@@ -1112,8 +1115,8 @@ venv/bin/python -m pytest tests/ -q
 | V2-4 情景层 | 已完成并复审 | TradingScenario 合同、多周期归并、来源/时效降级、当前事实覆盖、三时段会话、策略家族兼容性、migration 8、强校验持久化和 SC00-SC21 共46条测试已通过；不生成 TradePlan |
 | V2-5 策略层 | 已完成并复审 | TradePlan/条件 DSL、九类首批模板、四分支 StrategyBundle、migration 9、强类型持久化、双市场/三时段语义与 SP00-SP29 已通过；不包含 V2-6 风控或之后模块 |
 | V2-6 风控层 | 已完成并复审 | ExecutionDecision、真实账户冻结估值、A/B/C/D、Decimal 单计划容量、风险成本预留、A/美股规则预检、migration 10 与 RK00-RK42 测试映射已完成；不包含 V2-7/V2-8 模块 |
-| V2-7 成交仿真层 | 设计完成，待实现 | OrderIntent、统一触发状态机、当前预览、历史成交证据、Decimal 费用/滑点、migration 11 和 EX00-EX49 已冻结 |
-| V2-8 组合决策层 | 未开始 | 等单股执行决策和冻结估值合同稳定 |
+| V2-7 成交仿真层 | 已完成并复审 | OrderIntent、冻结条件触发、当前预览、历史仿真、Decimal 成本、双市场最终检查、migration 11 与 EX00-EX49 均已通过；不包含 V2-8 组合分配 |
+| V2-8 组合决策层 | 设计冻结，待实现 | 精确合同见 `docs/v2/V2_8_PORTFOLIO.md`；只实现组合批次、保护退出优先、排序、现金/heat/相关性分配、最终股数、替换研究候选、migration 12 和 PO00-PO49 |
 | V2-9 学习层 | 未开始 | 等预测、计划、风控和成交事件合同稳定 |
 | V2-10 LLM 假设层 | 未开始 | 可复用 V1 observation，但需拆预测/策略假设并限制为 DSL |
 | V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
@@ -1137,7 +1140,7 @@ venv/bin/python -m pytest tests/ -q
 - 复审修正 sizing 与审计：add 的最大亏损包含已有持仓到同一止损的风险；容量明确区分风险、现金、单票、总仓位和最低一手约束；减仓比例读取版本化政策；硬约束、软倍率、跳空风险和组合待分配均结构化记录。
 - RK00-RK42 的 43 个唯一编号全部落为可执行测试；V2-6 专项 `49 passed`，V2 全量 `267 passed, 3 skipped`，项目全量 `527 passed, 3 skipped`。默认跳过的 3 条真实 Provider 冒烟测试使用 V1 本地配置显式启用后为 `3 passed in 24.63s`。
 
-### 2026-07-15 V2-7 设计完成：成交仿真层（待实现）
+### 2026-07-15 V2-7 设计冻结：成交仿真层
 
 - 新增规范 [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md)，冻结 OrderIntentRequest、OrderIntent、TriggerEvaluation、ExecutionRun、FillEvidence、ExecutionPolicy、migration 11 和 EX00-EX49。
 - 当前订单预览与历史成交仿真必须从同一 `TradePlan + ExecutionDecision` 生成相同订单意图；C/D、零批准量和不适用动作保留结构化 `no_order` 记录，不静默删除。
@@ -1147,6 +1150,24 @@ venv/bin/python -m pytest tests/ -q
 - A股最终成交规则覆盖整手、零股全部退出、T+1、涨跌停和显式停牌；美股不得套用 A股规则。无 Level2/队列证据时不能保证涨跌停或延伸时段成交。
 - 本阶段只设计单标的订单与成交证据。多股票现金争用、相关性、最终分配和替换排序仍属于 V2-8。
 
-## 16. 当前实施点：V2-7 待实现
+### 2026-07-15 V2-7 完成并复审：成交仿真层
 
-V2-6 已按 [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) 完成并复审。当前只实施 [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) 规定的成交仿真层，完成 EX00-EX49、V2 专项和项目全量测试后停止；不得提前实现 V2-8 组合分配、V2-9 学习或之后模块。
+- 同一 `TradePlan + ExecutionDecision` 生成唯一 OrderIntent，当前预览和历史回放只消费该意图；C/D、观察、零股和过期计划均保留 no_order 审计记录。
+- 冻结静态条件、三值逻辑、crossing、跳空、失效、止损/止盈和同 bar 无序列场景统一由 TriggerEngine 求值；未来事件、未来流动性证据和跨股票/账户身份全部拒绝。
+- Decimal 成本模型覆盖固定/波动率/ADV 滑点、佣金、最低佣金、A股卖出税、现金逐手缩量和 5% ADV 容量上限；买卖价格始终按不利方向量化。
+- A股整手、零股全退、T+1、涨跌停队列与停牌，美股独立规则和无 Level2 降级均有测试；盘中实时价仍不写正式日K。
+- migration 11 支持订单、构造记录、触发评估、run/fill 强类型恢复、幂等、冲突隔离及 run/fill 单事务写入。
+- EX00-EX49 全部有可执行验收；成交专项 `125 passed`，V2 全量 `389 passed, 3 skipped`，项目全量 `649 passed, 3 skipped`，真实 Provider 冒烟显式启用后 `3 passed`。
+
+### 2026-07-16 V2-8 设计冻结：组合决策层
+
+- 新增规范 [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md)，冻结 PortfolioInputBatch、PortfolioCandidate、HoldingRiskSnapshot、相关性/当前风险快照、组合分配结果、政策、migration 12 和 PO00-PO49。
+- 固定执行顺序：V2-6 给出单计划最大批准量，V2-8 只做跨股票排序和缩量，V2-7 再从 final requested shares 构造订单意图；禁止维护组合专用第二套信号路径。
+- 保护退出先于新增风险；预计卖出回款不能进入本轮可用现金。同股票多个退出计划共享持仓预留，不能重复卖出；替换只形成研究候选，不能自动串联卖出和买入。
+- 组合容量同时受真实冻结现金、V2-6 单票/总仓位硬约束、conservative/aggressive heat、高相关邻域和市场整手规则限制；任何活跃持仓风险未知时阻断所有新增风险但保留退出。
+- A股/CNY 和美股/USD 必须分批，禁止默认 FX=1、跨币种相关性或跨市场资金共用；相关性只使用 cutoff 前完成日K，样本不足保持缺失并降级，不能填 0。
+- 当前实现只授权 V2-8；不实现 V2-9 学习、LLM、UI/报告、券商自动下单或无 Level2 的成交保证。
+
+## 16. 当前实施点：V2-8 设计冻结，待实现
+
+V2-7 已按 [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) 完成并复审。V2-8 已按 [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) 冻结精确设计；Terra 当前只实现该规范列出的合同、组合快照、排序与 allocator、订单装配、repository/migration 12 和 PO00-PO49。完成专项、V2 全量和项目全量测试并更新阶段状态后停止，不得提前进入 V2-9 学习、LLM 或 UI。
