@@ -66,10 +66,11 @@ TradePlan + ExecutionDecision
 | [docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md) | V2-3 预测合同、标签、模型、OOF、注册、持久化和 Golden Cases |
 | [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md) | V2-4 情景合同、多周期归并、三时段、策略家族政策、持久化和 Golden Cases |
 | [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md) | V2-5 TradePlan、条件 DSL、策略模板、V1 迁移矩阵、持久化和 SP00-SP29 |
+| [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) | V2-6 ExecutionDecision、真实账户估值、A/B/C/D、sizing、市场规则、migration 10 和 RK00-RK42 |
 | `AGENTS.md` | Codex 本地工作约定 |
 | `CLAUDE.md` | Claude Code 本地工作约定 |
 
-V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-5 分别以对应阶段规范为准；当前实现只授权 V2-5，完成 SP00-SP29、测试和文档更新后必须停止并等待复审。
+V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-6 分别以对应阶段规范为准；当前实现只授权 V2-6，完成 RK00-RK42、测试和文档更新后必须停止并等待复审。
 
 ## 1. V2 分层结构
 
@@ -546,68 +547,25 @@ venv/bin/python -m pytest tests/ -q -rs
 
 ## 7. 风控层重构
 
-### 7.1 目标
+V2-6 的规范性合同见 [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md)。本节只保留阶段边界；字段、不变量、Decimal 公式、A/B/C/D 矩阵、双市场规则、migration 10 和 RK00-RK42 以该规范为准。
 
-风控官只决定能不能执行，不负责发明交易点子。
+风控官接收完整 StrategyBundle、TradingScenario、DataQualityReport、真实 AccountSnapshot、同批 FrozenAccountValuation、持仓可卖数量、当前股票+策略历史证据和版本化 MarketRuleSet。它为每个 `plan_id + profile` 生成一条 ExecutionDecision，计算单计划最大批准股数和按止损假设的计划亏损，但不能修改 TradePlan 的 action、trigger、stop、take profit 或 invalidation。
 
-输入：
+固定边界：
 
-```text
-TradePlan
-DataQualityReport
-ForecastEvidence
-StrategyEvidence
-AccountSnapshot
-MarketRules
-```
+- 没有账户、权益为 0 或估值不完整时不得填模拟本金；新开仓最多 C/0 股。
+- A 只给当前股票+策略 OOF 可靠正期望；无样本/样本不足最高 B，负期望为 C，证据冲突为 D。A 不要求机械跑赢牛市基准。
+- conservative 使用 1% 风险预算/20% 目标软上限，aggressive 使用 2%/25%；两者都受 25% 单票、90% 股票总仓位和同一硬止损约束。
+- A股一手、T+1、涨跌停在本层做可执行性预检；订单、跳空、费用、滑点和实际成交属于 V2-7。
+- 风险退出不受预测偏多、无 Champion 或历史样本不足阻止；市场当前不能成交时保留紧急 D，不静默删除。
+- Tab3 多股票之间的现金争用、相关性和最终分配属于 V2-8；V2-8 只能缩小 V2-6 的单计划批准量。
 
-输出：
+验收命令：
 
 ```text
-ExecutionDecision:
-  level: A / B / C / D
-  executable: bool
-  adjusted_position_pct
-  max_loss_amount
-  rejection_or_demotion_reasons
-```
-
-执行等级固定定义为：
-
-| 等级 | 标准 | 动作 |
-|------|------|------|
-| A | 事实成立 + 风险可控 + 当前股票/策略有可靠正期望 | 可执行 |
-| B | 事实成立 + 风险可控 + 样本或历史证据不足 | 小仓验证 |
-| C | 事实成立，但历史期望、风险容量或预测一致性不支持 | 仅观察 |
-| D | 数据冲突、关键事实缺失或计划不可成交 | 驳回 |
-
-风控参数分为两类：止损、最大亏损、账户权益、数据质量和市场硬规则不可优化；集中度软上限、风险缩放和确认阈值只有经过 OOF 及在线确认后才能在预设范围内调整。
-
-### 7.2 测试方案
-
-新增测试：
-
-```text
-tests/v2/test_risk_officer.py
-tests/v2/test_position_sizing.py
-tests/v2/test_market_rules_v2.py
-```
-
-测试内容：
-
-1. 数据冲突必须 D。
-2. 无止损买入不能 A/B。
-3. 用户权益为 0 时禁止新开仓，但不阻止卖出/减仓。
-4. 单票集中度过高时禁止加仓。
-5. A股一手、T+1、涨跌停约束生效。
-6. 风险退出不因预测偏多而被阻止。
-7. 历史反馈不能把 D 级数据冲突升级，也不能取消硬止损或市场规则。
-8. 保守/激进档案都受同一账户总风险和单票集中度硬上限约束。
-
-验收标准：
-
-```text
-venv/bin/python -m pytest tests/v2/test_risk_*.py tests/v2/test_position_sizing.py -q
+venv/bin/python -m pytest tests/v2/test_risk_*.py -q
+venv/bin/python -m pytest tests/v2/ -q -rs
+venv/bin/python -m pytest tests/ -q -rs
 ```
 
 ## 8. 成交与仿真层
@@ -1150,7 +1108,7 @@ venv/bin/python -m pytest tests/ -q
 | V2-3 预测层 | 已完成并复审 | Forecast contracts、波动率标签、FeatureSet/校准、JSON+zlib artifact、20候选、maturity-purged OOF、registry 回退/重启恢复、migration 6/7 和预测快照幂等读写已通过 FC00-FC18；不生成 TradePlan |
 | V2-4 情景层 | 已完成并复审 | TradingScenario 合同、多周期归并、来源/时效降级、当前事实覆盖、三时段会话、策略家族兼容性、migration 8、强校验持久化和 SC00-SC21 共46条测试已通过；不生成 TradePlan |
 | V2-5 策略层 | 已完成并复审 | TradePlan/条件 DSL、九类首批模板、四分支 StrategyBundle、migration 9、强类型持久化、双市场/三时段语义与 SP00-SP29 已通过；不包含 V2-6 风控或之后模块 |
-| V2-6 风控层 | 未开始 | 可并行梳理合同，但实现等 TradePlan 稳定 |
+| V2-6 风控层 | 设计完成，待实现 | 已冻结 ExecutionDecision、真实账户冻结估值、A/B/C/D、单计划 sizing、计划亏损、双市场规则预检、migration 10 和 RK00-RK42；实现时不得进入 V2-7/V2-8 边界 |
 | V2-7 成交仿真层 | 未开始 | 等 ExecutionDecision 和市场规则稳定 |
 | V2-8 组合决策层 | 未开始 | 等单股执行决策和冻结估值合同稳定 |
 | V2-9 学习层 | 未开始 | 等预测、计划、风控和成交事件合同稳定 |
@@ -1158,6 +1116,14 @@ venv/bin/python -m pytest tests/ -q
 | V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
 | V2-12 迁移/端到端/发布 | 未开始 | 每层单测通过后执行完整矩阵与跨平台烟雾 |
 
-## 16. 当前下一步：设计 V2-6 风控层
+### 2026-07-15 V2-6 设计完成：风控层（待实现）
 
-V2-5 已按 [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md) 完成实现、P0/P1 修复、SP00-SP29、全量回归和真实 Provider 复验。当前停止在阶段边界；下一步应先冻结 V2-6 的 `ExecutionDecision`、真实账户估值、风险预算、硬/软约束、A/B/C/D 和双市场规则合同，再开始实现。
+- 新增规范 [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md)，冻结 RiskRequest、ExecutionDecision、RiskDecisionBundle、版本化 RiskPolicy、migration 10 和 RK00-RK42。
+- 禁止默认本金：股数、仓位和计划亏损必须来自真实 AccountSnapshot 与同一批 ValuationPrice；任一活跃持仓缺价时不用成本价补齐权益。
+- 固定 A/B/C/D 与条件批准语义：等待计划不冒充当前可执行，C/D 不静默删除，保护性退出不被偏多预测、无 Champion 或历史样本不足阻断。
+- 明确单计划与组合边界：V2-6 只给出每个 plan/profile 的最大批准量；多股票现金争用、相关性、替换和最终分配留给 V2-8，且只能缩小 V2-6 上限。
+- 双市场预检覆盖 A股一手、T+1、涨跌停与美股延伸时段流动性代理；订单、tick size、跳空、费用/滑点与成交证据仍属于 V2-7。
+
+## 16. 当前下一步：实现 V2-6 风控层
+
+V2-6 的规范性合同已冻结。下一步必须按 [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) 的实施顺序完成 risk contracts、Decimal 冻结估值与 sizing、双市场规则预检、RiskOfficer、migration 10 和 RK00-RK42。运行 V2-6 专项、V2 全量和项目全量回归后停止，不得提前创建 OrderIntent、成交仿真或组合分配。

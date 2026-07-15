@@ -186,10 +186,10 @@ LLM 观察无论被系统确认、反驳、待验证或因数据无效无法判�
 
 ## 6. 当前阶段
 
-当前只做：
+当前下一阶段：
 
 ```text
-V2-5 策略层
+V2-6 风控层
 ```
 
-V2-0 至 V2-4 已完成并冻结。V2-5 只能按 `docs/v2/V2_5_STRATEGIES.md` 把 FeatureSnapshot、TradingScenario 和可选 PositionSnapshot 翻译为结构化 TradePlan；不得读取账户现金、计算仓位和最大亏损，也不得提前实现风险等级、成交、组合分配、学习、LLM 或 UI。
+V2-0 至 V2-5 已完成并复审。V2-6 只能按 `docs/v2/V2_6_RISK.md` 使用 StrategyBundle、真实账户、冻结估值、数据质量、历史证据和市场规则生成 ExecutionDecision；不得修改 TradePlan，也不得提前实现 OrderIntent、成交仿真、组合分配、学习、LLM 或 UI。

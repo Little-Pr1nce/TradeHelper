@@ -22,9 +22,10 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-3 预测层规范：[docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md)
 - V2-4 情景层规范：[docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md)
 - V2-5 策略层规范：[docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md)
+- V2-6 风控层规范：[docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 至 V2-5 已完成并复审。V2-5 已按规范实现结构化条件、首批策略模板、完整四分支 TradePlan 和 migration 9；策略层不计算股数、仓位、账户最大亏损或 A/B/C/D 等级，这些必须由后续风控层基于真实账户生成。
+V2-0 至 V2-5 已完成并复审。V2-6 精确设计已完成，下一阶段按规范实现真实账户冻结估值、A/B/C/D、单计划 sizing、计划亏损、双市场规则预检和 migration 10；不得提前实现订单、成交或组合分配。
 
 ## 一以贯之的系统目标
 
@@ -80,6 +81,7 @@ V2-0 至 V2-5 已完成并复审。V2-5 已按规范实现结构化条件、首�
 | [docs/v2/V2_3_FORECAST.md](./docs/v2/V2_3_FORECAST.md) | V2-3 预测目标、模型、OOF、注册、持久化和 Golden Cases |
 | [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md) | V2-4 情景合同、多周期归并、三时段、降级、持久化和 Golden Cases |
 | [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md) | V2-5 TradePlan、条件 DSL、策略模板、V1 迁移矩阵和 SP00-SP29 |
+| [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) | V2-6 风控合同、真实账户估值、A/B/C/D、sizing、双市场规则和 RK00-RK42 |
 | `AGENTS.md` | Codex 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 | `CLAUDE.md` | Claude Code 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 
@@ -104,7 +106,7 @@ venv/bin/python -m pytest tests/ -q
 tests/v2/
 ```
 
-V2-5 已完成并复审：TradePlan/条件 DSL、九类模板、四分支 StrategyBundle、migration 9 和 SP00-SP29 验收矩阵已落地。V2 全量回归为 `218 passed, 3 skipped`，全项目为 `478 passed, 3 skipped`；3 条真实 Provider 测试显式启用后为 `3 passed`。当前停止在 V2-5，不提前实现 V2-6 风控、成交、组合决策、学习、LLM 或 UI。
+V2-5 已完成并复审：TradePlan/条件 DSL、九类模板、四分支 StrategyBundle、migration 9 和 SP00-SP29 验收矩阵已落地。V2 全量回归为 `218 passed, 3 skipped`，全项目为 `478 passed, 3 skipped`；3 条真实 Provider 测试显式启用后为 `3 passed`。V2-6 精确设计已冻结，当前只实现风控层 RK00-RK42，完成后停止，不提前实现 V2-7 成交、V2-8 组合决策或之后模块。
 
 ## 历史资料
 
