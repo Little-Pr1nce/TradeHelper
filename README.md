@@ -23,9 +23,10 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-4 情景层规范：[docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md)
 - V2-5 策略层规范：[docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md)
 - V2-6 风控层规范：[docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md)
+- V2-7 成交仿真层规范：[docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 至 V2-6 已完成并复审。V2-6 已按规范实现真实账户冻结估值、A/B/C/D、单计划 sizing、计划亏损、双市场规则预检和 migration 10；不得提前实现订单、成交或组合分配。
+V2-0 至 V2-6 已完成并复审。V2-7 精确设计已冻结，当前只授权实现订单意图、统一触发、当前预览、历史成交证据、费用/滑点和双市场最终成交规则；不得提前实现 V2-8 组合分配或之后模块。
 
 ## 一以贯之的系统目标
 
@@ -82,6 +83,7 @@ V2-0 至 V2-6 已完成并复审。V2-6 已按规范实现真实账户冻结估�
 | [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md) | V2-4 情景合同、多周期归并、三时段、降级、持久化和 Golden Cases |
 | [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md) | V2-5 TradePlan、条件 DSL、策略模板、V1 迁移矩阵和 SP00-SP29 |
 | [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) | V2-6 风控合同、真实账户估值、A/B/C/D、sizing、双市场规则和 RK00-RK42 |
+| [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) | V2-7 OrderIntent、触发状态机、当前预览、历史成交、费用/滑点、migration 11 和 EX00-EX49 |
 | `AGENTS.md` | Codex 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 | `CLAUDE.md` | Claude Code 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 
@@ -106,7 +108,7 @@ venv/bin/python -m pytest tests/ -q
 tests/v2/
 ```
 
-V2-6 已完成并复审：ExecutionDecision、真实账户冻结估值、A/B/C/D、Decimal 单计划容量、A/美股规则预检、migration 10 和 RK00-RK42 已落地。43 个 RK 编号均有可执行覆盖，风控专项为 `49 passed`，V2 回归为 `267 passed, 3 skipped`，项目全量为 `527 passed, 3 skipped`；默认跳过的 3 条真实 Provider 冒烟测试显式开启后为 `3 passed`。当前停止在 V2-6，不提前实现 V2-7 成交、V2-8 组合决策或之后模块。
+V2-6 已完成并复审：ExecutionDecision、真实账户冻结估值、A/B/C/D、Decimal 单计划容量、A/美股规则预检、migration 10 和 RK00-RK42 已落地。43 个 RK 编号均有可执行覆盖，风控专项为 `49 passed`，V2 回归为 `267 passed, 3 skipped`，项目全量为 `527 passed, 3 skipped`；默认跳过的 3 条真实 Provider 冒烟测试显式开启后为 `3 passed`。V2-7 已完成精确设计但尚未实现，验收以 EX00-EX49 为准。
 
 ## 历史资料
 

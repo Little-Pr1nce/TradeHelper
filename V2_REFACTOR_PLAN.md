@@ -67,10 +67,11 @@ TradePlan + ExecutionDecision
 | [docs/v2/V2_4_SCENARIOS.md](./docs/v2/V2_4_SCENARIOS.md) | V2-4 情景合同、多周期归并、三时段、策略家族政策、持久化和 Golden Cases |
 | [docs/v2/V2_5_STRATEGIES.md](./docs/v2/V2_5_STRATEGIES.md) | V2-5 TradePlan、条件 DSL、策略模板、V1 迁移矩阵、持久化和 SP00-SP29 |
 | [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) | V2-6 ExecutionDecision、真实账户估值、A/B/C/D、sizing、市场规则、migration 10 和 RK00-RK42 |
+| [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) | V2-7 OrderIntent、触发状态机、当前预览、历史成交、费用/滑点、migration 11 和 EX00-EX49 |
 | `AGENTS.md` | Codex 本地工作约定 |
 | `CLAUDE.md` | Claude Code 本地工作约定 |
 
-V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-6 分别以对应阶段规范为准；当前实现只授权 V2-6，完成 RK00-RK42、测试和文档更新后必须停止并等待复审。
+V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-7 分别以对应阶段规范为准；当前实现只授权 V2-7，完成 EX00-EX49、测试和文档更新后必须停止并等待复审。
 
 ## 1. V2 分层结构
 
@@ -569,6 +570,8 @@ venv/bin/python -m pytest tests/ -q -rs
 ```
 
 ## 8. 成交与仿真层
+
+V2-7 的规范性合同见 [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md)。本节只保留阶段边界；字段、不变量、事件顺序、Decimal 成本公式、双市场最终规则、migration 11 和 EX00-EX49 以该规范为准。
 
 ### 8.1 目标
 
@@ -1109,7 +1112,7 @@ venv/bin/python -m pytest tests/ -q
 | V2-4 情景层 | 已完成并复审 | TradingScenario 合同、多周期归并、来源/时效降级、当前事实覆盖、三时段会话、策略家族兼容性、migration 8、强校验持久化和 SC00-SC21 共46条测试已通过；不生成 TradePlan |
 | V2-5 策略层 | 已完成并复审 | TradePlan/条件 DSL、九类首批模板、四分支 StrategyBundle、migration 9、强类型持久化、双市场/三时段语义与 SP00-SP29 已通过；不包含 V2-6 风控或之后模块 |
 | V2-6 风控层 | 已完成并复审 | ExecutionDecision、真实账户冻结估值、A/B/C/D、Decimal 单计划容量、风险成本预留、A/美股规则预检、migration 10 与 RK00-RK42 测试映射已完成；不包含 V2-7/V2-8 模块 |
-| V2-7 成交仿真层 | 未开始 | 等 ExecutionDecision 和市场规则稳定 |
+| V2-7 成交仿真层 | 设计完成，待实现 | OrderIntent、统一触发状态机、当前预览、历史成交证据、Decimal 费用/滑点、migration 11 和 EX00-EX49 已冻结 |
 | V2-8 组合决策层 | 未开始 | 等单股执行决策和冻结估值合同稳定 |
 | V2-9 学习层 | 未开始 | 等预测、计划、风控和成交事件合同稳定 |
 | V2-10 LLM 假设层 | 未开始 | 可复用 V1 observation，但需拆预测/策略假设并限制为 DSL |
@@ -1134,6 +1137,16 @@ venv/bin/python -m pytest tests/ -q
 - 复审修正 sizing 与审计：add 的最大亏损包含已有持仓到同一止损的风险；容量明确区分风险、现金、单票、总仓位和最低一手约束；减仓比例读取版本化政策；硬约束、软倍率、跳空风险和组合待分配均结构化记录。
 - RK00-RK42 的 43 个唯一编号全部落为可执行测试；V2-6 专项 `49 passed`，V2 全量 `267 passed, 3 skipped`，项目全量 `527 passed, 3 skipped`。默认跳过的 3 条真实 Provider 冒烟测试使用 V1 本地配置显式启用后为 `3 passed in 24.63s`。
 
-## 16. 当前停止点：V2-6 已复审
+### 2026-07-15 V2-7 设计完成：成交仿真层（待实现）
 
-V2-6 已按 [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) 完成风险合同、Decimal 冻结估值与 sizing、双市场规则预检、RiskOfficer、migration 10 和 RK00-RK42，并完成第二轮代码复审。下一阶段是 V2-7 成交仿真层，但在其精确合同另行冻结前不得创建 OrderIntent、成交仿真或组合分配。
+- 新增规范 [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md)，冻结 OrderIntentRequest、OrderIntent、TriggerEvaluation、ExecutionRun、FillEvidence、ExecutionPolicy、migration 11 和 EX00-EX49。
+- 当前订单预览与历史成交仿真必须从同一 `TradePlan + ExecutionDecision` 生成相同订单意图；C/D、零批准量和不适用动作保留结构化 `no_order` 记录，不静默删除。
+- 固定无未来数据边界：盘后 T 日计划最早从 T+1 开盘求值；风控 `entry_price` 只是 sizing 参考价，不得转换为限价；历史事件必须在当时可见。
+- 缺分钟顺序时不得用完整日K伪造盘中路径。同一 bar 触发与失效顺序不明时保持不可验证；已有持仓止盈/止损同日双触发可另给明确标记的保守 stop-first 下界，但不能冒充已验证成交。
+- 费用、滑点、容量和现金缩量全部使用 Decimal；高波动、低流动性和缺 ADV 只能增加成本或降低证据等级，成交股数不能超过风控批准量、请求量、持仓量和可卖量。
+- A股最终成交规则覆盖整手、零股全部退出、T+1、涨跌停和显式停牌；美股不得套用 A股规则。无 Level2/队列证据时不能保证涨跌停或延伸时段成交。
+- 本阶段只设计单标的订单与成交证据。多股票现金争用、相关性、最终分配和替换排序仍属于 V2-8。
+
+## 16. 当前实施点：V2-7 待实现
+
+V2-6 已按 [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) 完成并复审。当前只实施 [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) 规定的成交仿真层，完成 EX00-EX49、V2 专项和项目全量测试后停止；不得提前实现 V2-8 组合分配、V2-9 学习或之后模块。

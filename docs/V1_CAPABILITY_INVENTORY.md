@@ -115,13 +115,13 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
-| T 日决策、T+1 开盘成交 | 避免未来函数 | `backtest/engine.py` | V2 simulation/learning | 待迁移 | `tests/v2/test_learning_ledgers.py` |
-| 当前/回放共用订单意图 | 同一 TradePlan 生成当前预览和历史成交，不维护双路径 | `StrategyDecision -> Order` | `execution/orders.py` | 待迁移 | `tests/v2/test_order_intent.py` |
-| 跳空止损按开盘价 | 回测更接近真实风险 | `backtest/broker.py` | V2 broker boundary | 待迁移 | `tests/v2/test_strategy_*.py` |
-| 动态滑点 | 高波动/低流动性不乐观 | `backtest/broker.py` | V2 execution assumptions | 待迁移 | `tests/v2/test_market_rules_v2.py` |
-| 无分钟证据不伪造路径 | 盘中方案不能用整日K冒充信号后走势 | `intraday_bar_log`, trade plan verifier | `execution/simulator.py` | 待迁移 | `tests/v2/test_fill_simulator.py` |
-| Decision/Broker 分账 | 保留策略建议与成交/拒单差异 | `joint_oof_runs` | `execution/`, `learning/joint_ledger.py` | 待迁移 | `tests/v2/test_fill_simulator.py` |
-| A股一手、T+1、涨跌停、费用 | A股交易规则不能缺 | `utils/market_rules.py` | `risk/market_rules.py`, `execution/` | V2-6规则预检与风险成本预留已迁移；V2-7最终订单/成交费用待迁移 | `tests/v2/test_risk_market_rules.py` |
+| T 日决策、T+1 开盘成交 | 避免未来函数 | `backtest/engine.py` | `execution/simulator.py` | V2-7设计已冻结，待实现 | `tests/v2/test_fill_simulator.py` |
+| 当前/回放共用订单意图 | 同一 TradePlan 生成当前预览和历史成交，不维护双路径 | `StrategyDecision -> Order` | `execution/orders.py` | V2-7设计已冻结，待实现 | `tests/v2/test_order_intent.py`, `tests/v2/test_execution_parity.py` |
+| 跳空止损按开盘价 | 回测更接近真实风险 | `backtest/broker.py` | `execution/simulator.py` | V2-7设计已冻结，待实现 | `tests/v2/test_fill_simulator.py` |
+| 动态滑点 | 高波动/低流动性不乐观 | `backtest/broker.py` | `execution/costs.py` | V2-7设计已冻结，待实现 | `tests/v2/test_execution_costs.py` |
+| 无分钟证据不伪造路径 | 盘中方案不能用整日K冒充信号后走势 | `intraday_bar_log`, trade plan verifier | `execution/simulator.py` | V2-7设计已冻结，待实现 | `tests/v2/test_fill_simulator.py` |
+| Decision/Broker 分账 | 保留策略建议与成交/拒单差异 | `joint_oof_runs` | `execution/`, `learning/joint_ledger.py` | V2-7先迁移成交证据分账，学习归因待V2-9 | `tests/v2/test_fill_simulator.py` |
+| A股一手、T+1、涨跌停、费用 | A股交易规则不能缺 | `utils/market_rules.py` | `risk/market_rules.py`, `execution/` | V2-6预检已迁移；V2-7最终成交规则设计已冻结，待实现 | `tests/v2/test_execution_market_rules.py`, `tests/v2/test_execution_costs.py` |
 | 策略审计 Bootstrap | 样本外置信区间 | `core/strategy_audit.py` | `learning/strategy_ledger.py` | 待迁移 | `tests/v2/test_attribution_rules.py` |
 | 参数 walk-forward 晋升 | 防止未来数据选参数 | `core/strategy_pool.py` | `learning/optimizer.py` | 待迁移 | `tests/v2/test_stock_specific_optimizer.py` |
 | 负期望 recovery | 策略自我修复 | `core/strategy_pool.py` | `learning/optimizer.py` | 待迁移 | `tests/v2/test_stock_specific_optimizer.py` |
