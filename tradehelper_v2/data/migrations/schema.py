@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import sqlite3
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -462,6 +462,29 @@ CREATE TABLE IF NOT EXISTS strategy_bundles (
 CREATE INDEX IF NOT EXISTS idx_v2_strategy_bundles_lookup ON strategy_bundles(instrument_key, scenario_id);
 """.strip()
 
+_SCHEMA_V10_SQL = """
+CREATE TABLE IF NOT EXISTS frozen_account_valuations (
+    valuation_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, market TEXT NOT NULL,
+    currency TEXT NOT NULL, account_hash TEXT NOT NULL, price_batch_hash TEXT NOT NULL,
+    valuation_at TEXT NOT NULL, status TEXT NOT NULL, payload_json TEXT NOT NULL,
+    generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_frozen_valuations_lookup ON frozen_account_valuations(market, valuation_at);
+CREATE TABLE IF NOT EXISTS execution_decisions (
+    decision_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, instrument_key TEXT NOT NULL,
+    scenario_id TEXT NOT NULL, bundle_id TEXT NOT NULL, plan_id TEXT NOT NULL, profile TEXT NOT NULL,
+    level TEXT NOT NULL, disposition TEXT NOT NULL, account_hash TEXT, valuation_id TEXT,
+    payload_json TEXT NOT NULL, generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_execution_decisions_lookup ON execution_decisions(instrument_key, scenario_id, plan_id);
+CREATE TABLE IF NOT EXISTS risk_decision_bundles (
+    risk_bundle_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, instrument_key TEXT NOT NULL,
+    scenario_id TEXT NOT NULL, strategy_bundle_id TEXT NOT NULL, account_hash TEXT, valuation_id TEXT,
+    payload_json TEXT NOT NULL, generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_risk_bundles_lookup ON risk_decision_bundles(instrument_key, scenario_id);
+""".strip()
+
 
 def schema_checksum() -> str:
     return sha256(_SCHEMA_SQL.encode("utf-8")).hexdigest()
@@ -493,6 +516,8 @@ def schema_v8_checksum() -> str:
     return sha256(_SCHEMA_V8_SQL.encode("utf-8")).hexdigest()
 def schema_v9_checksum() -> str:
     return sha256(_SCHEMA_V9_SQL.encode("utf-8")).hexdigest()
+def schema_v10_checksum() -> str:
+    return sha256(_SCHEMA_V10_SQL.encode("utf-8")).hexdigest()
 
 
 def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, checksum: str) -> None:
@@ -528,4 +553,5 @@ def apply_schema(connection: sqlite3.Connection) -> None:
     _apply_migration(connection, 7, _SCHEMA_V7_SQL, schema_v7_checksum())
     _apply_migration(connection, 8, _SCHEMA_V8_SQL, schema_v8_checksum())
     _apply_migration(connection, 9, _SCHEMA_V9_SQL, schema_v9_checksum())
+    _apply_migration(connection, 10, _SCHEMA_V10_SQL, schema_v10_checksum())
     connection.commit()

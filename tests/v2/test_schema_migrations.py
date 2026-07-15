@@ -4,7 +4,7 @@ from pathlib import Path
 import sqlite3
 
 from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.data.migrations.schema import apply_schema, schema_checksum, schema_v2_checksum, schema_v3_checksum, schema_v4_checksum, schema_v5_checksum, schema_v6_checksum, schema_v7_checksum, schema_v8_checksum, schema_v9_checksum
+from tradehelper_v2.data.migrations.schema import apply_schema, schema_checksum, schema_v2_checksum, schema_v3_checksum, schema_v4_checksum, schema_v5_checksum, schema_v6_checksum, schema_v7_checksum, schema_v8_checksum, schema_v9_checksum, schema_v10_checksum
 
 
 def test_g53_v1_database_remains_untouched(tmp_path, now) -> None:
@@ -30,6 +30,7 @@ def test_g54_schema_migrations_are_idempotent(tmp_path) -> None:
     assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=7").fetchone()[0] == 1
     assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=8").fetchone()[0] == 1
     assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=9").fetchone()[0] == 1
+    assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=10").fetchone()[0] == 1
     assert schema_checksum() == schema_checksum()
     assert schema_v2_checksum() == schema_v2_checksum()
     assert schema_v3_checksum() == schema_v3_checksum()
@@ -39,6 +40,7 @@ def test_g54_schema_migrations_are_idempotent(tmp_path) -> None:
     assert schema_v7_checksum() == schema_v7_checksum()
     assert schema_v8_checksum() == schema_v8_checksum()
     assert schema_v9_checksum() == schema_v9_checksum()
+    assert schema_v10_checksum() == schema_v10_checksum()
     connection.close()
 
 

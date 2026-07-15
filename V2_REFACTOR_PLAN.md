@@ -1108,7 +1108,7 @@ venv/bin/python -m pytest tests/ -q
 | V2-3 预测层 | 已完成并复审 | Forecast contracts、波动率标签、FeatureSet/校准、JSON+zlib artifact、20候选、maturity-purged OOF、registry 回退/重启恢复、migration 6/7 和预测快照幂等读写已通过 FC00-FC18；不生成 TradePlan |
 | V2-4 情景层 | 已完成并复审 | TradingScenario 合同、多周期归并、来源/时效降级、当前事实覆盖、三时段会话、策略家族兼容性、migration 8、强校验持久化和 SC00-SC21 共46条测试已通过；不生成 TradePlan |
 | V2-5 策略层 | 已完成并复审 | TradePlan/条件 DSL、九类首批模板、四分支 StrategyBundle、migration 9、强类型持久化、双市场/三时段语义与 SP00-SP29 已通过；不包含 V2-6 风控或之后模块 |
-| V2-6 风控层 | 设计完成，待实现 | 已冻结 ExecutionDecision、真实账户冻结估值、A/B/C/D、单计划 sizing、计划亏损、双市场规则预检、migration 10 和 RK00-RK42；实现时不得进入 V2-7/V2-8 边界 |
+| V2-6 风控层 | 已完成并复审 | ExecutionDecision、真实账户冻结估值、A/B/C/D、Decimal 单计划容量、风险成本预留、A/美股规则预检、migration 10 与 RK00-RK42 测试映射已完成；不包含 V2-7/V2-8 模块 |
 | V2-7 成交仿真层 | 未开始 | 等 ExecutionDecision 和市场规则稳定 |
 | V2-8 组合决策层 | 未开始 | 等单股执行决策和冻结估值合同稳定 |
 | V2-9 学习层 | 未开始 | 等预测、计划、风控和成交事件合同稳定 |
@@ -1124,6 +1124,16 @@ venv/bin/python -m pytest tests/ -q
 - 明确单计划与组合边界：V2-6 只给出每个 plan/profile 的最大批准量；多股票现金争用、相关性、替换和最终分配留给 V2-8，且只能缩小 V2-6 上限。
 - 双市场预检覆盖 A股一手、T+1、涨跌停与美股延伸时段流动性代理；订单、tick size、跳空、费用/滑点与成交证据仍属于 V2-7。
 
-## 16. 当前下一步：实现 V2-6 风控层
+### 2026-07-15 V2-6 完成并复审：风控层
 
-V2-6 的规范性合同已冻结。下一步必须按 [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) 的实施顺序完成 risk contracts、Decimal 冻结估值与 sizing、双市场规则预检、RiskOfficer、migration 10 和 RK00-RK42。运行 V2-6 专项、V2 全量和项目全量回归后停止，不得提前创建 OrderIntent、成交仿真或组合分配。
+- 新增不可变风险合同、冻结真实账户估值、版本化市场规则与 RiskPolicy；金额、股数、摩擦预留和计划止损亏损均使用 Decimal，任何持仓缺价均保持估值不完整，绝不以成本价或默认本金补齐。
+- `RiskOfficer` 为每个 TradePlan/profile 输出 A/B/C/D 与单计划最大批准量；等待计划仅条件批准，C/D 与保护退出完整保留，不能改写 TradePlan。
+- schema 升至 migration 10；估值、ExecutionDecision 和 RiskDecisionBundle 支持幂等写入、冲突 quarantine 与强类型重建。
+- 复审收紧风险合同：估值必须与账户币种、持仓集合、股数和汇总金额完全一致；策略、账户、行情模式、证据、规则和政策身份均进入强校验，C/D、条件批准和当前可执行状态不能互相混用。
+- 复审修正执行语义：盘后计划只面向下一会话并要求重检；过期入口/退出全部驳回但保留保护退出；A股 T+1、零可卖、部分可卖、整手减仓、零股全卖和涨跌停分支均按规范处理。
+- 复审修正 sizing 与审计：add 的最大亏损包含已有持仓到同一止损的风险；容量明确区分风险、现金、单票、总仓位和最低一手约束；减仓比例读取版本化政策；硬约束、软倍率、跳空风险和组合待分配均结构化记录。
+- RK00-RK42 的 43 个唯一编号全部落为可执行测试；V2-6 专项 `49 passed`，V2 全量 `267 passed, 3 skipped`，项目全量 `527 passed, 3 skipped`。默认跳过的 3 条真实 Provider 冒烟测试使用 V1 本地配置显式启用后为 `3 passed in 24.63s`。
+
+## 16. 当前停止点：V2-6 已复审
+
+V2-6 已按 [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) 完成风险合同、Decimal 冻结估值与 sizing、双市场规则预检、RiskOfficer、migration 10 和 RK00-RK42，并完成第二轮代码复审。下一阶段是 V2-7 成交仿真层，但在其精确合同另行冻结前不得创建 OrderIntent、成交仿真或组合分配。

@@ -62,6 +62,7 @@ from tradehelper_v2.contracts.forecast import (
 )
 from tradehelper_v2.contracts.scenario import (BandSignal, CurrentOverlay, CurrentPriceState, DecisionSession, EntryPosture, ExitPosture, ForecastEvidenceGrade, ForecastSupportLevel, HorizonAlignment, HorizonAssessment, HorizonSignal, NewsDeltaState, PriceLocation, ScenarioBias, ScenarioState, ScenarioStatus, StrategyFamily, TradingScenario, VolatilityShock)
 from tradehelper_v2.contracts.strategy import (ConditionEvaluation, ConditionExpression, ConditionOperand, ConditionOperator, ConditionResult, DerivedPriceLevel, EvidenceRequirement, ObservedValue, OperandKind, PlanAction, PlanProfile, PlanReadiness, PositionState, QuantityIntent, StopMode, StopSpec, StrategyBranch, StrategyBundle, TakeProfitMode, TakeProfitSpec, TradePlan)
+from tradehelper_v2.contracts.risk import (ConstraintResult, DecisionDisposition, EvidenceStatus, ExecutionDecision, ExecutionLevel, FrozenAccountValuation, MarketEligibility, PositionValuation, RiskAdjustment, RiskConstraintKind, RiskDecisionBundle, RiskProfile, ValuationStatus)
 from .migrations.schema import apply_schema
 
 
@@ -875,6 +876,93 @@ class SQLiteRepository:
         if scenario_id is not None:
             sql += " AND scenario_id=?"; params += (scenario_id,)
         return tuple(self._bundle_from_row(row) for row in self._fetchall(sql + " ORDER BY generated_at, bundle_id", params))
+
+    def _save_risk_record(self, *, table: str, id_column: str, record, columns: tuple[str, ...], values: tuple[object, ...], record_type: str, instrument_key: str | None, event_day: str | None) -> ForecastWriteResult:
+        payload = json.loads(canonical_json(record)); identity = _without_generated_at(payload); payload_hash = stable_hash(identity)
+        record_id, event_key = getattr(record, id_column), record.event_key
+        with self._transaction() as connection:
+            row = connection.execute(f"SELECT payload_json FROM {table} WHERE {id_column}=? OR event_key=?", (record_id, event_key)).fetchone()
+            if row is not None:
+                if stable_hash(_without_generated_at(json.loads(row["payload_json"]))) == payload_hash:
+                    return ForecastWriteResult(0, 1, 0)
+                connection.execute("INSERT INTO quarantine_records(record_type,instrument_key,trading_date,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)", (record_type, instrument_key, event_day, "CONFLICTING_RISK_RECORD", canonical_json(record), utc_iso(datetime.now(timezone.utc))))
+                return ForecastWriteResult(0, 0, 1)
+            placeholders = ",".join("?" for _ in columns)
+            connection.execute(f"INSERT INTO {table}({','.join(columns)}) VALUES ({placeholders})", values + (canonical_json(record), utc_iso(record.generated_at), record.schema_version))
+        return ForecastWriteResult(1, 0, 0)
+
+    def save_frozen_account_valuation(self, valuation: FrozenAccountValuation) -> ForecastWriteResult:
+        return self._save_risk_record(table="frozen_account_valuations", id_column="valuation_id", record=valuation, columns=("valuation_id","event_key","market","currency","account_hash","price_batch_hash","valuation_at","status","payload_json","generated_at","schema_version"), values=(valuation.valuation_id,valuation.event_key,valuation.market.value,valuation.currency,valuation.account_hash,valuation.price_batch_hash,utc_iso(valuation.valuation_at),valuation.status.value), record_type="frozen_account_valuation_conflict", instrument_key=None, event_day=valuation.valuation_at.date().isoformat())
+
+    @staticmethod
+    def _valuation_from_payload(payload: dict) -> FrozenAccountValuation:
+        positions = tuple(PositionValuation(InstrumentId(item["instrument"]["code"], Market(item["instrument"]["market"]), Exchange(item["instrument"]["exchange"])), Decimal(item["shares"]), Decimal(item["price"]), Decimal(item["market_value"]), item["position_pct"], Decimal(item["unrealized_pnl_amount"]), item["unrealized_pnl_pct"]) for item in payload["position_values"])
+        missing = tuple(InstrumentId(item["code"], Market(item["market"]), Exchange(item["exchange"])) for item in payload["missing_price_instruments"])
+        return FrozenAccountValuation(payload["valuation_id"], payload["event_key"], Market(payload["market"]), payload["currency"], payload["account_hash"], payload["price_batch_hash"], _parse_datetime(payload["valuation_at"]), ValuationStatus(payload["status"]), Decimal(payload["equity"]) if payload["equity"] is not None else None, Decimal(payload["cash"]), Decimal(payload["invested_value"]) if payload["invested_value"] is not None else None, payload["invested_pct"], positions, missing, _parse_datetime(payload["generated_at"]), int(payload.get("schema_version",1)))
+
+    def get_frozen_account_valuation(self, valuation_id: str) -> FrozenAccountValuation | None:
+        row=self._fetchone("SELECT * FROM frozen_account_valuations WHERE valuation_id=?",(valuation_id,))
+        if row is None: return None
+        value=self._valuation_from_payload(json.loads(row["payload_json"]))
+        if (row["event_key"] != value.event_key or row["market"] != value.market.value or row["currency"] != value.currency or
+                row["account_hash"] != value.account_hash or row["price_batch_hash"] != value.price_batch_hash or
+                row["valuation_at"] != utc_iso(value.valuation_at) or row["status"] != value.status.value or
+                row["generated_at"] != utc_iso(value.generated_at) or row["schema_version"] != value.schema_version):
+            raise ContractViolation("stored valuation columns do not match payload")
+        return value
+
+    def list_frozen_account_valuations(self, market: Market) -> tuple[FrozenAccountValuation,...]:
+        return tuple(self.get_frozen_account_valuation(row["valuation_id"]) for row in self._fetchall("SELECT valuation_id FROM frozen_account_valuations WHERE market=? ORDER BY valuation_at,valuation_id",(market.value,)))
+
+    def save_execution_decision(self, decision: ExecutionDecision) -> ForecastWriteResult:
+        return self._save_risk_record(table="execution_decisions", id_column="decision_id", record=decision, columns=("decision_id","event_key","instrument_key","scenario_id","bundle_id","plan_id","profile","level","disposition","account_hash","valuation_id","payload_json","generated_at","schema_version"), values=(decision.decision_id,decision.event_key,decision.instrument.stable_key,decision.scenario_id,decision.bundle_id,decision.plan_id,decision.profile.value,decision.level.value,decision.disposition.value,decision.account_hash,decision.valuation_id), record_type="execution_decision_conflict", instrument_key=decision.instrument.stable_key, event_day=decision.valid_from.date().isoformat() if decision.valid_from else None)
+
+    @staticmethod
+    def _decision_from_payload(payload: dict) -> ExecutionDecision:
+        instrument=InstrumentId(payload["instrument"]["code"],Market(payload["instrument"]["market"]),Exchange(payload["instrument"]["exchange"]))
+        constraints=tuple(ConstraintResult(item["code"],RiskConstraintKind(item["kind"]),bool(item["passed"]),Decimal(item["limit"]) if item["limit"] is not None else None,Decimal(item["observed"]) if item["observed"] is not None else None) for item in payload["hard_constraints"])
+        adjustments=tuple(RiskAdjustment(item["code"],Decimal(item["multiplier"])) for item in payload["soft_adjustments"])
+        def money(name): return Decimal(payload[name]) if payload[name] is not None else None
+        return ExecutionDecision(payload["decision_id"],payload["event_key"],instrument,payload["scenario_id"],payload["bundle_id"],payload["plan_id"],RiskProfile(payload["profile"]),PlanAction(payload["action"]),QuantityIntent(payload["quantity_intent"]),ExecutionLevel(payload["level"]),DecisionDisposition(payload["disposition"]),bool(payload["executable_now"]),bool(payload["recheck_at_trigger"]),Decimal(payload["approved_shares"]),Decimal(payload["blocked_shares"]),money("entry_price"),money("stop_price"),money("current_position_value"),payload["current_position_pct"],money("planned_position_value"),payload["post_trade_position_pct"],money("risk_budget_amount"),money("incremental_planned_loss"),money("total_position_planned_loss"),money("max_loss_amount"),money("friction_reserve"),MarketEligibility(payload["market_eligibility"]),EvidenceStatus(payload["evidence_status"]),constraints,adjustments,tuple(payload["reason_codes"]),_parse_datetime(payload["valid_from"]) if payload["valid_from"] else None,_parse_datetime(payload["expires_at"]) if payload["expires_at"] else None,payload["account_hash"],payload["valuation_id"],payload["quality_hash"],payload["evidence_hash"],payload["market_rule_version"],payload["risk_policy_version"],_parse_datetime(payload["generated_at"]),int(payload.get("schema_version",1)))
+
+    def get_execution_decision(self, decision_id: str) -> ExecutionDecision | None:
+        row=self._fetchone("SELECT * FROM execution_decisions WHERE decision_id=?",(decision_id,))
+        if row is None: return None
+        value=self._decision_from_payload(json.loads(row["payload_json"]))
+        expected_columns = {"event_key":value.event_key,"instrument_key":value.instrument.stable_key,"scenario_id":value.scenario_id,
+                            "bundle_id":value.bundle_id,"plan_id":value.plan_id,"profile":value.profile.value,"level":value.level.value,
+                            "disposition":value.disposition.value,"account_hash":value.account_hash,"valuation_id":value.valuation_id,
+                            "generated_at":utc_iso(value.generated_at),"schema_version":value.schema_version}
+        if any(row[name] != expected for name,expected in expected_columns.items()): raise ContractViolation("stored execution decision columns do not match payload")
+        return value
+
+    def list_execution_decisions(self, instrument: InstrumentId, scenario_id: str | None = None) -> tuple[ExecutionDecision,...]:
+        sql="SELECT decision_id FROM execution_decisions WHERE instrument_key=?"; params:tuple[object,...]=(instrument.stable_key,)
+        if scenario_id: sql+=" AND scenario_id=?"; params+=(scenario_id,)
+        return tuple(self.get_execution_decision(row["decision_id"]) for row in self._fetchall(sql+" ORDER BY generated_at,decision_id",params))
+
+    def save_risk_decision_bundle(self, bundle: RiskDecisionBundle) -> ForecastWriteResult:
+        return self._save_risk_record(table="risk_decision_bundles", id_column="risk_bundle_id", record=bundle, columns=("risk_bundle_id","event_key","instrument_key","scenario_id","strategy_bundle_id","account_hash","valuation_id","payload_json","generated_at","schema_version"), values=(bundle.risk_bundle_id,bundle.event_key,bundle.instrument.stable_key,bundle.scenario_id,bundle.strategy_bundle_id,bundle.account_hash,bundle.valuation_id), record_type="risk_decision_bundle_conflict", instrument_key=bundle.instrument.stable_key, event_day=None)
+
+    @classmethod
+    def _risk_bundle_from_payload(cls,payload:dict)->RiskDecisionBundle:
+        instrument=InstrumentId(payload["instrument"]["code"],Market(payload["instrument"]["market"]),Exchange(payload["instrument"]["exchange"]))
+        return RiskDecisionBundle(payload["risk_bundle_id"],payload["event_key"],instrument,payload["scenario_id"],payload["strategy_bundle_id"],PositionState(payload["position_state"]),tuple(cls._decision_from_payload(item) for item in payload["decisions"]),tuple(payload["conservative_decision_ids"]),tuple(payload["aggressive_decision_ids"]),tuple(payload["protective_decision_ids"]),payload["account_hash"],payload["valuation_id"],payload["quality_hash"],payload["market_rule_version"],payload["risk_policy_version"],_parse_datetime(payload["generated_at"]),int(payload.get("schema_version",1)))
+
+    def get_risk_decision_bundle(self,risk_bundle_id:str)->RiskDecisionBundle|None:
+        row=self._fetchone("SELECT * FROM risk_decision_bundles WHERE risk_bundle_id=?",(risk_bundle_id,))
+        if row is None:return None
+        value=self._risk_bundle_from_payload(json.loads(row["payload_json"]))
+        expected_columns = {"event_key":value.event_key,"instrument_key":value.instrument.stable_key,"scenario_id":value.scenario_id,
+                            "strategy_bundle_id":value.strategy_bundle_id,"account_hash":value.account_hash,"valuation_id":value.valuation_id,
+                            "generated_at":utc_iso(value.generated_at),"schema_version":value.schema_version}
+        if any(row[name] != expected for name,expected in expected_columns.items()): raise ContractViolation("stored risk bundle columns do not match payload")
+        return value
+
+    def list_risk_decision_bundles(self,instrument:InstrumentId,scenario_id:str|None=None)->tuple[RiskDecisionBundle,...]:
+        sql="SELECT risk_bundle_id FROM risk_decision_bundles WHERE instrument_key=?"; params:tuple[object,...]=(instrument.stable_key,)
+        if scenario_id:sql+=" AND scenario_id=?";params+=(scenario_id,)
+        return tuple(self.get_risk_decision_bundle(row["risk_bundle_id"]) for row in self._fetchall(sql+" ORDER BY generated_at,risk_bundle_id",params))
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:

@@ -42,6 +42,8 @@ def strategy_input(
     feature_statuses: dict[str, FeatureStatus] | None = None,
     mode: DecisionMode = DecisionMode.EOD,
     quote_price: float | None = None,
+    as_of: datetime = NOW,
+    quality_report=None,
     confirmed: bool = True,
     specs=None,
 ) -> StrategyInput:
@@ -49,9 +51,15 @@ def strategy_input(
     forecasts = tuple(replace(_forecast(instrument, horizon, directions[horizon], confirmed=confirmed), reference_price=reference_price) for horizon in (1, 3, 5, 10))
     request = _request(instrument, forecasts)
     request = replace(request, forecasts=tuple(replace(item, reference_price=reference_price) for item in request.forecasts))
+    if quality_report is not None:
+        request = replace(request, data_quality=quality_report)
     if mode is not DecisionMode.EOD:
-        quote = _quote(instrument, price=quote_price) if quote_price is not None else None
-        request = _mode_request(request, mode, quote=quote)
+        quote = _quote(
+            instrument, price=quote_price, observed_at=as_of,
+            session=TradingSession.REGULAR if mode is DecisionMode.INTRADAY else TradingSession.PRE,
+            source="tickflow" if mode is DecisionMode.INTRADAY else "nasdaq",
+        ) if quote_price is not None else None
+        request = _mode_request(request, mode, quote=quote, as_of=as_of)
     scenario = ScenarioPlanner().build(request)
     numbers = {
         "closed.ma_20": 101.0, "closed.ma_60": 98.0, "closed.ma_120": 95.0,
@@ -67,10 +75,11 @@ def strategy_input(
     statuses = feature_statuses or {}
     values = tuple(
         FeatureValue(name, value if statuses.get(name, FeatureStatus.AVAILABLE) is FeatureStatus.AVAILABLE else None,
-                     statuses.get(name, FeatureStatus.AVAILABLE), None, None, NOW, ("fixture",), False, None)
+                     statuses.get(name, FeatureStatus.AVAILABLE), None, None, scenario.as_of, ("fixture",), False, None)
         for name, value in numbers.items()
     )
-    snapshot = FeatureSnapshot(instrument, mode, NOW, request.current_snapshot.latest_bar_date, None,
-                               "2.2.0", FeatureEvidenceMode.RECONSTRUCTED_HISTORY, values, "a" * 64, "b" * 64, NOW)
+    snapshot = FeatureSnapshot(instrument, mode, scenario.as_of, request.current_snapshot.latest_bar_date,
+                               request.current_snapshot.quote_observed_at, "2.2.0",
+                               FeatureEvidenceMode.RECONSTRUCTED_HISTORY, values, "a" * 64, "b" * 64, scenario.as_of)
     scenario = _scenario_with_hash(scenario, snapshot.feature_hash)
-    return StrategyInput(instrument, snapshot, scenario, position, specs or default_specs(), "strategy_policy_v1", NOW)
+    return StrategyInput(instrument, snapshot, scenario, position, specs or default_specs(), "strategy_policy_v1", scenario.as_of)
