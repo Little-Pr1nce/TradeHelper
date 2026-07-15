@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import Enum
@@ -92,7 +92,7 @@ def _canonical_value(value: Any) -> Any:
     if isinstance(value, (tuple, list, frozenset, set)):
         return [_canonical_value(item) for item in value]
     if is_dataclass(value):
-        return _canonical_value(asdict(value))
+        return {field.name: _canonical_value(getattr(value, field.name)) for field in fields(value)}
     return value
 
 

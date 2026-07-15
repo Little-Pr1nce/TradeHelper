@@ -61,6 +61,7 @@ from tradehelper_v2.contracts.forecast import (
     ValidationStatus,
 )
 from tradehelper_v2.contracts.scenario import (BandSignal, CurrentOverlay, CurrentPriceState, DecisionSession, EntryPosture, ExitPosture, ForecastEvidenceGrade, ForecastSupportLevel, HorizonAlignment, HorizonAssessment, HorizonSignal, NewsDeltaState, PriceLocation, ScenarioBias, ScenarioState, ScenarioStatus, StrategyFamily, TradingScenario, VolatilityShock)
+from tradehelper_v2.contracts.strategy import (ConditionEvaluation, ConditionExpression, ConditionOperand, ConditionOperator, ConditionResult, DerivedPriceLevel, EvidenceRequirement, ObservedValue, OperandKind, PlanAction, PlanProfile, PlanReadiness, PositionState, QuantityIntent, StopMode, StopSpec, StrategyBranch, StrategyBundle, TakeProfitMode, TakeProfitSpec, TradePlan)
 from .migrations.schema import apply_schema
 
 
@@ -106,6 +107,15 @@ def _fundamental_payload(snapshot: FundamentalSnapshot) -> str:
             "source": field.source,
         }
     return canonical_json(values)
+
+
+def _without_generated_at(value):
+    """Ignore issuance timestamps recursively when comparing immutable business facts."""
+    if isinstance(value, dict):
+        return {key: _without_generated_at(item) for key, item in value.items() if key != "generated_at"}
+    if isinstance(value, list):
+        return [_without_generated_at(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -767,6 +777,104 @@ class SQLiteRepository:
     def list_trading_scenarios(self, instrument: InstrumentId, mode: DecisionMode, decision_session_date: date | None) -> tuple[TradingScenario,...]:
         sql="SELECT * FROM trading_scenarios WHERE instrument_key=? AND mode=? AND decision_session_date IS ? ORDER BY generated_at, scenario_id"
         return tuple(self._scenario_from_row(row) for row in self._fetchall(sql,(instrument.stable_key,mode.value,decision_session_date.isoformat() if decision_session_date else None)))
+
+    def save_trade_plan(self, plan: TradePlan) -> ForecastWriteResult:
+        """保存不可变计划；同 event_key 的不同业务事实只进入 quarantine。"""
+        payload = json.loads(canonical_json(plan)); payload_hash = stable_hash(_without_generated_at(payload))
+        session = plan.event_key.split("|")[1] if "|" in plan.event_key else "calendar-unavailable"
+        with self._transaction() as connection:
+            row = connection.execute("SELECT payload_json FROM trade_plans WHERE plan_id=? OR event_key=?", (plan.plan_id, plan.event_key)).fetchone()
+            if row is not None:
+                old = json.loads(row["payload_json"])
+                if stable_hash(_without_generated_at(old)) == payload_hash:
+                    return ForecastWriteResult(0, 1, 0)
+                connection.execute("INSERT INTO quarantine_records(record_type,instrument_key,trading_date,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)", ("trade_plan_conflict", plan.instrument.stable_key, session, "CONFLICTING_TRADE_PLAN", canonical_json(plan), utc_iso(datetime.now(timezone.utc))))
+                return ForecastWriteResult(0, 0, 1)
+            connection.execute("INSERT INTO trade_plans(plan_id,event_key,instrument_key,scenario_id,strategy_id,strategy_version,family,action,readiness,decision_session_date,payload_json,generated_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (plan.plan_id, plan.event_key, plan.instrument.stable_key, plan.scenario_id, plan.strategy_id, plan.strategy_version, plan.family.value, plan.action.value, plan.readiness.value, session if session != "calendar-unavailable" else None, canonical_json(plan), utc_iso(plan.generated_at), plan.schema_version))
+        return ForecastWriteResult(1, 0, 0)
+
+    @staticmethod
+    def _plan_from_payload(payload: dict) -> TradePlan:
+        def operand(item):
+            return None if item is None else ConditionOperand(OperandKind(item["kind"]), item["key"], item["value"], item["unit"], tuple(item["source_features"]))
+        def expression(item):
+            return None if item is None else ConditionExpression(item["condition_id"], ConditionOperator(item["operator"]), operand(item["left"]), operand(item["right"]), operand(item["lower"]), operand(item["upper"]), tuple(expression(child) for child in item["children"]), EvidenceRequirement(item["evidence_requirement"]), item["reason_code"], int(item.get("schema_version", 1)))
+        def level(item):
+            return None if item is None else DerivedPriceLevel(item["level_id"], item["value"], item["role"], item["calculation_code"], item["calculation_version"], tuple(item["source_features"]), item["source_scenario_id"])
+        def evaluation(item):
+            def observed(value):
+                raw = value["status"]
+                try: status = FeatureStatus(raw)
+                except ValueError: status = ConditionResult(raw)
+                return ObservedValue(value["key"], value["value"], status, _parse_datetime(value["available_at"]) if value["available_at"] else None)
+            return ConditionEvaluation(item["condition_id"], ConditionResult(item["result"]), tuple(observed(value) for value in item["observed_values"]), tuple(item["missing_features"]), _parse_datetime(item["evaluated_at"]))
+        instrument = InstrumentId(payload["instrument"]["code"], Market(payload["instrument"]["market"]), Exchange(payload["instrument"]["exchange"]))
+        stop_raw = payload["stop"]
+        stop = None if stop_raw is None else StopSpec(StopMode(stop_raw["mode"]), level(stop_raw["level"]), expression(stop_raw["condition"]), stop_raw["reason_code"])
+        take_raw = payload["take_profit"]
+        take = None if take_raw is None else TakeProfitSpec(TakeProfitMode(take_raw["mode"]), level(take_raw["level"]), take_raw["risk_multiple"], expression(take_raw["condition"]), take_raw["reason_code"])
+        return TradePlan(payload["plan_id"], payload["event_key"], instrument, payload["scenario_id"], payload["strategy_id"], payload["strategy_version"], payload["parameter_hash"], StrategyFamily(payload["family"]), PlanAction(payload["action"]), QuantityIntent(payload["quantity_intent"]), tuple(PlanProfile(item) for item in payload["profiles"]), PlanReadiness(payload["readiness"]), expression(payload["trigger_condition"]), expression(payload["confirmation_condition"]), level(payload["trigger_level"]), stop, take, expression(payload["hold_condition"]), expression(payload["invalidation_condition"]), tuple(evaluation(item) for item in payload["evaluations"]), tuple(payload["evidence_features"]), tuple(payload["missing_conditions"]), tuple(payload["reason_codes"]), _parse_datetime(payload["valid_from"]) if payload["valid_from"] else None, _parse_datetime(payload["expires_at"]) if payload["expires_at"] else None, payload["position_hash"], payload["policy_version"], _parse_datetime(payload["generated_at"]), int(payload.get("schema_version", 1)))
+
+    @classmethod
+    def _plan_from_row(cls, row: sqlite3.Row) -> TradePlan:
+        plan = cls._plan_from_payload(json.loads(row["payload_json"]))
+        session = plan.event_key.split("|")[1]
+        expected = {"plan_id": plan.plan_id, "event_key": plan.event_key, "instrument_key": plan.instrument.stable_key, "scenario_id": plan.scenario_id, "strategy_id": plan.strategy_id, "strategy_version": plan.strategy_version, "family": plan.family.value, "action": plan.action.value, "readiness": plan.readiness.value, "decision_session_date": None if session == "calendar-unavailable" else session, "generated_at": utc_iso(plan.generated_at), "schema_version": plan.schema_version}
+        if any(row[name] != value for name, value in expected.items()):
+            raise ContractViolation("stored trade plan columns do not match payload identity")
+        return plan
+
+    def get_trade_plan(self, plan_id: str) -> TradePlan | None:
+        row = self._fetchone("SELECT * FROM trade_plans WHERE plan_id=?", (plan_id,))
+        return self._plan_from_row(row) if row else None
+
+    def list_trade_plans(self, instrument: InstrumentId, scenario_id: str | None = None) -> tuple[TradePlan, ...]:
+        sql = "SELECT * FROM trade_plans WHERE instrument_key=?"; params: tuple[object, ...] = (instrument.stable_key,)
+        if scenario_id is not None:
+            sql += " AND scenario_id=?"; params += (scenario_id,)
+        return tuple(self._plan_from_row(row) for row in self._fetchall(sql + " ORDER BY generated_at, plan_id", params))
+
+    def save_strategy_bundle(self, bundle: StrategyBundle) -> ForecastWriteResult:
+        payload = json.loads(canonical_json(bundle)); payload_hash = stable_hash(_without_generated_at(payload))
+        session = bundle.event_key.split("|")[1] if "|" in bundle.event_key else "calendar-unavailable"
+        plans = bundle.entry_or_add.plans + bundle.reduce_or_exit.plans + bundle.hold.plans + bundle.invalidation.plans
+        position_hash = next((item.position_hash for item in plans), stable_hash("flat"))
+        with self._transaction() as connection:
+            row = connection.execute("SELECT payload_json FROM strategy_bundles WHERE bundle_id=? OR event_key=?", (bundle.bundle_id, bundle.event_key)).fetchone()
+            if row is not None:
+                old = json.loads(row["payload_json"])
+                if stable_hash(_without_generated_at(old)) == payload_hash:
+                    return ForecastWriteResult(0, 1, 0)
+                connection.execute("INSERT INTO quarantine_records(record_type,instrument_key,trading_date,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)", ("strategy_bundle_conflict", bundle.instrument.stable_key, session, "CONFLICTING_STRATEGY_BUNDLE", canonical_json(bundle), utc_iso(datetime.now(timezone.utc))))
+                return ForecastWriteResult(0, 0, 1)
+            connection.execute("INSERT INTO strategy_bundles(bundle_id,event_key,instrument_key,scenario_id,position_hash,payload_json,generated_at,schema_version) VALUES (?,?,?,?,?,?,?,?)", (bundle.bundle_id, bundle.event_key, bundle.instrument.stable_key, bundle.scenario_id, position_hash, canonical_json(bundle), utc_iso(bundle.generated_at), bundle.schema_version))
+        return ForecastWriteResult(1, 0, 0)
+
+    @classmethod
+    def _bundle_from_row(cls, row: sqlite3.Row) -> StrategyBundle:
+        payload = json.loads(row["payload_json"])
+        def branch(item):
+            return StrategyBranch(item["branch"], tuple(cls._plan_from_payload(plan) for plan in item["plans"]), PlanReadiness(item["readiness"]), item["not_applicable_reason"])
+        instrument = InstrumentId(payload["instrument"]["code"], Market(payload["instrument"]["market"]), Exchange(payload["instrument"]["exchange"]))
+        bundle = StrategyBundle(payload["bundle_id"], payload["event_key"], instrument, payload["scenario_id"], PositionState(payload["position_state"]), branch(payload["entry_or_add"]), branch(payload["reduce_or_exit"]), branch(payload["hold"]), branch(payload["invalidation"]), tuple(payload["conservative_plan_ids"]), tuple(payload["aggressive_plan_ids"]), payload["conflict_state"], tuple(payload["reason_codes"]), payload["policy_version"], _parse_datetime(payload["generated_at"]), int(payload.get("schema_version", 1)))
+        plans = bundle.entry_or_add.plans + bundle.reduce_or_exit.plans + bundle.hold.plans + bundle.invalidation.plans
+        position_hashes = {plan.position_hash for plan in plans}
+        if (row["bundle_id"] != bundle.bundle_id or row["event_key"] != bundle.event_key or
+                row["instrument_key"] != bundle.instrument.stable_key or row["scenario_id"] != bundle.scenario_id or
+                row["schema_version"] != bundle.schema_version or len(position_hashes) != 1 or
+                row["position_hash"] != next(iter(position_hashes)) or row["generated_at"] != utc_iso(bundle.generated_at)):
+            raise ContractViolation("stored strategy bundle columns do not match payload identity")
+        return bundle
+
+    def get_strategy_bundle(self, bundle_id: str) -> StrategyBundle | None:
+        row = self._fetchone("SELECT * FROM strategy_bundles WHERE bundle_id=?", (bundle_id,))
+        return self._bundle_from_row(row) if row else None
+
+    def list_strategy_bundles(self, instrument: InstrumentId, scenario_id: str | None = None) -> tuple[StrategyBundle, ...]:
+        sql = "SELECT * FROM strategy_bundles WHERE instrument_key=?"; params: tuple[object, ...] = (instrument.stable_key,)
+        if scenario_id is not None:
+            sql += " AND scenario_id=?"; params += (scenario_id,)
+        return tuple(self._bundle_from_row(row) for row in self._fetchall(sql + " ORDER BY generated_at, bundle_id", params))
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:

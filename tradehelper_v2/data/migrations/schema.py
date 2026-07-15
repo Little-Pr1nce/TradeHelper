@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import sqlite3
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -445,6 +445,23 @@ CREATE TABLE IF NOT EXISTS trading_scenarios (
 CREATE INDEX IF NOT EXISTS idx_v2_scenarios_lookup ON trading_scenarios(instrument_key, mode, decision_session_date);
 """.strip()
 
+_SCHEMA_V9_SQL = """
+CREATE TABLE IF NOT EXISTS trade_plans (
+    plan_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, instrument_key TEXT NOT NULL,
+    scenario_id TEXT NOT NULL, strategy_id TEXT NOT NULL, strategy_version TEXT NOT NULL,
+    family TEXT NOT NULL, action TEXT NOT NULL, readiness TEXT NOT NULL,
+    decision_session_date TEXT, payload_json TEXT NOT NULL, generated_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_trade_plans_lookup ON trade_plans(instrument_key, scenario_id, action);
+CREATE TABLE IF NOT EXISTS strategy_bundles (
+    bundle_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, instrument_key TEXT NOT NULL,
+    scenario_id TEXT NOT NULL, position_hash TEXT NOT NULL, payload_json TEXT NOT NULL,
+    generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_strategy_bundles_lookup ON strategy_bundles(instrument_key, scenario_id);
+""".strip()
+
 
 def schema_checksum() -> str:
     return sha256(_SCHEMA_SQL.encode("utf-8")).hexdigest()
@@ -474,6 +491,8 @@ def schema_v7_checksum() -> str:
     return sha256(_SCHEMA_V7_SQL.encode("utf-8")).hexdigest()
 def schema_v8_checksum() -> str:
     return sha256(_SCHEMA_V8_SQL.encode("utf-8")).hexdigest()
+def schema_v9_checksum() -> str:
+    return sha256(_SCHEMA_V9_SQL.encode("utf-8")).hexdigest()
 
 
 def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, checksum: str) -> None:
@@ -508,4 +527,5 @@ def apply_schema(connection: sqlite3.Connection) -> None:
     _apply_migration(connection, 6, _SCHEMA_V6_SQL, schema_v6_checksum())
     _apply_migration(connection, 7, _SCHEMA_V7_SQL, schema_v7_checksum())
     _apply_migration(connection, 8, _SCHEMA_V8_SQL, schema_v8_checksum())
+    _apply_migration(connection, 9, _SCHEMA_V9_SQL, schema_v9_checksum())
     connection.commit()

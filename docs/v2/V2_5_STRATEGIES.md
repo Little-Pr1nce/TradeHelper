@@ -1,6 +1,6 @@
 # TradeHelper V2-5 策略层精确设计
 
-> 状态：设计完成，待实现。本文是 V2-5 的规范性合同；实现不得用 V1 `strategies/` 作为运行依赖。V2-4 的输入边界以 [V2_4_SCENARIOS.md](./V2_4_SCENARIOS.md) 为准。
+> 状态：实现完成并复审通过。本文是 V2-5 的规范性合同；实现不得用 V1 `strategies/` 作为运行依赖。V2-4 的输入边界以 [V2_4_SCENARIOS.md](./V2_4_SCENARIOS.md) 为准。
 
 ## 1. 阶段目标
 
@@ -682,6 +682,7 @@ tests/v2/test_strategy_market_parity.py
 tests/v2/test_strategy_repository.py
 tests/v2/test_strategy_architecture.py
 tests/v2/test_strategy_performance.py
+tests/v2/test_strategy_scenario_matrix.py
 ```
 
 测试不得联网、不得读取真实数据库、不得用 V1 策略生成期望答案。Golden Case 先固定输入与预期，再实现代码。
@@ -713,3 +714,10 @@ V2-5 完成后必须停止。不得顺手实现：
 - Tab3 组合排序、策略历史健康度、自优化、LLM 或 UI。
 
 开始 V2-6 前必须另行制定 `ExecutionDecision`、真实账户估值、风险预算、硬/软约束、执行等级和市场规则的精确规范。
+
+## 22. 实现验证记录
+
+- P0：保护退出/持有/观察失效条件与触发条件已解耦；趋势回踩必须同时满足 MA20 区间上下界。
+- P1：StrategySpec 参数实际进入公式；缺失、陈旧、阻断和历史不足状态进入结构化观察；三值 DSL、持久化嵌套时间戳幂等和动作合同已收紧。
+- SP00-SP29 均有直接测试映射；1000 次无缓存完整 bundle 构建约 `1.30s`。
+- 2026-07-14 验证：V2-5 专项及 migration `38 passed`；V2 全量 `218 passed, 3 skipped`；项目全量 `478 passed, 3 skipped`；真实 Provider 门控测试 `3 passed in 40.96s`。

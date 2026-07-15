@@ -30,8 +30,8 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
 | 回答五个核心问题 | 保证系统始终围绕交易决策服务 | `UPGRADE_PLAN_V1.md`, `README_V1.md` | `README.md`, `DESIGN.md`, `V2_REFACTOR_PLAN.md` | 已迁移 | 文档检查 |
-| 当前动作判断 | 买/卖/减仓/加仓/持有/观察 | `core/signal_check.py`, `strategies/` | `scenario/`, `strategies/`, `risk/` | V2-5已精确设计，待实现 | `tests/v2/test_strategy_*` |
-| 条件触发计划 | 不能操作时告诉用户等什么条件 | `strategies/conditional_trigger.py`, `services/portfolio_service.py` | `strategies/engine.py` | V2-5已精确设计，待实现 | `tests/v2/test_strategy_engine_by_scenario.py` |
+| 当前动作判断 | 买/卖/减仓/加仓/持有/观察 | `core/signal_check.py`, `strategies/` | `scenario/`, `strategies/`, `risk/` | V2-5已迁移；执行等级待V2-6 | `tests/v2/test_strategy_*` |
+| 条件触发计划 | 不能操作时告诉用户等什么条件 | `strategies/conditional_trigger.py`, `services/portfolio_service.py` | `strategies/engine.py` | V2-5已迁移 | `tests/v2/test_strategy_engine_by_scenario.py` |
 | 最大亏损和失效条件 | 用户知道错了亏多少、哪里错 | `strategies/base.py`, `core/signal_check.py` | `risk/sizing.py`, `risk/officer.py` | 待迁移 | `tests/v2/test_risk_officer.py` |
 | 历史正期望和可信度 | 建议不能只靠当下判断 | `prediction_log`, `trade_plan_log`, `joint_oof_runs` | `learning/` 三本账 | 待迁移 | `tests/v2/test_learning_ledgers.py` |
 | 明确目标日预测 | 预测必须说清预测哪一天 | `forecast_log`, `core/forecast_engine.py` | `forecast/engine.py`, `learning/forecast_ledger.py` | 预测发行已迁移；到期记账待V2-9 | `tests/v2/test_forecast_contracts.py` |
@@ -97,19 +97,19 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
-| StrategyDecision-first | 回测和当前信号同一路径 | `strategies/base.py` | `strategies/engine.py` / `TradePlan` | V2-5合同已设计；实现待迁移 | `tests/v2/test_trade_plan_contract.py` |
+| StrategyDecision-first | 回测和当前信号同一路径 | `strategies/base.py` | `strategies/engine.py` / `TradePlan` | V2-5已迁移；成交回放待V2-7 | `tests/v2/test_trade_plan_contract.py` |
 | decision_to_orders | 不维护两套买卖逻辑 | `strategies/base.py` | `execution/orders.py` | 待迁移 | `tests/v2/test_order_intent.py` |
-| 完整条件计划集合 | 同时给出当前状态、买/加、卖/减、持有和失效条件 | `conditional_trigger.py`, reports | `StrategyBundle`, `strategies/engine.py` | V2-5四分支合同已设计；待实现 | `tests/v2/test_trade_plan_contract.py` |
+| 完整条件计划集合 | 同时给出当前状态、买/加、卖/减、持有和失效条件 | `conditional_trigger.py`, reports | `StrategyBundle`, `strategies/engine.py` | V2-5四分支已迁移 | `tests/v2/test_trade_plan_contract.py` |
 | 保守/激进风险档案 | 同一事实和触发条件下只调整确认门槛、风险和仓位 | `core/signal_check.py`, reports | `TradePlan.profiles` + V2-6 risk profiles | V2-5确认门槛已设计；风险预算待V2-6 | `tests/v2/test_strategy_profiles.py` |
-| 计划会话与有效期 | 盘前/盘中/盘后计划不会跨会话变成陈旧指令 | `trade_plan_log`, session helpers | `TradePlan.valid_from/expires_at` | V2-5已设计，待实现 | `tests/v2/test_strategy_market_parity.py` |
+| 计划会话与有效期 | 盘前/盘中/盘后计划不会跨会话变成陈旧指令 | `trade_plan_log`, session helpers | `TradePlan.valid_from/expires_at` | V2-5已迁移 | `tests/v2/test_strategy_market_parity.py` |
 | A/B/C/D 执行等级 | 建议可执行性明确 | `core/signal_check.py` | `risk/officer.py` | 待迁移 | `tests/v2/test_risk_officer.py` |
 | 风险退出不被预测阻止 | 止损/锁利优先于预测分歧 | `core/signal_check.py` | `risk/officer.py` | 待迁移 | `tests/v2/test_risk_officer.py` |
-| MA120 支撑 | 人类交易者关心的支撑反弹 | `strategies/ma120_support.py` | `strategies/templates/` | V2-5模板已设计，待实现 | `tests/v2/test_strategy_entry_templates.py` |
-| 冲高回落锁利 | 持仓止盈/减仓关键策略 | `strategies/profit_lock.py` | `strategies/templates/` | V2-5模板已设计，待实现 | `tests/v2/test_strategy_exit_templates.py` |
+| MA120 支撑 | 人类交易者关心的支撑反弹 | `strategies/ma120_support.py` | `strategies/templates/` | V2-5已迁移 | `tests/v2/test_strategy_entry_templates.py` |
+| 冲高回落锁利 | 持仓止盈/减仓关键策略 | `strategies/profit_lock.py` | `strategies/templates/` | V2-5已迁移 | `tests/v2/test_strategy_exit_templates.py` |
 | 持仓风险管理 | 成本、亏损、集中度、禁止加仓 | `strategies/position_risk.py` | `risk/`, `strategies/templates/` | 待迁移 | `tests/v2/test_position_sizing.py` |
-| 反抽失败退出 | 跌破均线后退出逻辑 | `strategies/pullback_failed_exit.py` | `strategies/templates/` | V2-5模板已设计，待实现 | `tests/v2/test_strategy_exit_templates.py` |
-| 条件触发策略 | 不操作时给等待条件 | `strategies/conditional_trigger.py` | `strategies/engine.py` | V2-5条件 DSL 和观察模板已设计，待实现 | `tests/v2/test_strategy_conditions.py` |
-| 策略无信号诊断 | 告诉用户还差什么条件 | `diagnose_no_signal()` | `TradePlan.missing_conditions` | V2-5已设计为结构化缺失条件，待实现 | `tests/v2/test_trade_plan_contract.py` |
+| 反抽失败退出 | 跌破均线后退出逻辑 | `strategies/pullback_failed_exit.py` | `strategies/templates/` | V2-5已迁移 | `tests/v2/test_strategy_exit_templates.py` |
+| 条件触发策略 | 不操作时给等待条件 | `strategies/conditional_trigger.py` | `strategies/engine.py` | V2-5条件 DSL 和观察模板已迁移 | `tests/v2/test_strategy_conditions.py` |
+| 策略无信号诊断 | 告诉用户还差什么条件 | `diagnose_no_signal()` | `TradePlan.missing_conditions` | V2-5已迁移为结构化缺失条件 | `tests/v2/test_trade_plan_contract.py` |
 
 ## P0 回测、市场规则与审计资产
 
