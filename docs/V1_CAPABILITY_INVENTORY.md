@@ -156,16 +156,16 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
-| 全宽报告阅读 | 减少左右布局浪费 | `ui/main_page.py`, `ui/portfolio_page.py` | V2 UI pages | 待迁移 | `tests/v2/test_ui_state_flow.py` |
-| 报告一分钟操作台 | 用户先看最该做什么 | `services/portfolio_service.py` | `reports/sections/` | 待迁移 | `tests/v2/test_report_sections.py` |
-| 预测表通俗化 | 像天气预报一样看预测对错 | `report/prompts.py` | `reports/sections/forecast.py` | 待迁移 | `tests/v2/test_report_sections.py` |
-| 历史评估图表和表格 | 用户评估系统能力 | `ui/portfolio_page.py` | V2 UI history | 待迁移 | `tests/v2/test_report_readability_snapshots.py` |
-| 指标解释和图表读法 | 显示样本数、横纵轴、基线、目标日和一句话结论 | V1 历史评估说明 | V2 reports/UI | 待迁移 | `tests/v2/test_report_readability_snapshots.py` |
-| 分阶段进度与后台优化 | 前台不等待深度 OOF，用户知道运行到哪一步 | services background optimizer, Flet progress | V2 use cases/UI task model | 待迁移 | `tests/v2/test_ui_state_flow.py` |
-| 前台性能预算 | 缓存命中主链与网络/LLM延迟分开度量 | V1 并发预取和后台优化 | V2 performance benchmark | 待迁移 | `tests/v2/test_interactive_performance.py` |
-| HTML/PDF 导出 | 用户保存报告 | `report/html_enhancer.py`, `pdf_exporter.py` | `reports/renderer.py` | 待迁移 | `tests/v2/test_report_sections.py` |
-| 历史报告检索与评分 | 按股票、市场、模式、日期和评分查阅旧报告 | `ui/history_page.py` | `ui/pages/report_history.py` | 待迁移 | `tests/v2/test_report_history_flow.py` |
-| 首次运行与设置页 | 配置工作目录、行情 token、LLM、代理并控制页面可用性 | `ui/settings_ui.py`, `config/settings.py` | `config/settings.py`, `ui/pages/settings.py` | 待迁移 | `tests/v2/test_settings_flow.py` |
+| 全宽报告阅读 | 减少左右布局浪费 | `ui/main_page.py`, `ui/portfolio_page.py` | V2 UI pages | V2-11 精确设计已冻结，待实现 | `tests/v2/test_ui_state_flow.py` UX35/UX49 |
+| 报告一分钟操作台 | 用户先看最该做什么 | `services/portfolio_service.py` | `presentation/sections/overview.py` | V2-11 精确设计已冻结，待实现 | `tests/v2/test_report_sections.py` UX10 |
+| 预测表通俗化 | 像天气预报一样看预测对错 | `report/prompts.py` | `presentation/sections/forecast.py` | V2-11 精确设计已冻结，待实现 | `tests/v2/test_report_sections.py` UX13/UX23 |
+| 历史评估图表和表格 | 用户评估系统能力 | `ui/portfolio_page.py` | V2 evaluation read model/UI | V2-11 精确设计已冻结，待实现 | `tests/v2/test_evaluation_views.py` UX20-UX29 |
+| 指标解释和图表读法 | 显示样本数、横纵轴、基线、目标日和一句话结论 | V1 历史评估说明 | V2 glossary/charts | V2-11 精确设计已冻结，待实现 | `tests/v2/test_report_readability.py` UX21/UX22 |
+| 分阶段进度与后台优化 | 前台不等待深度 OOF，用户知道运行到哪一步 | services background optimizer, Flet progress | `application/tasks.py`, UI progress | V2-11 精确设计已冻结，待实现 | `tests/v2/test_task_progress.py` UX30-UX34 |
+| 前台性能预算 | 缓存命中主链与网络/LLM延迟分开度量 | V1 并发预取和后台优化 | V2 presentation/task benchmark | V2-11 精确设计已冻结，待实现 | `tests/v2/test_presentation_performance.py` UX58 |
+| HTML/PDF 导出 | 用户保存报告 | `report/html_enhancer.py`, `pdf_exporter.py` | `presentation/renderers/` | V2-11 精确设计已冻结，待实现 | `tests/v2/test_report_renderers.py` UX53-UX55 |
+| 历史报告检索与评分 | 按股票、市场、模式、日期和评分查阅旧报告 | `ui/history_page.py` | `application/history.py`, `ui/pages/report_history.py` | V2-11 精确设计已冻结，待实现 | `tests/v2/test_report_history_flow.py` UX50-UX52 |
+| 首次运行与设置页 | 配置工作目录、行情 token、LLM、代理并控制页面可用性 | `ui/settings_ui.py`, `config/settings.py` | `application/settings.py`, `ui/pages/settings.py` | V2-11 精确设计已冻结，待实现 | `tests/v2/test_settings_flow.py` UX56 |
 | macOS/Windows 运行烟雾 | 构建后实际启动，防止 jaraco/资源文件缺失 | `scripts/`, `.github/workflows/` | V2 release acceptance | 待迁移 | 构建后 smoke |
 
 ## P2/P3 可暂缓但需保留位置

@@ -71,10 +71,11 @@ TradePlan + ExecutionDecision
 | [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) | V2-8 组合批次、排序、现金/heat/相关性分配、最终股数、migration 12 和 PO00-PO49 |
 | [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) | V2-9 到期验证、三本账、六层归因、OOF、自优化生命周期、migration 13/14 和 LE00-LE59 |
 | [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) | V2-10 研究事实清单、严格 JSON、确定性验证、候选桥接、migration 15 和 LL00-LL49 |
+| [docs/v2/V2_11_REPORT_UI.md](./docs/v2/V2_11_REPORT_UI.md) | V2-11 展示输入、ReportDocument、历史评估、Tab1/Tab3、任务进度、导出、migration 16 和 UX00-UX59 |
 | `AGENTS.md` | Codex 本地工作约定 |
 | `CLAUDE.md` | Claude Code 本地工作约定 |
 
-V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-10 分别以对应阶段规范为准。V2-10 已完成并复审；实现严格停止于 LLM 假设层，未进入 V2-11。
+V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-11 分别以对应阶段规范为准。V2-10 已完成并复审；V2-11 精确设计已冻结并授权实现，完成后必须停止等待复审，不得进入 V2-12。
 
 ## 1. V2 分层结构
 
@@ -783,6 +784,8 @@ venv/bin/python -m pytest tests/v2/test_research_*.py tests/v2/test_schema_migra
 
 ## 12. UI 与报告重构
 
+V2-11 的精确合同、代码边界、migration 16、Golden Cases 和 UX00-UX59 见 [docs/v2/V2_11_REPORT_UI.md](./docs/v2/V2_11_REPORT_UI.md)。本节只保留产品摘要；实现发生冲突时以该规范为准。
+
 ### 12.1 UI 原则
 
 UI 按交易决策流程组织，不按技术模块堆叠。
@@ -1080,7 +1083,7 @@ venv/bin/python -m pytest tests/ -q
 | V2-8 组合决策层 | 已完成并复审 | 不可变组合批次/风险快照/相关性证据、保护退出优先、双 profile 独立 waterfall、现金/heat/相关性约束、共享退出、替换研究候选、V2-7 最终股数装配及 migration 12 原子持久化已通过 PO00-PO49；实现严格止步于 V2-8。 |
 | V2-9 学习层 | 已完成并复审 | 精确合同见 `docs/v2/V2_9_LEARNING.md`；已实现到期验证、三本账、六层归因、purged OOF、股票绑定自优化、候选生命周期、migration 13/14 和 LE00-LE59，止步于学习层 |
 | V2-10 LLM 假设层 | 已完成并复审 | 精确合同见 `docs/v2/V2_10_LLM_HYPOTHESES.md`；冻结事实 manifest、严格 JSON 五类假设、确定性四态验证、注册候选桥接、独立 outcome/metric 账、migration 15、强类型恢复、LL00-LL49 与双市场失败降级均已通过；未进入 V2-11。 |
-| V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
+| V2-11 报告/UI | 设计已冻结，待实现 | 精确合同见 `docs/v2/V2_11_REPORT_UI.md`；确定性 ReportDocument、Tab1/Tab3、历史评估、进度、导出、migration 16 和 UX00-UX59 已冻结，当前授权仅到本阶段 |
 | V2-12 迁移/端到端/发布 | 未开始 | 每层单测通过后执行完整矩阵与跨平台烟雾 |
 
 ### 2026-07-15 V2-6 设计完成：风控层（待实现）
@@ -1150,3 +1153,11 @@ V2-10 已按 [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md
 固定主链为：冻结上游事实 -> `ResearchFactManifest` -> 严格 JSON LLM 响应 -> 五类结构化假设 -> 确定性 DSL/注册表验证 -> V2-9 candidate bridge 与独立复盘。LLM 不接触账户金额、股数或 API Key，不生成当前交易指令；未知模型、特征、策略模板和算子只保存为 `implementation_required`，不能自动改写源码。migration 15 以同一事务保存 context、response revision、hypothesis、validation 和 candidate link，冲突隔离并支持强类型重启恢复。
 
 已完成 LL00-LL49 一编号一行为测试、Tab1/Tab3 稳定分片、A股/美股事实隔离、响应 revision、prompt injection 防护、V2-5 同源三值验证、V2-9 候选/到期引用闭合和失败降级。复审进一步补齐了分片输出标的白名单、全局事实去重、股票/行业/市场候选作用域绑定、同内容注册表校验、SHA-256 来源与 artifact 闭合、候选指标按 candidate 去重，以及 hypothesis -> candidate -> promotion 的数据库引用闭合。最终验证结果：研究专项 `72 passed`；V2 全量 `613 passed, 4 skipped`；项目全量 `873 passed, 4 skipped`。默认关闭的 4 条真实网络 smoke 已使用本机配置合并显式执行，结果 `4 passed in 42.92s`，覆盖 3 条真实数据 Provider 和 1 条真实 LLM 严格 JSON/脱敏链路；实现严格停止于 V2-10，未进入 V2-11 UI/报告。
+
+## 19. V2-11 精确设计冻结：报告与 UI 层
+
+V2-11 已完成精确设计，规范见 [docs/v2/V2_11_REPORT_UI.md](./docs/v2/V2_11_REPORT_UI.md)。展示主链固定为“冻结上游 artifact -> PresentationInput -> deterministic ReportDocument -> Flet/Markdown/HTML/PDF”，禁止 LLM 生成整篇报告、禁止 UI 访问 Provider、禁止 renderer 查询数据库补字段或重算预测/策略/风控。
+
+设计冻结了单股与组合展示输入的身份闭合、天气预报式当前/历史预测表、预测账/策略账/联合账/LLM 独立账、Tab1/Tab3 全宽交互、持仓行内编辑和不可变账户快照、关注列表快照、逐股进度与取消、历史报告/评分/比较、设置能力矩阵、HTML/PDF 一致渲染、migration 16 和 UX00-UX59 一编号一行为验收。
+
+V2-11 当前允许实现，完成后必须运行阶段专项、V2 全量、项目全量和 1280×800/900×700/390×844 视觉验收并提交复审。V1 正式数据迁移、完整真实链端到端接线、macOS/Windows 发布和 Web 部署仍属于 V2-12。

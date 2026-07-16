@@ -27,9 +27,10 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-8 组合决策层规范：[docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md)
 - V2-9 学习层规范：[docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md)
 - V2-10 LLM 假设层规范：[docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md)
+- V2-11 报告与 UI 层规范：[docs/v2/V2_11_REPORT_UI.md](./docs/v2/V2_11_REPORT_UI.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 至 V2-10 已完成并复审。V2-10 LLM 假设层已实现冻结事实、严格 JSON、确定性四态验证、V2-9 候选桥接、LLM 独立复盘与 migration 15；它不直接生成交易指令，也未进入 V2-11 UI/报告。
+V2-0 至 V2-10 已完成并复审。V2-11 报告与 UI 层的精确设计已经冻结，当前授权按该规范实现结构化报告、历史评估、Tab1/Tab3、任务进度、历史报告、设置和导出；不得提前进入 V2-12 迁移/端到端/发布。
 
 ## 一以贯之的系统目标
 
@@ -90,6 +91,7 @@ V2-0 至 V2-10 已完成并复审。V2-10 LLM 假设层已实现冻结事实、�
 | [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) | V2-8 组合批次、排序、现金/heat/相关性分配、最终股数、migration 12 和 PO00-PO49 |
 | [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) | V2-9 到期验证、三本账、六层归因、OOF、自优化生命周期、migration 13/14 和 LE00-LE59 |
 | [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) | V2-10 研究事实清单、严格 JSON 假设、确定性验证、候选桥接、migration 15 和 LL00-LL49 |
+| [docs/v2/V2_11_REPORT_UI.md](./docs/v2/V2_11_REPORT_UI.md) | V2-11 展示输入、ReportDocument、Tab1/Tab3、历史评估、进度、导出、migration 16 和 UX00-UX59 |
 | `AGENTS.md` | Codex 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 | `CLAUDE.md` | Claude Code 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 
@@ -116,7 +118,9 @@ tests/v2/
 
 V2-9 已完成并复审：LE00-LE59 已逐号映射为 60 个独立行为测试，并补充真实 V2-5→V2-8 成交/组合链、截止日、冲突、revision 链、全链身份闭合和回滚测试。学习专项 `99 passed`，V2 全量 `541 passed, 3 skipped`，项目全量 `801 passed, 3 skipped`；3 条真实 Provider 冒烟显式启用后 `3 passed in 30.33s`。实现严格停止在 V2-9 学习层。
 
-V2-10 已完成并复审：研究事实只能来自注册命名空间和同市场冻结 artifact，Tab3 按持仓优先稳定分片并限制模型只能回答当前分片标的；严格 JSON Schema、V2-5 同源三值验证、股票/行业/市场候选作用域绑定、V2-9 maturity/forecast/promotion 复盘和 migration 15 引用闭合均已补齐。LL00-LL49 一编号一行为测试，真实 Provider 与真实 LLM 冒烟均已显式执行通过；实现未进入 V2-11 UI/报告。
+V2-10 已完成并复审：研究事实只能来自注册命名空间和同市场冻结 artifact，Tab3 按持仓优先稳定分片并限制模型只能回答当前分片标的；严格 JSON Schema、V2-5 同源三值验证、股票/行业/市场候选作用域绑定、V2-9 maturity/forecast/promotion 复盘和 migration 15 引用闭合均已补齐。LL00-LL49 一编号一行为测试，真实 Provider 与真实 LLM 冒烟均已显式执行通过。
+
+V2-11 精确设计已冻结：主报告改为确定性的 `PresentationInput -> ReportDocument -> Flet/Markdown/HTML/PDF` 链路，禁止 LLM 写整篇报告或 UI 重新计算业务结论。规范固定了 Tab1/Tab3 全宽交互、天气预报式预测追踪、三本账历史评估、持仓行内编辑、逐股进度、历史报告、设置、migration 16、UX00-UX59 和双市场视觉验收；实现完成后必须停在 V2-11 等待复审。
 
 ## 历史资料
 
