@@ -118,7 +118,7 @@ tests/v2/
 
 V2-9 已完成并复审：LE00-LE59 已逐号映射为 60 个独立行为测试，并补充真实 V2-5→V2-8 成交/组合链、截止日、冲突、revision 链、全链身份闭合和回滚测试。学习专项 `99 passed`，V2 全量 `541 passed, 3 skipped`，项目全量 `801 passed, 3 skipped`；3 条真实 Provider 冒烟显式启用后 `3 passed in 30.33s`。实现严格停止在 V2-9 学习层。
 
-V2-10 已完成并复审：研究事实只能来自注册命名空间和同市场冻结 artifact，Tab3 按持仓优先稳定分片并限制模型只能回答当前分片标的；严格 JSON Schema、V2-5 同源三值验证、股票/行业/市场候选作用域绑定、V2-9 maturity/forecast/promotion 复盘和 migration 15 引用闭合均已补齐。LL00-LL49 一编号一行为测试，真实 Provider 与真实 LLM 冒烟均已显式执行通过。
+V2-10 已完成并二次深审：研究事实只能来自注册命名空间和同市场冻结 artifact，NewsSnapshot、FundamentalSnapshot、策略保护条件和无账户金额的风控事实均已进入受限 manifest；Tab3 按持仓优先稳定分片并限制模型只能回答当前分片标的。严格 JSON Schema、response revision、跨响应业务去重、止损取消拒绝、负数参数边界、股票绑定 outcome、真实维度切片、V2-9 maturity/forecast/promotion 复盘和 migration 15 引用闭合均已补齐。LL00-LL49 保持一编号一行为，真实 Provider 与真实 LLM 冒烟均已显式执行通过。
 
 V2-11 精确设计已冻结：主报告改为确定性的 `PresentationInput -> ReportDocument -> Flet/Markdown/HTML/PDF` 链路，禁止 LLM 写整篇报告或 UI 重新计算业务结论。规范固定了 Tab1/Tab3 全宽交互、天气预报式预测追踪、三本账历史评估、持仓行内编辑、逐股进度、历史报告、设置、migration 16、UX00-UX59 和双市场视觉验收；实现完成后必须停在 V2-11 等待复审。
 

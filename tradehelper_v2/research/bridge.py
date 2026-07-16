@@ -19,7 +19,7 @@ class CandidateBridge:
                 CandidateEligibility.REJECTED:"RESEARCH_PARAMETER_OUT_OF_BOUNDS",
             }.get(validation.candidate_eligibility,"RESEARCH_OOF_REQUIRED")
             return self._link(hypothesis, None, validation.candidate_eligibility, None, (reason,), created_at), None
-        business_key = getattr(hypothesis, "business_key", stable_hash({"hypothesis": hypothesis.hypothesis_id, "payload": payload}))
+        business_key = getattr(hypothesis, "business_key", None) or self._business_key(hypothesis, payload, market, scope_key)
         if business_key in set(existing_business_keys):
             return self._link(hypothesis, None, CandidateEligibility.REJECTED, None, ("RESEARCH_DUPLICATE_HYPOTHESIS",), created_at), None
         if existing_candidate_count >= 20:
@@ -59,6 +59,18 @@ class CandidateBridge:
         identity = {"kind": kind, "scope": scope, "scope_key": resolved_scope_key, "market": market, "profile": profile, "base_version": base_version, "parameter_hash": parameter_hash, "search_space_hash": search_space_hash, "origin": EvidenceOrigin.RECONSTRUCTED_OOF, "lifecycle": CandidateLifecycle.CANDIDATE, "projection_key": projection_key}
         candidate = LearningCandidateVersion(stable_hash(identity), kind, scope, resolved_scope_key, market, profile, base_version, parameter_hash, search_space_hash, CandidateLifecycle.CANDIDATE, EvidenceOrigin.RECONSTRUCTED_OOF, created_at, created_at, ("LEARNING_CANDIDATE_WITHIN_BOUNDS",), projection_key)
         return self._link(hypothesis, candidate.candidate_id, CandidateEligibility.ELIGIBLE_FOR_OOF, mapping, ("RESEARCH_OOF_REQUIRED", "RESEARCH_CANDIDATE_CREATED"), created_at), candidate
+
+    @staticmethod
+    def _business_key(hypothesis, payload, market, scope_key):
+        instrument=getattr(hypothesis,"instrument",None)
+        kind=getattr(hypothesis,"kind",None)
+        normalized={key:value for key,value in payload.items() if key not in {"research_rationale"}}
+        return stable_hash({
+            "market":market,
+            "scope_key":instrument.stable_key if instrument is not None else scope_key,
+            "kind":kind.value if hasattr(kind,"value") else str(kind),
+            "payload":normalized,
+        })
 
     def _link(self, hypothesis, candidate_id, eligibility, mapping, reasons, created_at):
         identity = {"hypothesis": hypothesis.hypothesis_id, "candidate": candidate_id, "eligibility": eligibility, "mapping_version": self.registry_version, "mapping_key": mapping, "reasons": tuple(sorted(reasons))}

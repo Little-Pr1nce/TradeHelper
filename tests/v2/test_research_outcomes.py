@@ -22,7 +22,7 @@ def test_ll40_only_confirmed_pattern_is_issued(us_instrument,now):
     from tradehelper_v2.learning.engine import LearningEngine
     forecast=LearningEngine().evaluate_forecast(issued,(bar,),evaluated_at=now)
     hypothesis=SimpleNamespace(hypothesis_id="h",instrument=us_instrument,payload=(("expected_direction","bullish"),("horizons",(1,))),kind=HypothesisKind.FORECAST_PATTERN)
-    validation=SimpleNamespace(status=HypothesisValidationStatus.CONFIRMED)
+    validation=SimpleNamespace(hypothesis_id="h",status=HypothesisValidationStatus.CONFIRMED)
     outcome=forecast_outcome(hypothesis=hypothesis,validation=validation,observation_event_key="event",maturity=maturity,forecast=forecast,evaluated_at=now)
     assert outcome.direction_correct is True
 
@@ -32,8 +32,8 @@ def test_ll41_unconfirmed_pattern_does_not_get_credit():
 def test_failed_candidate_is_matured_but_not_counted_as_improved(us_instrument,now):
     from tradehelper_v2.contracts import PromotionDecision
     from tradehelper_v2.research.outcomes import candidate_outcome,metric_snapshot
-    hypothesis=SimpleNamespace(hypothesis_id="h",instrument=us_instrument)
-    validation=SimpleNamespace(status=HypothesisValidationStatus.CONFIRMED)
+    hypothesis=SimpleNamespace(hypothesis_id="h",instrument=us_instrument,kind=HypothesisKind.MODEL_CONFIGURATION)
+    validation=SimpleNamespace(hypothesis_id="h",status=HypothesisValidationStatus.CONFIRMED)
     candidate,event=_candidate_event(us_instrument,now,PromotionDecision.REJECT)
     outcome=candidate_outcome(hypothesis=hypothesis,validation=validation,observation_event_key="e",candidate=candidate,promotion_events=(event,),evaluated_at=now)
     snapshot=metric_snapshot(market=us_instrument.market,scope_key=us_instrument.stable_key,cutoff_at=now,hypotheses=(hypothesis,),validations=(validation,),outcomes=(outcome,),generated_at=now)
@@ -42,8 +42,8 @@ def test_failed_candidate_is_matured_but_not_counted_as_improved(us_instrument,n
 def test_candidate_metrics_count_each_candidate_once(us_instrument,now):
     from tradehelper_v2.contracts import PromotionDecision
     from tradehelper_v2.research.outcomes import candidate_outcome,metric_snapshot
-    hypothesis=SimpleNamespace(hypothesis_id="h",instrument=us_instrument)
-    validation=SimpleNamespace(status=HypothesisValidationStatus.CONFIRMED)
+    hypothesis=SimpleNamespace(hypothesis_id="h",instrument=us_instrument,kind=HypothesisKind.MODEL_CONFIGURATION)
+    validation=SimpleNamespace(hypothesis_id="h",status=HypothesisValidationStatus.CONFIRMED)
     candidate,event=_candidate_event(us_instrument,now,PromotionDecision.PROMOTE_TO_CHALLENGER)
     pending=candidate_outcome(hypothesis=hypothesis,validation=validation,observation_event_key="pending",candidate=candidate,promotion_events=(),evaluated_at=now)
     matured=candidate_outcome(hypothesis=hypothesis,validation=validation,observation_event_key="matured",candidate=candidate,promotion_events=(event,),evaluated_at=now)

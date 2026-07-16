@@ -1152,7 +1152,11 @@ V2-10 已按 [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md
 
 固定主链为：冻结上游事实 -> `ResearchFactManifest` -> 严格 JSON LLM 响应 -> 五类结构化假设 -> 确定性 DSL/注册表验证 -> V2-9 candidate bridge 与独立复盘。LLM 不接触账户金额、股数或 API Key，不生成当前交易指令；未知模型、特征、策略模板和算子只保存为 `implementation_required`，不能自动改写源码。migration 15 以同一事务保存 context、response revision、hypothesis、validation 和 candidate link，冲突隔离并支持强类型重启恢复。
 
-已完成 LL00-LL49 一编号一行为测试、Tab1/Tab3 稳定分片、A股/美股事实隔离、响应 revision、prompt injection 防护、V2-5 同源三值验证、V2-9 候选/到期引用闭合和失败降级。复审进一步补齐了分片输出标的白名单、全局事实去重、股票/行业/市场候选作用域绑定、同内容注册表校验、SHA-256 来源与 artifact 闭合、候选指标按 candidate 去重，以及 hypothesis -> candidate -> promotion 的数据库引用闭合。最终验证结果：研究专项 `72 passed`；V2 全量 `613 passed, 4 skipped`；项目全量 `873 passed, 4 skipped`。默认关闭的 4 条真实网络 smoke 已使用本机配置合并显式执行，结果 `4 passed in 42.92s`，覆盖 3 条真实数据 Provider 和 1 条真实 LLM 严格 JSON/脱敏链路；实现严格停止于 V2-10，未进入 V2-11 UI/报告。
+已完成 LL00-LL49 一编号一行为测试、Tab1/Tab3 稳定分片、A股/美股事实隔离、响应 revision、prompt injection 防护、V2-5 同源三值验证、V2-9 候选/到期引用闭合和失败降级。首次复审补齐了分片输出标的白名单、全局事实去重、股票/行业/市场候选作用域绑定、同内容注册表校验、SHA-256 来源与 artifact 闭合、候选指标按 candidate 去重，以及 hypothesis -> candidate -> promotion 的数据库引用闭合。
+
+二次深审进一步修复：直接投影 NewsSnapshot 的标题/规范摘要/情感/首次可见时间并限制每股 10 条；投影有来源 FundamentalSnapshot 字段；补齐 plan/condition/stop/take-profit/invalidation ID 和不含账户金额/股数的风控事实；异常响应继承请求 revision；候选 fallback business key 不再包含 response/hypothesis ID；显式拒绝取消止损/失效/有效期的覆盖；负数参数空间保持有序；instrument-less outcome 在合同边界拒绝；candidate outcome 限制为模型/策略/映射质疑；指标按声明 dimensions 实际筛选，无法证明成员归属时拒绝；client 成功缓存绑定 prompt hash 和 model。
+
+最终验证结果：研究专项 `86 passed`；V2 全量 `624 passed, 4 skipped`；项目全量 `884 passed, 4 skipped`。4 条默认关闭的真实网络 smoke 使用本机 V1 配置桥接显式执行，结果 `4 passed in 58.03s`，覆盖 3 条真实数据 Provider 和 1 条真实 LLM 严格 JSON/脱敏链路。实现仍严格停止于 V2-10；V2-11 仅完成精确设计，尚未实现。
 
 ## 19. V2-11 精确设计冻结：报告与 UI 层
 

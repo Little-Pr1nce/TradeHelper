@@ -157,6 +157,7 @@ class HypothesisOutcome:
     outcome_id:str; hypothesis_id:str; observation_event_key:str; instrument:InstrumentId; origin_session_date:date; target_session_date:date|None; horizon:int|None; trigger_status:HypothesisValidationStatus; expected_direction:str|None; actual_direction:str|None; actual_return:float|None; direction_correct:bool|None; linked_maturity_evidence_id:str|None; linked_forecast_outcome_id:str|None; linked_candidate_id:str|None; linked_promotion_ids:tuple[str,...]; status:HypothesisOutcomeStatus; evidence_grade:str; evaluated_at:datetime; generated_at:datetime
     def __post_init__(self):
         status=_enum(HypothesisOutcomeStatus,self.status,"hypothesis outcome status"); trigger=_enum(HypothesisValidationStatus,self.trigger_status,"outcome trigger status"); evaluated=ensure_utc(self.evaluated_at,"outcome evaluated_at"); generated=ensure_utc(self.generated_at,"outcome generated_at")
+        if not isinstance(self.instrument,InstrumentId): raise ContractViolation("research outcome requires an instrument")
         if self.horizon is not None and self.horizon not in {1,3,5,10}: raise ContractViolation("invalid research outcome horizon")
         if self.actual_return is not None and (isinstance(self.actual_return,bool) or not isfinite(float(self.actual_return))): raise ContractViolation("invalid research outcome return")
         scored=status is HypothesisOutcomeStatus.MATURED

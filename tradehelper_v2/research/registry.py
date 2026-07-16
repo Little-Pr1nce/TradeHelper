@@ -35,7 +35,24 @@ class ResearchMappingRegistry:
         return isinstance(strategy_id, str) and strategy_id in self.strategies and self.strategies[strategy_id].enabled
 
     def strategy_parameters_valid(self, strategy_id: str, overrides: Mapping[str, object]) -> bool:
+        if self._cancels_protective_controls(overrides):
+            return False
         return self._parameters_valid(self.strategy_parameter_spaces.get(strategy_id, {}),overrides)
+
+    @staticmethod
+    def _cancels_protective_controls(overrides: Mapping[str, object]) -> bool:
+        disabled_tokens={"none","off","disabled","disable","false","no_stop","unbounded"}
+        for raw_name,value in overrides.items():
+            name=str(raw_name).strip().lower()
+            if not any(token in name for token in ("stop","invalidation","validity","expiry","expires")):
+                continue
+            if value is None or value is False:
+                return True
+            if isinstance(value,str) and value.strip().lower() in disabled_tokens:
+                return True
+            if isinstance(value,(int,float)) and not isinstance(value,bool) and value<=0:
+                return True
+        return False
 
     @staticmethod
     def _parameters_valid(space,overrides):
@@ -73,7 +90,11 @@ def default_research_registry() -> ResearchMappingRegistry:
     specs={item.strategy_id:item for item in default_specs()}
     strategy_spaces={
         item.strategy_id:{
-            name:({"minimum":value*0.5,"maximum":value*1.5} if isinstance(value,(int,float)) and not isinstance(value,bool) and value!=0 else {"choices":(value,)})
+            name:(
+                {"minimum":min(value*0.5,value*1.5),"maximum":max(value*0.5,value*1.5)}
+                if isinstance(value,(int,float)) and not isinstance(value,bool) and value!=0
+                else {"choices":(value,)}
+            )
             for name,value in item.parameters.items()
         }
         for item in specs.values()

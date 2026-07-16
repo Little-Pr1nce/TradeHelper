@@ -1,8 +1,9 @@
 """LL01--LL09：冻结上下文、市场和最小披露。"""
+from datetime import timedelta
 import json
 import pytest
-from tradehelper_v2.contracts import ContractViolation, DecisionMode, FeatureEvidenceMode, FeatureSnapshot, FeatureStatus, FeatureValue, Market, ResearchFact, ResearchScope, stable_hash
-from tradehelper_v2.research.context import ResearchContextBuilder
+from tradehelper_v2.contracts import ContractViolation, DecisionMode, FeatureEvidenceMode, FeatureSnapshot, FeatureStatus, FeatureValue, FundamentalSnapshot, FundamentalValue, Market, NewsSnapshot, QualityStatus, ResearchFact, ResearchScope, stable_hash
+from tradehelper_v2.research.context import MAX_NEWS_ITEMS_PER_INSTRUMENT, ResearchContextBuilder
 from tradehelper_v2.research.prompt import build_prompt_chunks
 
 def _fact(instrument, now):
@@ -49,6 +50,15 @@ def test_portfolio_prompt_is_stably_chunked_and_fact_bounded(now):
     assert all(sum(item["fact_id"]==global_fact.fact_id for item in json.loads(chunk[1])["facts"])==1 for chunk in chunks)
 
 
+def test_prompt_redacts_account_segment_without_trailing_dot(us_instrument,now):
+    fact_payload={"instrument":us_instrument,"key":"feature.context.account","value":"private","status":"available","available_at":now,"source_refs":("fixture",),"source_payload_hash":"a"*64}
+    sensitive=ResearchFact(stable_hash(fact_payload),us_instrument,"feature.context.account","private","text",None,"available",now,("fixture",),"a"*64)
+    builder=ResearchContextBuilder()
+    manifest=builder.build_manifest(scope=ResearchScope.SINGLE_STOCK,market=Market.US,cutoff_at=now,instruments=(us_instrument,),facts=(sensitive,),generated_at=now)
+    context=builder.build_context(scope=ResearchScope.SINGLE_STOCK,market=Market.US,mode="eod",cutoff_at=now,manifest=manifest,instrument_roles=((us_instrument,"subject"),),generated_at=now)
+    assert "private" not in build_prompt_chunks(context)[0][1]
+
+
 def test_project_upstream_feature_snapshot_uses_registered_namespace(us_instrument,now):
     value=FeatureValue("closed.rsi_14",55.0,FeatureStatus.AVAILABLE,"index",14,now,("fixture",),True,None)
     snapshot=FeatureSnapshot(us_instrument,DecisionMode.EOD,now,now.date(),None,"2.2.0",FeatureEvidenceMode.RECONSTRUCTED_HISTORY,(value,),"a"*64,"b"*64,now)
@@ -57,3 +67,54 @@ def test_project_upstream_feature_snapshot_uses_registered_namespace(us_instrume
     assert len(facts)==1 and facts[0].key=="feature.closed.rsi_14" and facts[0].source_refs==(snapshot.feature_hash,)
     manifest=builder.build_manifest(scope=ResearchScope.SINGLE_STOCK,market=Market.US,cutoff_at=now,instruments=(us_instrument,),facts=facts,generated_at=now)
     assert manifest.facts==facts
+
+
+def test_news_and_fundamental_snapshots_are_projected_with_sources_and_limits(us_instrument,now):
+    news=tuple(
+        NewsSnapshot(
+            us_instrument,f"Headline {index}","finnhub",now-timedelta(hours=index+1),
+            now-timedelta(hours=index),now,"  summary\ntext  ",False,
+            "positive",0.8,0.9,
+        )
+        for index in range(MAX_NEWS_ITEMS_PER_INSTRUMENT+2)
+    )
+    fundamentals=FundamentalSnapshot(
+        us_instrument,
+        {"peTTM":FundamentalValue(22.5,"multiple",None,now-timedelta(days=1),"finnhub")},
+        now,now,"finnhub",QualityStatus.OK,
+    )
+    facts=ResearchContextBuilder().project_upstream_facts(
+        news_snapshots=news,fundamental_snapshots=(fundamentals,),
+    )
+    titles=[item for item in facts if item.key.endswith(".title")]
+    summaries=[item for item in facts if item.key.endswith(".summary")]
+    financial=[item for item in facts if item.key.startswith("feature.fund.raw.")]
+    assert len(titles)==MAX_NEWS_ITEMS_PER_INSTRUMENT
+    assert all(item.source_payload_hash and item.source_refs for item in titles+financial)
+    assert {item.value for item in summaries}=={"summary text"}
+    assert len(financial)==1 and financial[0].value==22.5 and financial[0].unit=="multiple"
+    builder=ResearchContextBuilder()
+    manifest=builder.build_manifest(
+        scope=ResearchScope.SINGLE_STOCK,market=Market.US,cutoff_at=now,
+        instruments=(us_instrument,),facts=facts,generated_at=now,
+    )
+    context=builder.build_context(
+        scope=ResearchScope.SINGLE_STOCK,market=Market.US,mode="eod",
+        cutoff_at=now,manifest=manifest,
+        instrument_roles=((us_instrument,"subject"),),generated_at=now,
+    )
+    prompt_facts=json.loads(build_prompt_chunks(context)[0][1])["facts"]
+    projected={item["fact_id"]:item for item in prompt_facts}
+    assert all(projected[item.fact_id]["source_refs"]==list(item.source_refs) for item in titles+financial)
+
+
+def test_strategy_projection_keeps_plan_protection_ids(us_instrument):
+    from strategy_helpers import strategy_input
+    from tradehelper_v2.strategies import StrategyEngine
+    bundle=StrategyEngine().build(strategy_input(us_instrument))
+    facts=ResearchContextBuilder().project_upstream_facts(strategy_bundles=(bundle,))
+    keys={item.key for item in facts}
+    plans=tuple(plan for branch in (bundle.entry_or_add,bundle.reduce_or_exit,bundle.hold,bundle.invalidation) for plan in branch.plans)
+    assert all(f"strategy.{plan.plan_id}.invalidation_condition_id" in keys for plan in plans)
+    actionable=tuple(plan for plan in plans if plan.stop is not None)
+    assert actionable and all(f"strategy.{plan.plan_id}.stop_condition_id" in keys for plan in actionable)

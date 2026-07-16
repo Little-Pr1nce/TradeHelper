@@ -76,10 +76,11 @@ class OpenAICompatibleResearchClient:
         self._prompts=dict(prompts)
         self._capabilities=capabilities
         self._transport=transport or self._http_transport
-        self._successful: dict[tuple[str,int],RawResearchResponse]={}
+        self._successful: dict[tuple[str,int,str,str],RawResearchResponse]={}
 
     def generate(self, request: LLMResearchRequest) -> RawResearchResponse:
-        cached=self._successful.get((request.request_id,request.revision))
+        cache_key=(request.request_id,request.revision,request.prompt_hash,request.model_name)
+        cached=self._successful.get(cache_key)
         if cached is not None:
             return cached
         prompt=self._prompts.get(request.request_id)
@@ -115,7 +116,7 @@ class OpenAICompatibleResearchClient:
         identity={"request":request.request_id,"context":request.context_id,"revision":revision,"provider":request.provider_name,"model":request.model_name,"content_hash":stable_hash(content),"finish":finish,"status":status,"prompt_version":request.prompt_version,"prompt_hash":request.prompt_hash}
         response=RawResearchResponse(stable_hash(identity),request.request_id,request.context_id,revision,request.provider_name,request.model_name,content,stable_hash(content),finish,status,received,request.prompt_version,request.prompt_hash,str(raw.get("id")) if raw.get("id") else None,self._token_usage(raw))
         if status is InvocationStatus.SUCCEEDED:
-            self._successful[(request.request_id,request.revision)]=response
+            self._successful[cache_key]=response
         return response
 
     @staticmethod
@@ -147,9 +148,10 @@ class OpenAICompatibleResearchClient:
         return value
 
 
-def unavailable_response(*, request: LLMResearchRequest, status: InvocationStatus, received_at: datetime, finish_reason: str | None = None, revision: int = 1):
+def unavailable_response(*, request: LLMResearchRequest, status: InvocationStatus, received_at: datetime, finish_reason: str | None = None, revision: int | None = None):
     if status is InvocationStatus.SUCCEEDED:
         raise ContractViolation("unavailable response must not be marked succeeded")
+    revision = request.revision if revision is None else revision
     content = ""
     identity = {"request": request.request_id, "context": request.context_id, "revision": revision, "provider": request.provider_name, "model": request.model_name, "content_hash": stable_hash(content), "finish": finish_reason, "status": status, "prompt_version": request.prompt_version, "prompt_hash": request.prompt_hash}
     return RawResearchResponse(stable_hash(identity), request.request_id, request.context_id, revision, request.provider_name, request.model_name, content, stable_hash(content), finish_reason, status, received_at, request.prompt_version, request.prompt_hash)

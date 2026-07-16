@@ -8,7 +8,7 @@ MAX_PROMPT_INSTRUMENTS = 10
 MAX_PROMPT_FACTS_PER_INSTRUMENT = 80
 _PRIVATE_PREFIXES = ("account.", "secret.", "credential.")
 _PRIVATE_TOKENS = frozenset(("api_key", "authorization", "password", "file_path", "database_path", "shares", "quantity"))
-_PRIVATE_SEGMENTS = frozenset(("token", "secret", "credential"))
+_PRIVATE_SEGMENTS = frozenset(("account", "cash", "token", "secret", "credential"))
 
 
 def _output_schema(context_id: str, maximum: int) -> dict:
@@ -94,7 +94,7 @@ def build_prompt_chunks(context) -> tuple[tuple[tuple[str,...],str,str],...]:
             {
                 "fact_id":fact.fact_id,"instrument":None,"key":fact.key,
                 "value":fact.value,"unit":fact.unit,"status":fact.status,
-                "available_at":fact.available_at,
+                "available_at":fact.available_at,"source_refs":fact.source_refs,
             }
             for fact in sorted(
                 (fact for fact in context.manifest.facts if fact.instrument is None and not _is_private(fact.key)),
@@ -110,7 +110,7 @@ def build_prompt_chunks(context) -> tuple[tuple[tuple[str,...],str,str],...]:
                 facts.append({
                     "fact_id":fact.fact_id,"instrument":None if fact.instrument is None else fact.instrument.stable_key,
                     "key":fact.key,"value":fact.value,"unit":fact.unit,"status":fact.status,
-                    "available_at":fact.available_at,
+                    "available_at":fact.available_at,"source_refs":fact.source_refs,
                 })
         roles=[{"instrument":instrument.stable_key,"role":role} for instrument,role in context.instrument_roles if instrument in selected_set]
         maximum=5 if context.scope is ResearchScope.SINGLE_STOCK else 20

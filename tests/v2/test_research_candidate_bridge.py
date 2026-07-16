@@ -29,3 +29,13 @@ def test_stock_candidate_scope_is_bound_to_hypothesis_instrument(us_instrument,n
     validation=SimpleNamespace(candidate_eligibility=CandidateEligibility.ELIGIBLE_FOR_OOF,status=HypothesisValidationStatus.CONFIRMED)
     _,candidate=CandidateBridge().bridge(hypothesis,validation,market=us_instrument.market,scope_key="WRONG",base_version="base",search_space_hash="a"*64,created_at=now)
     assert candidate.scope_key==us_instrument.stable_key
+
+
+def test_fallback_business_key_deduplicates_equivalent_responses(us_instrument,now):
+    first=SimpleNamespace(hypothesis_id="response-one",instrument=us_instrument,kind=HypothesisKind.MODEL_CONFIGURATION,payload=(("scope","stock"),("registered_model_family","analog")))
+    second=SimpleNamespace(hypothesis_id="response-two",instrument=us_instrument,kind=HypothesisKind.MODEL_CONFIGURATION,payload=first.payload)
+    validation=SimpleNamespace(candidate_eligibility=CandidateEligibility.ELIGIBLE_FOR_OOF,status=HypothesisValidationStatus.CONFIRMED)
+    bridge=CandidateBridge()
+    first_key=bridge._business_key(first,dict(first.payload),us_instrument.market,us_instrument.stable_key)
+    link,candidate=bridge.bridge(second,validation,market=us_instrument.market,scope_key=us_instrument.stable_key,base_version="base",search_space_hash="a"*64,created_at=now,existing_business_keys=(first_key,))
+    assert candidate is None and link.eligibility is CandidateEligibility.REJECTED

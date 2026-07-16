@@ -896,7 +896,17 @@ venv/bin/python -m pytest tests/v2/integration/test_live_llm_research.py -vv -rs
 7. LL48-LL49：架构、性能、失败降级、双市场和可选真实 LLM 冒烟。
 8. 跑 V2-10 专项、V2 全量、项目全量，更新阶段状态后停止。
 
-完成复审后的测试基线为：V2-10 研究专项 `72 passed`，V2 全量 `613 passed, 4 skipped`，项目全量 `873 passed, 4 skipped`；4 条默认关闭的真实 Provider/LLM 冒烟已合并显式执行并全部通过。组合分片必须携带当前分片的 instrument keys，候选作用域必须由冻结标的、市场或 `feature.context.industry` 事实决定，不能由调用方自由改写；同一 candidate 的 pending/matured outcome 在指标层只计一次。
+二次深审后的测试基线为：V2-10 研究专项 `86 passed`，V2 全量 `624 passed, 4 skipped`，项目全量 `884 passed, 4 skipped`；4 条默认关闭的真实 Provider/LLM 冒烟使用本机配置桥接显式执行为 `4 passed in 58.03s`。组合分片必须携带当前分片的 instrument keys，候选作用域必须由冻结标的、市场或 `feature.context.industry` 事实决定，不能由调用方自由改写；同一 candidate 的 pending/matured outcome 在指标层只计一次。
+
+二次深审确认并冻结以下实现要求：
+
+- `ResearchContextBuilder` 必须直接接收并投影冻结 `NewsSnapshot` 和 `FundamentalSnapshot`；新闻每股最多 10 条，只发送标题、500 字符内规范摘要、情感、首次可见时间和 source ref，source ref 必须进入实际 prompt 而不只保留在 manifest。
+- 策略事实必须投影 plan、trigger、confirmation、stop、take-profit、invalidation 和 validity ID；风控事实不得包含账户余额、现金或股数。
+- unavailable response 必须继承 request revision；成功缓存至少绑定 request、revision、prompt hash 和 model。
+- candidate fallback business key 不得包含 response ID 或 hypothesis ID；同一业务概念换响应仍须去重。
+- 取消 stop/invalidation/validity 的参数覆盖必须在研究验证层拒绝，不能推迟到 TradePlan 创建。
+- outcome 必须绑定具体 instrument；candidate outcome 只接受模型、策略或已映射 system challenge，forecast pattern 不得误记候选收益。
+- metric snapshot 必须按 dimensions 实际过滤输入；无法验证 provider/model/prompt/股票/市场/horizon 等成员归属时拒绝生成切片。
 
 ## 22. 阶段停止点
 

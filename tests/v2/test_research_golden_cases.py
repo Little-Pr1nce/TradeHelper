@@ -73,6 +73,19 @@ def test_openai_compatible_client_keeps_credentials_out_of_response(us_instrumen
     response=client.generate(request)
     assert response.invocation_status is InvocationStatus.SUCCEEDED and "secret" not in response.content
 
+def test_client_success_cache_is_bound_to_prompt_hash_and_model(now):
+    calls=[]
+    prompt=json.dumps({"output_schema":{"type":"object"}})
+    client=OpenAICompatibleResearchClient(
+        endpoint="https://example.invalid/v1",api_key="secret",prompts={"r":prompt},
+        capabilities=ResearchClientCapabilities(False,False,False,False),
+        transport=lambda *_:(calls.append(1) or {"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}),
+    )
+    first=LLMResearchRequest("r","c","p","a"*64,1,"provider","model-a",now)
+    changed=LLMResearchRequest("r","c","p","b"*64,1,"provider","model-b",now)
+    client.generate(first); client.generate(first); client.generate(changed)
+    assert len(calls)==2
+
 def test_ll15_transport_states_retry_and_success_reuse(now):
     calls=[]
     def transport(*args):
@@ -89,6 +102,15 @@ def test_ll15_transport_states_retry_and_success_reuse(now):
     empty=OpenAICompatibleResearchClient(endpoint="https://example.invalid/v1",api_key="secret",prompts={"r":prompt},capabilities=ResearchClientCapabilities(False,True,False,False),transport=lambda *_:{"choices":[{"finish_reason":"stop","message":{"content":""}}]}).generate(request)
     truncated=OpenAICompatibleResearchClient(endpoint="https://example.invalid/v1",api_key="secret",prompts={"r":prompt},capabilities=ResearchClientCapabilities(False,True,False,False),transport=lambda *_:{"choices":[{"finish_reason":"length","message":{"content":"{}"}}]}).generate(request)
     assert (timed_out.invocation_status,failed.invocation_status,empty.invocation_status,truncated.invocation_status)==(InvocationStatus.TIMED_OUT,InvocationStatus.TRANSPORT_FAILED,InvocationStatus.EMPTY,InvocationStatus.TRUNCATED)
+
+def test_unavailable_response_preserves_explicit_request_revision(now):
+    request=LLMResearchRequest("r","c","p","a"*64,1,"provider","model",now,revision=3)
+    client=OpenAICompatibleResearchClient(
+        endpoint="https://example.invalid/v1",api_key="secret",prompts={},
+        capabilities=ResearchClientCapabilities(False,False,False,False),
+    )
+    response=client.generate(request)
+    assert response.revision==3
 
 def test_engine_rejects_market_or_registry_content_mismatch(us_instrument,now):
     context,_,_=context_response(us_instrument,now)
@@ -177,6 +199,34 @@ def test_ll34_unknown_strategy_is_implementation_required(us_instrument,now):
     value=StrictHypothesisParser().parse(content=response_json(context,[item]),context=context,response=response)
     assert value[0].kind is HypothesisKind.IMPLEMENTATION_PROPOSAL
 
+def test_stop_cancellation_override_is_rejected(us_instrument,now):
+    context,_,facts=context_response(us_instrument,now)
+    hypothesis=SimpleNamespace(
+        hypothesis_id="h",evidence_refs=(facts[0].fact_id,),kind=HypothesisKind.STRATEGY_CONFIGURATION,
+        payload=(
+            ("registered_strategy_id","protective_exit_v1"),
+            ("parameter_overrides",(("stop_mode","none"),)),
+            ("applicable_scenario_states",("mixed",)),
+        ),
+    )
+    result=DeterministicHypothesisValidator().validate(hypothesis,context,evaluated_at=now)
+    assert result.status is HypothesisValidationStatus.REFUTED
+    assert result.candidate_eligibility is CandidateEligibility.REJECTED
+
+def test_negative_strategy_parameter_space_keeps_ordered_bounds(monkeypatch):
+    from tradehelper_v2.contracts import PlanAction, ScenarioState, StrategyFamily, StrategySpec
+    from tradehelper_v2.research.registry import default_research_registry
+    import tradehelper_v2.strategies.registry as strategy_registry
+    parameters={"signed_threshold":-10.0}
+    spec=StrategySpec(
+        "negative_parameter_v1","1",StrategyFamily.OBSERVATION,"both",(PlanAction.WATCH,),
+        tuple(ScenarioState),(),(),parameters,stable_hash(parameters),
+    )
+    monkeypatch.setattr(strategy_registry,"default_specs",lambda:(spec,))
+    registry=default_research_registry()
+    assert registry.strategy_parameter_spaces[spec.strategy_id]["signed_threshold"]=={"minimum":-15.0,"maximum":-5.0}
+    assert registry.strategy_parameters_valid(spec.strategy_id,{"signed_threshold":-10.0})
+
 def test_ll33_strategy_configuration_maps_to_strategy_candidate(us_instrument,now):
     h=SimpleNamespace(hypothesis_id="h",business_key="b",response_id="r",context_id="c",kind=HypothesisKind.STRATEGY_CONFIGURATION,payload=(("registered_strategy_id","registered"),)); v=SimpleNamespace(candidate_eligibility=CandidateEligibility.ELIGIBLE_FOR_OOF)
     _,candidate=CandidateBridge().bridge(h,v,market=Market.US,scope_key=us_instrument.stable_key,base_version="base",search_space_hash="a"*64,created_at=now)
@@ -230,7 +280,7 @@ def test_ll44_candidate_effect_requires_linked_candidate(us_instrument,now):
     from test_research_outcomes import _candidate_event
     from tradehelper_v2.contracts import PromotionDecision
     from tradehelper_v2.research.outcomes import candidate_outcome
-    h=SimpleNamespace(hypothesis_id="h",instrument=us_instrument); v=SimpleNamespace(status=HypothesisValidationStatus.CONFIRMED)
+    h=SimpleNamespace(hypothesis_id="h",instrument=us_instrument,kind=HypothesisKind.MODEL_CONFIGURATION); v=SimpleNamespace(status=HypothesisValidationStatus.CONFIRMED)
     candidate,event=_candidate_event(us_instrument,now,PromotionDecision.PROMOTE_TO_CHALLENGER)
     outcome=candidate_outcome(hypothesis=h,validation=v,observation_event_key="e",candidate=candidate,promotion_events=(event,),evaluated_at=now)
     assert outcome.linked_candidate_id == candidate.candidate_id and outcome.direction_correct is None
@@ -248,9 +298,57 @@ def test_ll45_duplicate_outcome_is_superseded(us_instrument,now):
 
 def test_ll46_metrics_dimensions_keep_model_slices_separate(us_instrument,now):
     from tradehelper_v2.research.outcomes import metric_snapshot
-    one=metric_snapshot(market=Market.US,scope_key=us_instrument.stable_key,cutoff_at=now,hypotheses=(),validations=(),outcomes=(),generated_at=now,dimensions=(("model","one"),))
-    two=metric_snapshot(market=Market.US,scope_key=us_instrument.stable_key,cutoff_at=now,hypotheses=(),validations=(),outcomes=(),generated_at=now,dimensions=(("model","two"),))
+    hypotheses=(
+        SimpleNamespace(hypothesis_id="one",instrument=us_instrument,kind=HypothesisKind.MODEL_CONFIGURATION,payload=(("registered_model_family","analog"),)),
+        SimpleNamespace(hypothesis_id="two",instrument=us_instrument,kind=HypothesisKind.MODEL_CONFIGURATION,payload=(("registered_model_family","ensemble"),)),
+    )
+    validations=tuple(SimpleNamespace(hypothesis_id=item.hypothesis_id,status=HypothesisValidationStatus.CONFIRMED) for item in hypotheses)
+    one=metric_snapshot(market=Market.US,scope_key=us_instrument.stable_key,cutoff_at=now,hypotheses=hypotheses,validations=validations,outcomes=(),generated_at=now,dimensions=(("model","analog"),))
+    two=metric_snapshot(market=Market.US,scope_key=us_instrument.stable_key,cutoff_at=now,hypotheses=hypotheses,validations=validations,outcomes=(),generated_at=now,dimensions=(("model","ensemble"),))
+    assert dict(one.metrics)["issued_count"]==dict(two.metrics)["issued_count"]==1
     assert one.snapshot_id != two.snapshot_id
+
+def test_metric_dimensions_reuse_hypothesis_membership_and_filter_outcome_horizon(us_instrument,now):
+    from tradehelper_v2.contracts import HypothesisOutcomeStatus
+    from tradehelper_v2.research.outcomes import metric_snapshot
+    hypothesis=SimpleNamespace(
+        hypothesis_id="one",instrument=us_instrument,
+        kind=HypothesisKind.MODEL_CONFIGURATION,
+        payload=(("registered_model_family","analog"),("horizons",(1,3))),
+    )
+    validation=SimpleNamespace(hypothesis_id="one",status=HypothesisValidationStatus.CONFIRMED)
+    outcomes=tuple(
+        SimpleNamespace(
+            hypothesis_id="one",instrument=us_instrument,horizon=horizon,
+            status=HypothesisOutcomeStatus.MATURED,direction_correct=True,
+            linked_candidate_id=None,evaluated_at=now,
+        )
+        for horizon in (1,3)
+    )
+    snapshot=metric_snapshot(
+        market=Market.US,scope_key=us_instrument.stable_key,cutoff_at=now,
+        hypotheses=(hypothesis,),validations=(validation,),outcomes=outcomes,
+        generated_at=now,dimensions=(("model","analog"),("horizon","1")),
+    )
+    assert dict(snapshot.metrics)["matured_direction_count"]==1
+
+def test_candidate_outcome_rejects_forecast_pattern(us_instrument,now):
+    from test_research_outcomes import _candidate_event
+    from tradehelper_v2.contracts import PromotionDecision
+    from tradehelper_v2.research.outcomes import candidate_outcome
+    candidate,event=_candidate_event(us_instrument,now,PromotionDecision.PROMOTE_TO_CHALLENGER)
+    hypothesis=SimpleNamespace(hypothesis_id="h",instrument=us_instrument,kind=HypothesisKind.FORECAST_PATTERN)
+    with pytest.raises(ValueError):
+        candidate_outcome(
+            hypothesis=hypothesis,validation=SimpleNamespace(status=HypothesisValidationStatus.CONFIRMED),
+            observation_event_key="e",candidate=candidate,promotion_events=(event,),evaluated_at=now,
+        )
+
+def test_portfolio_hypothesis_cannot_create_instrumentless_outcome(now):
+    from tradehelper_v2.research.outcomes import _not_applicable
+    hypothesis=SimpleNamespace(hypothesis_id="h",instrument=None)
+    with pytest.raises(ValueError):
+        _not_applicable(hypothesis,SimpleNamespace(status=HypothesisValidationStatus.PENDING),"e",now)
 
 def test_ll49_timeout_degrades_without_main_chain_failure(us_instrument,now):
     context,_,_=context_response(us_instrument,now); request=LLMResearchRequest("r",context.context_id,"p","a"*64,1,"fake","fake",now)
