@@ -27,7 +27,7 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-8 组合决策层规范：[docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 至 V2-7 已完成并复审。V2-8 组合决策层设计已经冻结，当前只实现同一账户/市场/时点下的组合批次、保护退出优先级、现金与风险争用、相关性、最终股数、替换研究候选、migration 12 和 PO00-PO49；不得提前实现 V2-9 学习层。
+V2-0 至 V2-8 已完成并复审。V2-8 已实现同一账户/市场/时点下的组合批次、保护退出优先级、现金与风险争用、相关性、最终股数、替换研究候选、migration 12 和 PO00-PO49；当前停止于 V2-8，V2-9 学习层尚未开始。
 
 ## 一以贯之的系统目标
 
@@ -110,7 +110,7 @@ venv/bin/python -m pytest tests/ -q
 tests/v2/
 ```
 
-V2-7 已完成并复审：成交合同、订单工厂、冻结条件触发器、当前预览、历史仿真、Decimal 成本、A/美股最终市场检查及 migration 11 均已落地。EX00-EX49 全部有可执行映射，成交层专项 `125 passed`，V2 回归 `389 passed, 3 skipped`，项目全量 `649 passed, 3 skipped`；默认跳过的 3 条真实 Provider 冒烟测试显式启用后为 `3 passed`。分钟序列和 Level2 缺失时仍必须降级，不保证真实成交。V2-8 精确设计已冻结，待按 PO00-PO49 实现和复审。
+V2-8 已完成并复审：PO00-PO49 已逐号映射为 50 个独立验收测试，V2-8 专项 `53 passed`，V2 回归 `442 passed, 3 skipped`，项目全量 `702 passed, 3 skipped`；3 条真实 Provider 冒烟显式启用后 `3 passed`。组合层只缩小 V2-6 批准股数，不修改预测或 TradePlan，不复用未成交的卖出回款，不实现 V2-9 学习或 UI。
 
 ## 历史资料
 

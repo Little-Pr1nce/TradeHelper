@@ -72,7 +72,7 @@ TradePlan + ExecutionDecision
 | `AGENTS.md` | Codex 本地工作约定 |
 | `CLAUDE.md` | Claude Code 本地工作约定 |
 
-V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-8 分别以对应阶段规范为准；当前实现只授权 V2-8，完成 PO00-PO49、测试和文档更新后必须停止并等待复审。
+V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-8 分别以对应阶段规范为准。V2-8 已完成 PO00-PO49 并复审；当前停止在 V2-8，未经新的精确设计不得进入 V2-9。
 
 ## 1. V2 分层结构
 
@@ -1116,7 +1116,7 @@ venv/bin/python -m pytest tests/ -q
 | V2-5 策略层 | 已完成并复审 | TradePlan/条件 DSL、九类首批模板、四分支 StrategyBundle、migration 9、强类型持久化、双市场/三时段语义与 SP00-SP29 已通过；不包含 V2-6 风控或之后模块 |
 | V2-6 风控层 | 已完成并复审 | ExecutionDecision、真实账户冻结估值、A/B/C/D、Decimal 单计划容量、风险成本预留、A/美股规则预检、migration 10 与 RK00-RK42 测试映射已完成；不包含 V2-7/V2-8 模块 |
 | V2-7 成交仿真层 | 已完成并复审 | OrderIntent、冻结条件触发、当前预览、历史仿真、Decimal 成本、双市场最终检查、migration 11 与 EX00-EX49 均已通过；不包含 V2-8 组合分配 |
-| V2-8 组合决策层 | 设计冻结，待实现 | 精确合同见 `docs/v2/V2_8_PORTFOLIO.md`；只实现组合批次、保护退出优先、排序、现金/heat/相关性分配、最终股数、替换研究候选、migration 12 和 PO00-PO49 |
+| V2-8 组合决策层 | 已完成并复审 | 不可变组合批次/风险快照/相关性证据、保护退出优先、双 profile 独立 waterfall、现金/heat/相关性约束、共享退出、替换研究候选、V2-7 最终股数装配及 migration 12 原子持久化已通过 PO00-PO49；实现严格止步于 V2-8。 |
 | V2-9 学习层 | 未开始 | 等预测、计划、风控和成交事件合同稳定 |
 | V2-10 LLM 假设层 | 未开始 | 可复用 V1 observation，但需拆预测/策略假设并限制为 DSL |
 | V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
@@ -1168,6 +1168,8 @@ venv/bin/python -m pytest tests/ -q
 - A股/CNY 和美股/USD 必须分批，禁止默认 FX=1、跨币种相关性或跨市场资金共用；相关性只使用 cutoff 前完成日K，样本不足保持缺失并降级，不能填 0。
 - 当前实现只授权 V2-8；不实现 V2-9 学习、LLM、UI/报告、券商自动下单或无 Level2 的成交保证。
 
-## 16. 当前实施点：V2-8 设计冻结，待实现
+## 16. 当前实施点：V2-8 已完成并复审
 
-V2-7 已按 [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) 完成并复审。V2-8 已按 [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) 冻结精确设计；Terra 当前只实现该规范列出的合同、组合快照、排序与 allocator、订单装配、repository/migration 12 和 PO00-PO49。完成专项、V2 全量和项目全量测试并更新阶段状态后停止，不得提前进入 V2-9 学习、LLM 或 UI。
+V2-8 已按 [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) 完成并复审：组合合同、冻结批次、组合风险快照、点时相关性、结构化排序、保护退出优先、双 profile 分配、共享退出、替换研究候选、V2-7 订单装配及 repository/migration 12 均已落地。复审修正了真实持仓 Decimal 精确比较、空/零权益/缺估值降级、相关邻域重复覆盖、退出回笼重复累计、替换候选资格、子记录原子回滚/强类型恢复和相关性查询性能。
+
+PO00-PO49 已逐号映射为 50 个独立验收测试；V2-8 专项 `53 passed`，V2 全量 `442 passed, 3 skipped`（共 445 项），项目全量 `702 passed, 3 skipped`。默认关闭的 3 条真实 Provider 冒烟使用本地 V1 测试配置桥接显式启用后 `3 passed in 24.16s`。100 只股票、800 个真实上游 candidate 的双 profile 组合决策本机约 `0.05s`。当前停止于 V2-8，V2-9 学习层需单独设计冻结后再实现。

@@ -1,6 +1,6 @@
 # TradeHelper V2-8 组合决策层精确设计
 
-> 状态：设计冻结，待实现。本文是 V2-8 的规范性合同。实现必须建立在已完成并复审的 [V2_6_RISK.md](./V2_6_RISK.md) 与 [V2_7_EXECUTION.md](./V2_7_EXECUTION.md) 之上；不得修改单股预测、情景、TradePlan 或 ExecutionDecision 的业务结论，也不得提前实现 V2-9 学习、V2-10 LLM、V2-11 UI/报告或券商自动下单。
+> 状态：已实现并复审（2026-07-16）。本文是 V2-8 的规范性合同。实现建立在已完成并复审的 [V2_6_RISK.md](./V2_6_RISK.md) 与 [V2_7_EXECUTION.md](./V2_7_EXECUTION.md) 之上；不修改单股预测、情景、TradePlan 或 ExecutionDecision 的业务结论，也不包含 V2-9 学习、V2-10 LLM、V2-11 UI/报告或券商自动下单。
 
 ## 1. 阶段目标
 

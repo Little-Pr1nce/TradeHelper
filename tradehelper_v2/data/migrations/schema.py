@@ -518,6 +518,43 @@ CREATE TABLE IF NOT EXISTS fill_evidence (
 CREATE INDEX IF NOT EXISTS idx_v2_fill_evidence_run ON fill_evidence(run_id);
 """.strip()
 
+_SCHEMA_V12_SQL = """
+CREATE TABLE IF NOT EXISTS portfolio_input_batches (
+    batch_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, market TEXT NOT NULL, currency TEXT NOT NULL,
+    mode TEXT NOT NULL, account_hash TEXT NOT NULL, valuation_id TEXT NOT NULL, as_of TEXT NOT NULL,
+    policy_version TEXT NOT NULL, payload_json TEXT NOT NULL, generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_v2_portfolio_batches_lookup ON portfolio_input_batches(market, valuation_id, as_of);
+CREATE TABLE IF NOT EXISTS portfolio_decision_bundles (
+    portfolio_bundle_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, batch_id TEXT NOT NULL, market TEXT NOT NULL,
+    account_hash TEXT NOT NULL, valuation_id TEXT NOT NULL, policy_version TEXT NOT NULL,
+    payload_json TEXT NOT NULL, generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL,
+    FOREIGN KEY(batch_id) REFERENCES portfolio_input_batches(batch_id)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_portfolio_bundles_lookup ON portfolio_decision_bundles(batch_id, market);
+CREATE TABLE IF NOT EXISTS portfolio_allocations (
+    allocation_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, portfolio_bundle_id TEXT NOT NULL, batch_id TEXT NOT NULL,
+    profile TEXT NOT NULL, instrument_key TEXT NOT NULL, decision_id TEXT NOT NULL, action TEXT NOT NULL, status TEXT NOT NULL,
+    final_requested_shares TEXT NOT NULL, payload_json TEXT NOT NULL, generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL,
+    FOREIGN KEY(portfolio_bundle_id) REFERENCES portfolio_decision_bundles(portfolio_bundle_id)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_portfolio_allocations_lookup ON portfolio_allocations(portfolio_bundle_id, profile, instrument_key);
+CREATE TABLE IF NOT EXISTS portfolio_reservation_groups (
+    group_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, portfolio_bundle_id TEXT NOT NULL, profile TEXT NOT NULL,
+    instrument_key TEXT NOT NULL, side TEXT NOT NULL, max_aggregate_shares TEXT NOT NULL,
+    payload_json TEXT NOT NULL, generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL,
+    FOREIGN KEY(portfolio_bundle_id) REFERENCES portfolio_decision_bundles(portfolio_bundle_id)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_portfolio_groups_lookup ON portfolio_reservation_groups(portfolio_bundle_id, profile, instrument_key);
+CREATE TABLE IF NOT EXISTS portfolio_replacement_candidates (
+    replacement_id TEXT PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, portfolio_bundle_id TEXT NOT NULL, profile TEXT NOT NULL,
+    source_instrument_key TEXT NOT NULL, target_instrument_key TEXT NOT NULL, status TEXT NOT NULL,
+    payload_json TEXT NOT NULL, generated_at TEXT NOT NULL, schema_version INTEGER NOT NULL,
+    FOREIGN KEY(portfolio_bundle_id) REFERENCES portfolio_decision_bundles(portfolio_bundle_id)
+);
+CREATE INDEX IF NOT EXISTS idx_v2_portfolio_replacements_lookup ON portfolio_replacement_candidates(portfolio_bundle_id, profile);
+""".strip()
+
 
 def schema_checksum() -> str:
     return sha256(_SCHEMA_SQL.encode("utf-8")).hexdigest()
@@ -553,6 +590,8 @@ def schema_v10_checksum() -> str:
     return sha256(_SCHEMA_V10_SQL.encode("utf-8")).hexdigest()
 def schema_v11_checksum() -> str:
     return sha256(_SCHEMA_V11_SQL.encode("utf-8")).hexdigest()
+def schema_v12_checksum() -> str:
+    return sha256(_SCHEMA_V12_SQL.encode("utf-8")).hexdigest()
 
 
 def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, checksum: str) -> None:
@@ -590,4 +629,5 @@ def apply_schema(connection: sqlite3.Connection) -> None:
     _apply_migration(connection, 9, _SCHEMA_V9_SQL, schema_v9_checksum())
     _apply_migration(connection, 10, _SCHEMA_V10_SQL, schema_v10_checksum())
     _apply_migration(connection, 11, _SCHEMA_V11_SQL, schema_v11_checksum())
+    _apply_migration(connection, 12, _SCHEMA_V12_SQL, schema_v12_checksum())
     connection.commit()

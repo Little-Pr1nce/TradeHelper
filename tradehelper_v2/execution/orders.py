@@ -41,7 +41,9 @@ class OrderIntentFactory:
             build_id = stable_hash({"decision_id": decision.decision_id, "plan_id": plan.plan_id, "status": IntentBuildStatus.NO_ORDER, "intent_id": None, "reasons": (no_order_reason,)})
             return None, OrderIntentBuildRecord(build_id, decision.decision_id, plan.plan_id, IntentBuildStatus.NO_ORDER, None, (no_order_reason,), request.requested_at)
         lot = self._lot(plan)
-        requested = (request.requested_shares / lot).to_integral_value(rounding=ROUND_DOWN) * lot
+        # A 股全量 SELL 必须保留零股尾数；买入、加仓和部分减仓仍严格整手。
+        full_a_exit = plan.instrument.market is Market.A and plan.action is PlanAction.SELL and request.requested_shares == decision.approved_shares
+        requested = request.requested_shares if full_a_exit else (request.requested_shares / lot).to_integral_value(rounding=ROUND_DOWN) * lot
         if requested <= 0:
             build_id = stable_hash({"decision_id": decision.decision_id, "plan_id": plan.plan_id, "status": IntentBuildStatus.NO_ORDER, "intent_id": None, "reasons": ("EXEC_NO_APPROVED_SHARES",)})
             return None, OrderIntentBuildRecord(build_id, decision.decision_id, plan.plan_id, IntentBuildStatus.NO_ORDER, None, ("EXEC_NO_APPROVED_SHARES",), request.requested_at)
@@ -74,7 +76,14 @@ class OrderIntentFactory:
         for decision in decisions:
             plan = plans_by_id.get(decision.plan_id)
             if plan is None: raise ContractViolation("missing trade plan for risk decision")
-            intent, record = self.build(OrderIntentRequest(plan, decision, risk_decision_bundle, requested_shares_by_decision_id.get(decision.decision_id), requested_at, execution_policy), decision_mode=decision_mode)
+            requested = requested_shares_by_decision_id.get(decision.decision_id)
+            # 组合层必须显式传 0，禁止回退成单票 approved_shares。
+            if requested == 0:
+                reason = "EXEC_PORTFOLIO_NOT_ALLOCATED" if decision.approved_shares > 0 else "EXEC_NO_APPROVED_SHARES"
+                build_id = stable_hash({"decision_id": decision.decision_id, "plan_id": plan.plan_id, "status": IntentBuildStatus.NO_ORDER, "intent_id": None, "reasons": (reason,)})
+                intent, record = None, OrderIntentBuildRecord(build_id, decision.decision_id, plan.plan_id, IntentBuildStatus.NO_ORDER, None, (reason,), requested_at)
+            else:
+                intent, record = self.build(OrderIntentRequest(plan, decision, risk_decision_bundle, requested, requested_at, execution_policy), decision_mode=decision_mode)
             records.append(record)
             if intent: intents.append(intent)
         bundle_id = stable_hash({"risk_bundle_id": risk_decision_bundle.risk_bundle_id, "records": tuple(sorted(records, key=lambda item: item.decision_id)), "intent_ids": tuple(sorted(item.intent_id for item in intents))})

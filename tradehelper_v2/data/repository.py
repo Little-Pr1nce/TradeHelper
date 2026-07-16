@@ -62,8 +62,9 @@ from tradehelper_v2.contracts.forecast import (
 )
 from tradehelper_v2.contracts.scenario import (BandSignal, CurrentOverlay, CurrentPriceState, DecisionSession, EntryPosture, ExitPosture, ForecastEvidenceGrade, ForecastSupportLevel, HorizonAlignment, HorizonAssessment, HorizonSignal, NewsDeltaState, PriceLocation, ScenarioBias, ScenarioState, ScenarioStatus, StrategyFamily, TradingScenario, VolatilityShock)
 from tradehelper_v2.contracts.strategy import (ConditionEvaluation, ConditionExpression, ConditionOperand, ConditionOperator, ConditionResult, DerivedPriceLevel, EvidenceRequirement, ObservedValue, OperandKind, PlanAction, PlanProfile, PlanReadiness, PositionState, QuantityIntent, StopMode, StopSpec, StrategyBranch, StrategyBundle, TakeProfitMode, TakeProfitSpec, TradePlan)
-from tradehelper_v2.contracts.risk import (ConstraintResult, DecisionDisposition, EvidenceStatus, ExecutionDecision, ExecutionLevel, FrozenAccountValuation, MarketEligibility, PositionValuation, RiskAdjustment, RiskConstraintKind, RiskDecisionBundle, RiskProfile, ValuationStatus)
+from tradehelper_v2.contracts.risk import (ConstraintResult, DecisionDisposition, EvidenceStatus, ExecutionDecision, ExecutionLevel, FrozenAccountValuation, InstrumentClassification, MarketEligibility, MarketRuleSet, PlanEvidenceSnapshot, PositionValuation, RiskAdjustment, RiskConstraintKind, RiskDecisionBundle, RiskPolicy, RiskProfile, ValuationStatus)
 from tradehelper_v2.contracts.execution import (ExecutionEvidenceGrade, ExecutionMode, ExecutionRun, ExecutionStateDelta, EventGranularity, FillEvidence, FillOutcome, IntentBuildStatus, IntentState, OrderIntent, OrderIntentBuildRecord, OrderSide, OrderStyle, PathAssumption, TriggerEvaluation, TriggerState)
+from tradehelper_v2.contracts.portfolio import (AllocationStatus, CorrelationPair, CorrelationStatus, HoldingRiskSnapshot, HoldingRiskStatus, InstrumentReturnRisk, PortfolioAllocation, PortfolioCandidate, PortfolioCorrelationSnapshot, PortfolioDecisionBundle, PortfolioEvidenceGrade, PortfolioHeatStatus, PortfolioInputBatch, PortfolioPolicy, PortfolioProfileDecision, PortfolioReservationGroup, PortfolioReservationSnapshot, PortfolioRiskSnapshot, PortfolioRole, ReplacementCandidate, ReplacementStatus)
 from .migrations.schema import apply_schema
 
 
@@ -1028,6 +1029,183 @@ class SQLiteRepository:
                 if isinstance(item, ExecutionRun): self.save_execution_run(item)
                 else: self.save_fill_evidence(item)
             return ForecastWriteResult(0,0,1), tuple(ForecastWriteResult(0,0,1) for _ in fills)
+
+    def _save_portfolio_record(self, *, table: str, id_column: str, record, event_key: str, columns: tuple[str, ...], values: tuple[object, ...], record_type: str, instrument_key: str | None, connection: sqlite3.Connection | None = None) -> ForecastWriteResult:
+        """V2-8 的通用幂等/隔离写入；generated_at 不影响业务等价性。"""
+        if connection is None:
+            with self._transaction() as active:
+                return self._save_portfolio_record(table=table, id_column=id_column, record=record, event_key=event_key, columns=columns, values=values, record_type=record_type, instrument_key=instrument_key, connection=active)
+        payload = json.loads(canonical_json(record))
+        row = connection.execute(f"SELECT payload_json FROM {table} WHERE {id_column}=? OR event_key=?", (getattr(record, id_column), event_key)).fetchone()
+        if row:
+            if stable_hash(_without_generated_at(json.loads(row["payload_json"]))) == stable_hash(_without_generated_at(payload)):
+                return ForecastWriteResult(0, 1, 0)
+            connection.execute("INSERT INTO quarantine_records(record_type,instrument_key,trading_date,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)", (record_type, instrument_key, None, "CONFLICTING_PORTFOLIO_RECORD", canonical_json(record), utc_iso(datetime.now(timezone.utc))))
+            return ForecastWriteResult(0, 0, 1)
+        placeholders = ",".join("?" for _ in columns)
+        connection.execute(f"INSERT INTO {table}({','.join(columns)}) VALUES ({placeholders})", values + (canonical_json(record), utc_iso(record.generated_at), getattr(record, "schema_version", 1)))
+        return ForecastWriteResult(1, 0, 0)
+
+    def save_portfolio_input_batch(self, batch: PortfolioInputBatch) -> ForecastWriteResult:
+        return self._save_portfolio_record(table="portfolio_input_batches", id_column="batch_id", record=batch, event_key=batch.batch_id,
+            columns=("batch_id","event_key","market","currency","mode","account_hash","valuation_id","as_of","policy_version","payload_json","generated_at","schema_version"),
+            values=(batch.batch_id,batch.batch_id,batch.market.value,batch.currency,batch.mode.value,stable_hash(batch.account_snapshot),batch.valuation.valuation_id,utc_iso(batch.as_of),batch.portfolio_policy.policy_version), record_type="portfolio_batch_conflict", instrument_key=None)
+
+    def _save_portfolio_bundle(self, bundle: PortfolioDecisionBundle, *, connection: sqlite3.Connection | None = None) -> ForecastWriteResult:
+        return self._save_portfolio_record(table="portfolio_decision_bundles", id_column="portfolio_bundle_id", record=bundle, event_key=bundle.portfolio_bundle_id,
+            columns=("portfolio_bundle_id","event_key","batch_id","market","account_hash","valuation_id","policy_version","payload_json","generated_at","schema_version"),
+            values=(bundle.portfolio_bundle_id,bundle.portfolio_bundle_id,bundle.batch_id,bundle.market.value,bundle.account_hash,bundle.valuation_id,bundle.portfolio_policy_version), record_type="portfolio_bundle_conflict", instrument_key=None, connection=connection)
+
+    def save_portfolio_result(self, batch: PortfolioInputBatch, bundle: PortfolioDecisionBundle) -> tuple[ForecastWriteResult, ForecastWriteResult]:
+        """一次事务保存批次与完整 bundle；子集合不完整时不留下半条数据。"""
+        if (bundle.batch_id != batch.batch_id or bundle.market is not batch.market
+                or bundle.valuation_id != batch.valuation.valuation_id
+                or bundle.account_hash != batch.valuation.account_hash
+                or bundle.account_hash != stable_hash(batch.account_snapshot)
+                or bundle.portfolio_policy_version != batch.portfolio_policy.policy_version):
+            raise ContractViolation("portfolio batch and bundle mismatch")
+        records = [item for profile in (bundle.conservative, bundle.aggressive) for item in profile.allocations]
+        groups = [item for profile in (bundle.conservative, bundle.aggressive) for item in profile.reservation_groups]
+        replacements = [item for profile in (bundle.conservative, bundle.aggressive) for item in profile.replacement_candidates]
+        if (len({item.allocation_id for item in records}) != len(records)
+                or len({item.group_id for item in groups}) != len(groups)
+                or len({item.replacement_id for item in replacements}) != len(replacements)):
+            raise ContractViolation("portfolio child ids are not unique")
+
+        batch_spec = dict(table="portfolio_input_batches", id_column="batch_id", record=batch,
+            event_key=batch.batch_id,
+            columns=("batch_id","event_key","market","currency","mode","account_hash","valuation_id","as_of","policy_version","payload_json","generated_at","schema_version"),
+            values=(batch.batch_id,batch.batch_id,batch.market.value,batch.currency,batch.mode.value,stable_hash(batch.account_snapshot),batch.valuation.valuation_id,utc_iso(batch.as_of),batch.portfolio_policy.policy_version),
+            record_type="portfolio_batch_conflict", instrument_key=None)
+        bundle_spec = dict(table="portfolio_decision_bundles", id_column="portfolio_bundle_id", record=bundle,
+            event_key=bundle.portfolio_bundle_id,
+            columns=("portfolio_bundle_id","event_key","batch_id","market","account_hash","valuation_id","policy_version","payload_json","generated_at","schema_version"),
+            values=(bundle.portfolio_bundle_id,bundle.portfolio_bundle_id,bundle.batch_id,bundle.market.value,bundle.account_hash,bundle.valuation_id,bundle.portfolio_policy_version),
+            record_type="portfolio_bundle_conflict", instrument_key=None)
+        child_specs = []
+        for item in records:
+            child_specs.append(dict(table="portfolio_allocations",id_column="allocation_id",record=item,event_key=item.allocation_id,
+                columns=("allocation_id","event_key","portfolio_bundle_id","batch_id","profile","instrument_key","decision_id","action","status","final_requested_shares","payload_json","generated_at","schema_version"),
+                values=(item.allocation_id,item.allocation_id,bundle.portfolio_bundle_id,item.batch_id,item.profile.value,item.instrument.stable_key,item.decision_id,item.action.value,item.status.value,str(item.final_requested_shares)),record_type="portfolio_allocation_conflict",instrument_key=item.instrument.stable_key))
+        for item in groups:
+            child_specs.append(dict(table="portfolio_reservation_groups",id_column="group_id",record=item,event_key=item.group_id,
+                columns=("group_id","event_key","portfolio_bundle_id","profile","instrument_key","side","max_aggregate_shares","payload_json","generated_at","schema_version"),
+                values=(item.group_id,item.group_id,bundle.portfolio_bundle_id,item.profile.value,item.instrument.stable_key,item.side,str(item.max_aggregate_shares)),record_type="portfolio_group_conflict",instrument_key=item.instrument.stable_key))
+        for item in replacements:
+            child_specs.append(dict(table="portfolio_replacement_candidates",id_column="replacement_id",record=item,event_key=item.replacement_id,
+                columns=("replacement_id","event_key","portfolio_bundle_id","profile","source_instrument_key","target_instrument_key","status","payload_json","generated_at","schema_version"),
+                values=(item.replacement_id,item.replacement_id,bundle.portfolio_bundle_id,item.profile.value,item.source_instrument.stable_key,item.target_instrument.stable_key,item.status.value),record_type="portfolio_replacement_conflict",instrument_key=item.target_instrument.stable_key))
+        try:
+            with self._transaction() as connection:
+                batch_result = self._save_portfolio_record(**batch_spec, connection=connection)
+                bundle_result = self._save_portfolio_record(**bundle_spec, connection=connection)
+                child_results = [self._save_portfolio_record(**spec, connection=connection) for spec in child_specs]
+                conflict_specs = tuple(spec for spec, result in zip(
+                    (batch_spec, bundle_spec, *child_specs),
+                    (batch_result, bundle_result, *child_results),
+                ) if result.conflicts)
+                if conflict_specs:
+                    raise _ExecutionBatchConflict(conflict_specs)
+                return batch_result, bundle_result
+        except _ExecutionBatchConflict as conflict:
+            # 主事务已回滚；只重放真正冲突的记录以写入 quarantine。
+            for spec in conflict.records:
+                self._save_portfolio_record(**spec)
+            return ForecastWriteResult(0,0,1), ForecastWriteResult(0,0,1)
+
+    @staticmethod
+    def _portfolio_instrument(payload: dict) -> InstrumentId:
+        return InstrumentId(payload["code"], Market(payload["market"]), Exchange(payload["exchange"]))
+
+    @classmethod
+    def _portfolio_candidate_from_payload(cls, payload: dict) -> PortfolioCandidate:
+        rule = payload["market_rules"]
+        market_rules = MarketRuleSet(rule["rule_version"], Market(rule["market"]), Exchange(rule["exchange"]), Decimal(rule["lot_size"]), bool(rule["same_day_sell_restricted"]), Decimal(rule["commission_rate"]), Decimal(rule["minimum_commission"]), Decimal(rule["sell_tax_rate"]), Decimal(rule["base_slippage_reserve"]), rule["price_limit_pct"], InstrumentClassification(rule["instrument_classification"]), rule["source"], _parse_datetime(rule["effective_from"]), _parse_datetime(rule["effective_to"]) if rule["effective_to"] else None)
+        evidence_raw = payload["plan_evidence"]
+        evidence = None if evidence_raw is None else PlanEvidenceSnapshot(evidence_raw["evidence_id"], cls._portfolio_instrument(evidence_raw["instrument"]), evidence_raw["strategy_id"], evidence_raw["strategy_version"], evidence_raw["parameter_hash"], RiskProfile(evidence_raw["profile"]) if evidence_raw["profile"] else None, int(evidence_raw["sample_count"]), int(evidence_raw["oof_sample_count"]), evidence_raw["expected_net_return"], evidence_raw["confidence_low"], evidence_raw["confidence_high"], evidence_raw["win_rate"], evidence_raw["max_adverse_excursion"], EvidenceStatus(evidence_raw["status"]), evidence_raw["source_ledger_version"], _parse_datetime(evidence_raw["data_cutoff_at"]), _parse_datetime(evidence_raw["evaluated_at"]), _parse_datetime(evidence_raw["generated_at"]))
+        return PortfolioCandidate(payload["candidate_id"], PortfolioRole(payload["role"]), cls._scenario_from_payload(payload["trading_scenario"]), cls._plan_from_payload(payload["trade_plan"]), cls._decision_from_payload(payload["execution_decision"]), evidence, market_rules, _parse_datetime(payload["generated_at"]), int(payload.get("schema_version", 1)))
+
+    @classmethod
+    def _portfolio_batch_from_payload(cls, payload: dict) -> PortfolioInputBatch:
+        account_raw = payload["account_snapshot"]
+        account = AccountSnapshot(Market(account_raw["market"]), account_raw["currency"], Decimal(account_raw["cash"]), tuple(PositionSnapshot(cls._portfolio_instrument(item["instrument"]), Decimal(item["shares"]), Decimal(item["cost_price"]), _parse_datetime(item["captured_at"])) for item in account_raw["positions"]), _parse_datetime(account_raw["captured_at"]), int(account_raw.get("schema_version", 1)))
+        policy_raw = payload["risk_policy"]
+        risk_policy = RiskPolicy(**{key: Decimal(value) if key.endswith(("_pct", "_cap", "_multiplier", "_fraction")) else value for key, value in policy_raw.items()})
+        pp = payload["portfolio_policy"]
+        portfolio_policy = PortfolioPolicy(**{key: Decimal(value) if key in {"conservative_heat_cap","aggressive_heat_cap","absolute_heat_hard_cap","high_correlation_threshold","high_correlation_group_cap","hhi_warning","unknown_correlation_multiplier"} else value for key,value in pp.items()})
+        risks = tuple(HoldingRiskSnapshot(item["holding_risk_id"], cls._portfolio_instrument(item["instrument"]), Decimal(item["shares"]), Decimal(item["reference_price"]) if item["reference_price"] is not None else None, Decimal(item["market_value"]) if item["market_value"] is not None else None, Decimal(item["stop_price"]) if item["stop_price"] is not None else None, Decimal(item["exit_friction_reserve"]), Decimal(item["planned_loss_amount"]) if item["planned_loss_amount"] is not None else None, HoldingRiskStatus(item["status"]), item["source_plan_id"], item["source_decision_id"], _parse_datetime(item["captured_at"]), _parse_datetime(item["generated_at"]), int(item.get("schema_version", 1))) for item in payload["holding_risks"])
+        corr = payload["correlation_snapshot"]
+        correlation = PortfolioCorrelationSnapshot(corr["correlation_snapshot_id"], Market(corr["market"]), tuple(cls._portfolio_instrument(item) for item in corr["universe"]), tuple(InstrumentReturnRisk(cls._portfolio_instrument(item["instrument"]), int(item["sample_count"]), date.fromisoformat(item["start_session_date"]) if item["start_session_date"] else None, date.fromisoformat(item["end_session_date"]) if item["end_session_date"] else None, Decimal(item["annualized_volatility"]) if item["annualized_volatility"] is not None else None, item["adjustment_mode"], item["source_bar_hash"]) for item in corr["instrument_risks"]), tuple(CorrelationPair(cls._portfolio_instrument(item["left"]), cls._portfolio_instrument(item["right"]), Decimal(item["coefficient"]) if item["coefficient"] is not None else None, int(item["overlapping_samples"]), CorrelationStatus(item["status"])) for item in corr["pairs"]), int(corr["lookback_sessions"]), int(corr["minimum_samples"]), corr["return_method"], int(corr["annualization_sessions"]), _parse_datetime(corr["cutoff_at"]), CorrelationStatus(corr["status"]), corr["source_batch_hash"], _parse_datetime(corr["generated_at"]))
+        return PortfolioInputBatch(payload["batch_id"], Market(payload["market"]), payload["currency"], DecisionMode(payload["mode"]), account, cls._valuation_from_payload(payload["valuation"]), risk_policy, portfolio_policy, tuple(cls._risk_bundle_from_payload(item) for item in payload["risk_bundles"]), tuple(cls._portfolio_candidate_from_payload(item) for item in payload["candidates"]), tuple(cls._portfolio_instrument(item) for item in payload["watchlist"]), risks, correlation, _parse_datetime(payload["as_of"]), _parse_datetime(payload["generated_at"]), int(payload.get("schema_version", 1)))
+
+    def get_portfolio_input_batch(self, batch_id: str) -> PortfolioInputBatch | None:
+        row = self._fetchone("SELECT * FROM portfolio_input_batches WHERE batch_id=?", (batch_id,))
+        if row is None: return None
+        value = self._portfolio_batch_from_payload(json.loads(row["payload_json"]))
+        expected = {"event_key": value.batch_id, "market": value.market.value, "currency": value.currency, "mode": value.mode.value, "account_hash": stable_hash(value.account_snapshot), "valuation_id": value.valuation.valuation_id, "as_of": utc_iso(value.as_of), "policy_version": value.portfolio_policy.policy_version, "generated_at": utc_iso(value.generated_at), "schema_version": value.schema_version}
+        if any(row[key] != item for key,item in expected.items()): raise ContractViolation("stored portfolio batch columns do not match payload")
+        return value
+
+    def list_portfolio_input_batches(self, market: Market) -> tuple[PortfolioInputBatch, ...]:
+        return tuple(self.get_portfolio_input_batch(row["batch_id"]) for row in self._fetchall("SELECT batch_id FROM portfolio_input_batches WHERE market=? ORDER BY as_of,batch_id", (market.value,)))
+
+    @classmethod
+    def _portfolio_allocation_from_payload(cls, item: dict) -> PortfolioAllocation:
+        money = lambda key: Decimal(item[key]) if item[key] is not None else None
+        return PortfolioAllocation(item["allocation_id"], item["batch_id"], RiskProfile(item["profile"]), item["candidate_id"], cls._portfolio_instrument(item["instrument"]), item["plan_id"], item["decision_id"], PlanAction(item["action"]), item["level"], AllocationStatus(item["status"]), item["rank"], tuple(tuple(value) for value in item["rank_components"]), Decimal(item["approved_shares"]), Decimal(item["final_requested_shares"]), money("current_position_value"), money("reference_entry_price"), Decimal(item["reserved_cash"]), Decimal(item["reserved_incremental_loss"]), money("estimated_position_pct"), item["reservation_group_id"], tuple(item["binding_constraints"]), tuple(item["reason_codes"]), _parse_datetime(item["generated_at"]))
+
+    @classmethod
+    def _portfolio_risk_snapshot_from_payload(cls, item: dict) -> PortfolioRiskSnapshot:
+        money = lambda key: Decimal(item[key]) if item[key] is not None else None
+        pairs = tuple(CorrelationPair(cls._portfolio_instrument(pair["left"]), cls._portfolio_instrument(pair["right"]), Decimal(pair["coefficient"]) if pair["coefficient"] is not None else None, int(pair["overlapping_samples"]), CorrelationStatus(pair["status"])) for pair in item["high_correlation_pairs"])
+        return PortfolioRiskSnapshot(item["risk_snapshot_id"], Market(item["market"]), item["valuation_id"], Decimal(item["equity"]), Decimal(item["cash"]), Decimal(item["invested_value"]), Decimal(item["invested_pct"]), tuple((cls._portfolio_instrument(pair[0]), Decimal(pair[1])) for pair in item["weights_by_instrument"]), cls._portfolio_instrument(item["max_position_instrument"]) if item["max_position_instrument"] else None, Decimal(item["max_position_pct"]), Decimal(item["hhi"]), money("portfolio_annualized_volatility"), money("planned_loss_amount"), money("planned_loss_pct"), pairs, PortfolioHeatStatus(item["heat_status"]), PortfolioEvidenceGrade(item["evidence_grade"]), tuple(item["reason_codes"]), _parse_datetime(item["calculated_at"]))
+
+    @classmethod
+    def _portfolio_profile_from_payload(cls, item: dict) -> PortfolioProfileDecision:
+        groups = tuple(PortfolioReservationGroup(group["group_id"], group["batch_id"], RiskProfile(group["profile"]), cls._portfolio_instrument(group["instrument"]), group["side"], tuple(group["member_allocation_ids"]), Decimal(group["max_aggregate_shares"]), group["consumption_policy"], tuple(group["reason_codes"]), _parse_datetime(group["generated_at"]), int(group.get("schema_version", 1))) for group in item["reservation_groups"])
+        allocations = tuple(cls._portfolio_allocation_from_payload(value) for value in item["allocations"])
+        reservation = item["reservation_snapshot"]
+        snapshot = PortfolioReservationSnapshot(RiskProfile(reservation["profile"]), Decimal(reservation["frozen_equity"]), Decimal(reservation["frozen_cash"]), Decimal(reservation["deployable_cash"]), Decimal(reservation["reserved_entry_cash"]), Decimal(reservation["remaining_cash"]), Decimal(reservation["reserved_entry_notional"]), Decimal(reservation["projected_invested_pct_at_reference_price"]), Decimal(reservation["current_planned_loss"]) if reservation["current_planned_loss"] is not None else None, Decimal(reservation["reserved_incremental_loss"]), Decimal(reservation["projected_heat_pct"]) if reservation["projected_heat_pct"] is not None else None, Decimal(reservation["exit_release_estimate"]), PortfolioEvidenceGrade(reservation["evidence_grade"]), tuple(reservation["reason_codes"]))
+        replacements = tuple(ReplacementCandidate(value["replacement_id"], RiskProfile(value["profile"]), cls._portfolio_instrument(value["source_instrument"]), value["source_exit_allocation_id"], cls._portfolio_instrument(value["target_instrument"]), value["target_entry_allocation_id"], ReplacementStatus(value["status"]), tuple(value["source_exit_reason_codes"]), tuple(tuple(pair) for pair in value["target_rank_components"]), Decimal(value["estimated_release_amount"]), Decimal(value["target_required_cash"]), Decimal(value["funding_shortfall_after_current_cash"]), bool(value["reanalysis_required"]), tuple(value["reason_codes"]), _parse_datetime(value["generated_at"]), int(value.get("schema_version", 1))) for value in item["replacement_candidates"])
+        return PortfolioProfileDecision(item["profile_decision_id"], item["batch_id"], RiskProfile(item["profile"]), allocations, groups, tuple(item["holding_priority_allocation_ids"]), tuple(item["entry_priority_allocation_ids"]), tuple(item["blocked_allocation_ids"]), cls._portfolio_risk_snapshot_from_payload(item["current_risk_snapshot"]), snapshot, replacements, PortfolioEvidenceGrade(item["evidence_grade"]), tuple(item["reason_codes"]), _parse_datetime(item["generated_at"]))
+
+    @classmethod
+    def _portfolio_bundle_from_payload(cls, item: dict) -> PortfolioDecisionBundle:
+        return PortfolioDecisionBundle(item["portfolio_bundle_id"], item["batch_id"], Market(item["market"]), item["account_hash"], item["valuation_id"], cls._portfolio_profile_from_payload(item["conservative"]), cls._portfolio_profile_from_payload(item["aggressive"]), item["portfolio_policy_version"], _parse_datetime(item["generated_at"]), int(item.get("schema_version", 1)))
+
+    def get_portfolio_decision_bundle(self, portfolio_bundle_id: str) -> PortfolioDecisionBundle | None:
+        row = self._fetchone("SELECT * FROM portfolio_decision_bundles WHERE portfolio_bundle_id=?", (portfolio_bundle_id,))
+        if row is None: return None
+        value = self._portfolio_bundle_from_payload(json.loads(row["payload_json"]))
+        expected = {"event_key": value.portfolio_bundle_id, "batch_id": value.batch_id, "market": value.market.value, "account_hash": value.account_hash, "valuation_id": value.valuation_id, "policy_version": value.portfolio_policy_version, "generated_at": utc_iso(value.generated_at), "schema_version": value.schema_version}
+        if any(row[key] != item for key,item in expected.items()): raise ContractViolation("stored portfolio bundle columns do not match payload")
+        # 子表既是查询索引也是防损坏的双向集合校验。
+        allocation_rows = self._fetchall("SELECT * FROM portfolio_allocations WHERE portfolio_bundle_id=?", (portfolio_bundle_id,))
+        group_rows = self._fetchall("SELECT * FROM portfolio_reservation_groups WHERE portfolio_bundle_id=?", (portfolio_bundle_id,))
+        replacement_rows = self._fetchall("SELECT * FROM portfolio_replacement_candidates WHERE portfolio_bundle_id=?", (portfolio_bundle_id,))
+        expected_allocations = {item.allocation_id:item for profile in (value.conservative,value.aggressive) for item in profile.allocations}
+        expected_groups = {item.group_id:item for profile in (value.conservative,value.aggressive) for item in profile.reservation_groups}
+        expected_replacements = {item.replacement_id:item for profile in (value.conservative,value.aggressive) for item in profile.replacement_candidates}
+        if ({row["allocation_id"] for row in allocation_rows} != set(expected_allocations)
+                or {row["group_id"] for row in group_rows} != set(expected_groups)
+                or {row["replacement_id"] for row in replacement_rows} != set(expected_replacements)):
+            raise ContractViolation("stored portfolio child collections are inconsistent")
+        for child_row in allocation_rows:
+            child=self._portfolio_allocation_from_payload(json.loads(child_row["payload_json"])); expected_child=expected_allocations[child_row["allocation_id"]]
+            expected_columns={"event_key":child.allocation_id,"portfolio_bundle_id":portfolio_bundle_id,"batch_id":child.batch_id,"profile":child.profile.value,"instrument_key":child.instrument.stable_key,"decision_id":child.decision_id,"action":child.action.value,"status":child.status.value,"final_requested_shares":str(child.final_requested_shares),"generated_at":utc_iso(child.generated_at),"schema_version":1}
+            if child!=expected_child or any(child_row[key]!=item for key,item in expected_columns.items()): raise ContractViolation("stored portfolio allocation does not match bundle")
+        for child_row in group_rows:
+            child_payload=json.loads(child_row["payload_json"]); child=PortfolioReservationGroup(child_payload["group_id"],child_payload["batch_id"],RiskProfile(child_payload["profile"]),self._portfolio_instrument(child_payload["instrument"]),child_payload["side"],tuple(child_payload["member_allocation_ids"]),Decimal(child_payload["max_aggregate_shares"]),child_payload["consumption_policy"],tuple(child_payload["reason_codes"]),_parse_datetime(child_payload["generated_at"]),int(child_payload.get("schema_version",1))); expected_child=expected_groups[child_row["group_id"]]
+            expected_columns={"event_key":child.group_id,"portfolio_bundle_id":portfolio_bundle_id,"profile":child.profile.value,"instrument_key":child.instrument.stable_key,"side":child.side,"max_aggregate_shares":str(child.max_aggregate_shares),"generated_at":utc_iso(child.generated_at),"schema_version":child.schema_version}
+            if child!=expected_child or any(child_row[key]!=item for key,item in expected_columns.items()): raise ContractViolation("stored portfolio reservation group does not match bundle")
+        for child_row in replacement_rows:
+            child_payload=json.loads(child_row["payload_json"]); child=ReplacementCandidate(child_payload["replacement_id"],RiskProfile(child_payload["profile"]),self._portfolio_instrument(child_payload["source_instrument"]),child_payload["source_exit_allocation_id"],self._portfolio_instrument(child_payload["target_instrument"]),child_payload["target_entry_allocation_id"],ReplacementStatus(child_payload["status"]),tuple(child_payload["source_exit_reason_codes"]),tuple(tuple(pair) for pair in child_payload["target_rank_components"]),Decimal(child_payload["estimated_release_amount"]),Decimal(child_payload["target_required_cash"]),Decimal(child_payload["funding_shortfall_after_current_cash"]),bool(child_payload["reanalysis_required"]),tuple(child_payload["reason_codes"]),_parse_datetime(child_payload["generated_at"]),int(child_payload.get("schema_version",1))); expected_child=expected_replacements[child_row["replacement_id"]]
+            expected_columns={"event_key":child.replacement_id,"portfolio_bundle_id":portfolio_bundle_id,"profile":child.profile.value,"source_instrument_key":child.source_instrument.stable_key,"target_instrument_key":child.target_instrument.stable_key,"status":child.status.value,"generated_at":utc_iso(child.generated_at),"schema_version":child.schema_version}
+            if child!=expected_child or any(child_row[key]!=item for key,item in expected_columns.items()): raise ContractViolation("stored portfolio replacement does not match bundle")
+        return value
+
+    def list_portfolio_decision_bundles(self, market: Market) -> tuple[PortfolioDecisionBundle, ...]:
+        return tuple(self.get_portfolio_decision_bundle(row["portfolio_bundle_id"]) for row in self._fetchall("SELECT portfolio_bundle_id FROM portfolio_decision_bundles WHERE market=? ORDER BY generated_at,portfolio_bundle_id", (market.value,)))
 
     @staticmethod
     def _execution_expression(payload):

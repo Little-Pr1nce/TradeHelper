@@ -70,14 +70,14 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 |------|---------|---------|-------------|---------|----------|
 | Tab1 单股完整研究 | 单只股票深度分析入口 | `services/analysis_service.py`, `ui/main_page.py` | V2 single-stock use case | 待迁移 | `tests/v2/test_e2e_single_stock.py` |
 | Tab1 三时段模式 | 盘前/盘中/盘后语义不同 | `analysis_service.py`, `core/pipeline.py` | V2 use cases + data session | V2-4逐股会话与情景已迁移；Tab1编排待V2-11/12 | `tests/v2/test_scenario_sessions.py` |
-| Tab3 组合工作台 | 真实持仓决策，不是批量单股 | `services/portfolio_service.py`, `ui/portfolio_page.py` | V2 portfolio use case | V2-8组合决策设计已冻结；UI/端到端留待V2-11/12 | `tests/v2/test_portfolio_allocator.py`, `tests/v2/test_e2e_portfolio.py` |
-| Tab3 三时段模式 | 组合盘前/盘中/盘后使用对应数据和计划有效期 | `portfolio_service.py`, `core/pipeline.py` | `use_cases/portfolio.py`, `portfolio/` | V2-4逐股情景已迁移；V2-8冻结同模式/同as_of组合批次合同 | `tests/v2/test_portfolio_contracts.py`, `tests/v2/test_scenario_degradation.py` |
+| Tab3 组合工作台 | 真实持仓决策，不是批量单股 | `services/portfolio_service.py`, `ui/portfolio_page.py` | V2 portfolio use case | V2-8组合决策已完成并复审；UI/端到端留待V2-11/12 | `tests/v2/test_portfolio_allocator.py`, `tests/v2/test_e2e_portfolio.py` |
+| Tab3 三时段模式 | 组合盘前/盘中/盘后使用对应数据和计划有效期 | `portfolio_service.py`, `core/pipeline.py` | `use_cases/portfolio.py`, `portfolio/` | V2-4逐股情景和 V2-8 同模式/同 as_of 组合批次合同已迁移 | `tests/v2/test_portfolio_contracts.py`, `tests/v2/test_scenario_degradation.py` |
 | Tab3 真实余额/持仓/成本 | 禁止虚构10万本金 | `data/database.py`, `portfolio_service.py` | `contracts/account.py`, `risk/valuation.py`, `risk/sizing.py` | V2-6冻结估值和单计划 sizing 已迁移 | `tests/v2/test_risk_valuation.py` |
 | Tab3 持仓行内编辑 | 用户卖一部分后可直接修改 | `ui/portfolio_page.py` | V2 UI portfolio component | 待迁移 | `tests/v2/test_ui_state_flow.py` |
-| Tab3 组合集中度/风险容量 | 单票集中度、现金和剩余风险 | `portfolio_service.py` | `risk/sizing.py`, `portfolio/allocator.py` | V2-6单计划上限已迁移；V2-8现金/heat/相关性最终分配设计已冻结 | `tests/v2/test_portfolio_allocator.py`, `tests/v2/test_risk_sizing.py` |
-| Tab3 冻结估值 | 同一批现价计算权益、市值和仓位，避免伪 103.6% | `portfolio_service.py` | `risk/valuation.py`, `portfolio/allocator.py` | V2-6账户冻结估值已迁移；V2-8冻结只读消费和 reservation 合同 | `tests/v2/test_portfolio_evidence.py`, `tests/v2/test_risk_valuation.py` |
-| Tab3 跨股票排序与冲突消解 | 先处理风险，再比较关注股替换机会 | `portfolio_service.py` | `portfolio/ranking.py` | V2-8结构化词典序排序和保护退出优先设计已冻结，待实现 | `tests/v2/test_portfolio_ranking.py` |
-| Tab3 关注股替换机会 | 组合视角比较持仓与关注股 | `portfolio_service.py` | `portfolio/replacement.py` | V2-8仅研究候选、独立退出和不复用预计回款合同已冻结，待实现 | `tests/v2/test_portfolio_replacements.py` |
+| Tab3 组合集中度/风险容量 | 单票集中度、现金和剩余风险 | `portfolio_service.py` | `risk/sizing.py`, `portfolio/allocator.py` | V2-6单计划上限与 V2-8 现金/heat/相关性最终分配已迁移并复审 | `tests/v2/test_portfolio_allocator.py`, `tests/v2/test_risk_sizing.py` |
+| Tab3 冻结估值 | 同一批现价计算权益、市值和仓位，避免伪 103.6% | `portfolio_service.py` | `risk/valuation.py`, `portfolio/allocator.py` | V2-6账户冻结估值与 V2-8 只读消费/reservation 合同已迁移并复审 | `tests/v2/test_portfolio_evidence.py`, `tests/v2/test_risk_valuation.py` |
+| Tab3 跨股票排序与冲突消解 | 先处理风险，再比较关注股替换机会 | `portfolio_service.py` | `portfolio/ranking.py` | V2-8结构化字典序排序、保护退出优先和跨股票预算已完成并复审 | `tests/v2/test_portfolio_ranking.py` |
+| Tab3 关注股替换机会 | 组合视角比较持仓与关注股 | `portfolio_service.py` | `portfolio/replacement.py` | V2-8仅研究候选、独立退出和不复用预计回款已完成并复审 | `tests/v2/test_portfolio_replacements.py` |
 | Tab3 历史评估 | 用户看系统能力是否变好 | `ui/portfolio_page.py`, `portfolio_service.py` | `learning/`, V2 UI | 待迁移 | `tests/v2/test_learning_ledgers.py` |
 
 ## P0 特征资产
@@ -100,13 +100,13 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 | StrategyDecision-first | 回测和当前信号同一路径 | `strategies/base.py` | `strategies/engine.py` / `TradePlan` | V2-5已迁移；成交回放待V2-7 | `tests/v2/test_trade_plan_contract.py` |
 | decision_to_orders | 不维护两套买卖逻辑 | `strategies/base.py` | `execution/orders.py` | 待迁移 | `tests/v2/test_order_intent.py` |
 | 完整条件计划集合 | 同时给出当前状态、买/加、卖/减、持有和失效条件 | `conditional_trigger.py`, reports | `StrategyBundle`, `strategies/engine.py` | V2-5四分支已迁移 | `tests/v2/test_trade_plan_contract.py` |
-| 保守/激进风险档案 | 同一事实和触发条件下只调整确认门槛、风险和仓位 | `core/signal_check.py`, reports | `TradePlan.profiles` + V2-6 risk profiles | V2-6风险预算已迁移；组合分配待V2-8 | `tests/v2/test_risk_profiles.py` |
+| 保守/激进风险档案 | 同一事实和触发条件下只调整确认门槛、风险和仓位 | `core/signal_check.py`, reports | `TradePlan.profiles` + V2-6 risk profiles | V2-6 风险预算与 V2-8 双 profile 组合分配已迁移并复审 | `tests/v2/test_risk_profiles.py`, `tests/v2/test_portfolio_allocator.py` |
 | 计划会话与有效期 | 盘前/盘中/盘后计划不会跨会话变成陈旧指令 | `trade_plan_log`, session helpers | `TradePlan.valid_from/expires_at` | V2-5已迁移 | `tests/v2/test_strategy_market_parity.py` |
 | A/B/C/D 执行等级 | 建议可执行性明确 | `core/signal_check.py` | `risk/officer.py` | V2-6决策矩阵已迁移 | `tests/v2/test_risk_officer.py` |
 | 风险退出不被预测阻止 | 止损/锁利优先于预测分歧 | `core/signal_check.py` | `risk/officer.py` | V2-6退出优先矩阵已迁移 | `tests/v2/test_risk_officer.py` |
 | MA120 支撑 | 人类交易者关心的支撑反弹 | `strategies/ma120_support.py` | `strategies/templates/` | V2-5已迁移 | `tests/v2/test_strategy_entry_templates.py` |
 | 冲高回落锁利 | 持仓止盈/减仓关键策略 | `strategies/profit_lock.py` | `strategies/templates/` | V2-5已迁移 | `tests/v2/test_strategy_exit_templates.py` |
-| 持仓风险管理 | 成本、亏损、集中度、禁止加仓 | `strategies/position_risk.py` | `risk/`, `strategies/templates/` | V2-6集中度/加仓容量已迁移；跨股票分配待V2-8 | `tests/v2/test_risk_sizing.py` |
+| 持仓风险管理 | 成本、亏损、集中度、禁止加仓 | `strategies/position_risk.py` | `risk/`, `strategies/templates/`, `portfolio/` | V2-6 集中度/加仓容量与 V2-8 跨股票分配已迁移并复审 | `tests/v2/test_risk_sizing.py`, `tests/v2/test_portfolio_allocator.py` |
 | 反抽失败退出 | 跌破均线后退出逻辑 | `strategies/pullback_failed_exit.py` | `strategies/templates/` | V2-5已迁移 | `tests/v2/test_strategy_exit_templates.py` |
 | 条件触发策略 | 不操作时给等待条件 | `strategies/conditional_trigger.py` | `strategies/engine.py` | V2-5条件 DSL 和观察模板已迁移 | `tests/v2/test_strategy_conditions.py` |
 | 策略无信号诊断 | 告诉用户还差什么条件 | `diagnose_no_signal()` | `TradePlan.missing_conditions` | V2-5已迁移为结构化缺失条件 | `tests/v2/test_trade_plan_contract.py` |
