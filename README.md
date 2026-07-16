@@ -26,9 +26,10 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-7 成交仿真层规范：[docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md)
 - V2-8 组合决策层规范：[docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md)
 - V2-9 学习层规范：[docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md)
+- V2-10 LLM 假设层规范：[docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 至 V2-9 已完成并复审。V2-9 已实现到期事实验证、预测账/策略账/联合账、六层归因、历史 OOF、股票绑定自优化、候选晋升/回滚、migration 13 及纠错 migration 14 和 LE00-LE59；当前停止在学习层，不提前实现 V2-10 LLM 或 V2-11 UI/报告。
+V2-0 至 V2-9 已完成并复审。V2-10 LLM 假设层精确设计已经冻结，当前等待实现；它只负责结构化研究假设、事实确认、候选桥接和 LLM 独立复盘，不直接生成交易指令，也不提前实现 V2-11 UI/报告。
 
 ## 一以贯之的系统目标
 
@@ -88,6 +89,7 @@ V2-0 至 V2-9 已完成并复审。V2-9 已实现到期事实验证、预测账/
 | [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) | V2-7 OrderIntent、触发状态机、当前预览、历史成交、费用/滑点、migration 11 和 EX00-EX49 |
 | [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) | V2-8 组合批次、排序、现金/heat/相关性分配、最终股数、migration 12 和 PO00-PO49 |
 | [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) | V2-9 到期验证、三本账、六层归因、OOF、自优化生命周期、migration 13/14 和 LE00-LE59 |
+| [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) | V2-10 研究事实清单、严格 JSON 假设、确定性验证、候选桥接、migration 15 和 LL00-LL49 |
 | `AGENTS.md` | Codex 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 | `CLAUDE.md` | Claude Code 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 

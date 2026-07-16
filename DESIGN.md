@@ -59,10 +59,11 @@ TradeHelper 一以贯之的产品目标，是稳定回答五个问题：
 | [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) | V2-7 规范：OrderIntent、触发状态机、成交证据、费用/滑点、migration 11 和 EX00-EX49 |
 | [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) | V2-8 规范：组合冻结批次、排序、现金/heat/相关性分配、最终股数、migration 12 和 PO00-PO49 |
 | [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) | V2-9 规范：到期验证、三本账、六层归因、历史 OOF、自优化生命周期、migration 13/14 和 LE00-LE59 |
+| [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) | V2-10 规范：研究事实清单、严格 JSON 假设、确定性验证、候选桥接、LLM 独立账、migration 15 和 LL00-LL49 |
 | `AGENTS.md` | Codex 本地约定：Codex 开发时先读它，再读 DESIGN 和 V2_REFACTOR_PLAN |
 | `CLAUDE.md` | Claude Code 本地约定：Claude 开发时先读它，再读 DESIGN 和 V2_REFACTOR_PLAN |
 
-V2-0/V2-1 实现发生冲突时，规范优先级为：`CONTRACTS/POLICIES/GOLDEN_CASES` > 本设计和实施计划中的示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-9 分别以对应阶段规范为准。未被规范的行为应保持缺失或明确不支持，不能由实现者自由补默认值。
+V2-0/V2-1 实现发生冲突时，规范优先级为：`CONTRACTS/POLICIES/GOLDEN_CASES` > 本设计和实施计划中的示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-10 分别以对应阶段规范为准。未被规范的行为应保持缺失或明确不支持，不能由实现者自由补默认值。
 
 ## 3. 分层职责
 
@@ -193,7 +194,7 @@ LLM 观察无论被系统确认、反驳、待验证或因数据无效无法判�
 当前实施边界：
 
 ```text
-V2-0 至 V2-9 已完成并复审；当前停止在学习层
+V2-0 至 V2-9 已完成并复审；V2-10 设计已冻结，等待实现
 ```
 
-V2-9 已按 [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) 完成并复审：预测、情景、策略、风控、成交和组合效果分别记账，并由预测账、策略账、联合账驱动受控候选生命周期；历史 OOF 回放还会强制验证各层业务身份闭合，不能用空壳阶段伪造完整链路。数据库以 migration 13 建立学习表，再由 migration 14 修正成熟度事实的 origin/target/revision 唯一身份。当前停止在 V2-9；LLM、报告和 UI 仍未实现。
+V2-9 已按 [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) 完成并复审。V2-10 已按 [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) 冻结设计：LLM 只提出五类结构化研究假设，代码使用冻结事实和现有 DSL 验证，再由 V2-9 对可映射候选进行 OOF、影子和晋升；当前 TradePlan、风控结果和组合决定不因 LLM 文本改变。V2-10 尚未实现，报告和 UI 仍属于 V2-11。

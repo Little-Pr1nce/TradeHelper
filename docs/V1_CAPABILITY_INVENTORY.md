@@ -146,11 +146,11 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
-| LLM 不能直接下单 | 防止不可复现建议 | `report/prompts.py`, docs | `research/`, reports | 待迁移 | `tests/v2/test_llm_hypothesis_parser.py` |
-| LLM 观察候选池 | 保留模型发现的新点子 | `services/research_observations.py` | `research/hypothesis_lab.py` | 待迁移 | `tests/v2/test_hypothesis_validation.py` |
-| 系统确认/反驳/待验证 | 分歧可见，不静默删除 | `research_observations.py` | reports + risk | 待迁移 | `tests/v2/test_hypothesis_validation.py` |
-| LLM 和系统规则分账 | 不让系统规则冒领 LLM 命中率 | `research_observation_log` | `research/hypothesis_lab.py` | 待迁移 | `tests/v2/test_hypothesis_promotion.py` |
-| 有效假设沉淀候选模板 | 让系统越运行越聪明 | `research_observation_log` | `research/` + `learning/optimizer.py` | 待迁移 | `tests/v2/test_hypothesis_promotion.py` |
+| LLM 不能直接下单 | 防止不可复现建议 | `report/prompts.py`, docs | `research/` | V2-10设计已冻结，待实现 | `tests/v2/test_research_parser.py`, `test_research_validation.py` |
+| LLM 观察候选池 | 保留模型发现的新点子 | `services/research_observations.py` | `research/engine.py` | V2-10设计已冻结，待实现 | `tests/v2/test_research_context.py`, `test_research_parser.py` |
+| 系统确认/反驳/待验证 | 分歧可见，不静默删除 | `research_observations.py` | `research/validator.py` | V2-10设计已冻结为四状态，待实现 | `tests/v2/test_research_validation.py` |
+| LLM 和系统规则分账 | 不让系统规则冒领 LLM 命中率 | `research_observation_log` | `research/outcomes.py` | V2-10设计已冻结，待实现 | `tests/v2/test_research_outcomes.py` |
+| 有效假设沉淀候选模板 | 让系统越运行越聪明 | `research_observation_log` | `research/bridge.py` + `learning/` | V2-10设计已冻结，待实现 | `tests/v2/test_research_candidate_bridge.py` |
 
 ## P1 UI 与报告资产
 

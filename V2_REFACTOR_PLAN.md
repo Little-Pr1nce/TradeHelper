@@ -69,10 +69,12 @@ TradePlan + ExecutionDecision
 | [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) | V2-6 ExecutionDecision、真实账户估值、A/B/C/D、sizing、市场规则、migration 10 和 RK00-RK42 |
 | [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) | V2-7 OrderIntent、触发状态机、当前预览、历史成交、费用/滑点、migration 11 和 EX00-EX49 |
 | [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) | V2-8 组合批次、排序、现金/heat/相关性分配、最终股数、migration 12 和 PO00-PO49 |
+| [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) | V2-9 到期验证、三本账、六层归因、OOF、自优化生命周期、migration 13/14 和 LE00-LE59 |
+| [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) | V2-10 研究事实清单、严格 JSON、确定性验证、候选桥接、migration 15 和 LL00-LL49 |
 | `AGENTS.md` | Codex 本地工作约定 |
 | `CLAUDE.md` | Claude Code 本地工作约定 |
 
-V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-9 分别以对应阶段规范为准。V2-8 已完成并复审；V2-9 精确设计已冻结，当前只实现 V2-9，完成 LE00-LE59 后停止。
+V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-10 分别以对应阶段规范为准。V2-9 已完成并复审；V2-10 精确设计已冻结，下一步只实现 V2-10，完成 LL00-LL49 后停止。
 
 ## 1. V2 分层结构
 
@@ -759,65 +761,24 @@ venv/bin/python -m pytest tests/v2/test_learning_*.py tests/v2/test_attribution_
 
 ## 11. LLM 假设孵化层
 
-### 11.1 目标
-
-LLM 的价值从“写报告”升级为“提出研究假设”，但所有假设必须结构化和验证。
-
-LLM 建议拆解为：
+V2-10 的精确合同见 [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md)。LLM 的价值从“写报告”升级为“提出研究假设”，输出固定拆为：
 
 ```text
-ForecastHypothesis:
-  pattern, expected_direction, horizon, evidence_text
-
-ModelHypothesis:
-  feature_set, model_family, regime_scope, expected_improvement, evidence_text
-
-StrategyHypothesis:
-  trigger_condition, action, stop_loss_rule, take_profit_rule, invalidation
+forecast_pattern
+model_configuration
+strategy_configuration
+system_challenge
+implementation_proposal
 ```
 
-结构化假设必须落入受控 DSL/注册表，只能使用已注册事实字段、比较算子、时间窗口和风险规则。LLM 可以建议新增候选算子，但未经确定性实现、单元测试和 OOF 验证，不能自动生成或修改生产源码。
+LLM 只接收冻结的 `ResearchFactManifest`，只能引用 manifest 中的事实 ID，并以严格 JSON Schema 返回。代码使用现有三值 DSL 和注册表生成 `confirmed / refuted / pending / invalid_data`；四种状态都保留。confirmed 只说明当前事实成立，不表示可执行，也不获得 A/B/C/D。
 
-每条观察必须保留 `confirmed / refuted / pending / invalid_data` 状态、系统证据和下一步验证条件。风控官只决定能否执行，不能静默删除研究员观察；报告必须让用户看到 LLM 与系统的分歧。
-
-### 11.2 转正流程
-
-```text
-LLM 原始观察/模型建议
-  -> 结构化假设
-    -> 事实验证
-      -> 历史 OOF 回放
-        -> 股票级/行业级表现统计
-          -> 候选预测特征、注册模型配置或候选策略模板
-            -> Champion/正式策略晋升
-```
-
-### 11.3 测试方案
-
-新增测试：
-
-```text
-tests/v2/test_llm_hypothesis_parser.py
-tests/v2/test_hypothesis_validation.py
-tests/v2/test_hypothesis_promotion.py
-```
-
-测试内容：
-
-1. LLM 混合建议能拆成预测假设和策略假设。
-2. 没有止损/触发价的 LLM 买入建议不能进入可执行层。
-3. LLM 提出的形态必须有事实证据才能记录为 triggered。
-4. 系统规则成功不能冒充 LLM 命中率。
-5. 多次有效 LLM 假设可以沉淀成候选模板，但必须经过 OOF。
-6. LLM 无来源的财务数字不能进入特征、事实验证或报告确定性表格。
-7. 假设晋升只创建可回滚的候选版本，不能越过数据质量、止损和账户风险闸门。
-8. LLM 建议的新模型只能先映射为已注册模型族和特征配置；全新算法必须由确定性代码实现并补测试后才能进入候选池。
-9. confirmed/refuted/pending/invalid_data 四种状态都能进入报告，且保留系统证据，不会静默丢弃。
+只有能映射到已注册模型、特征集、StrategySpec、参数空间或 counterfactual 的假设，才可创建 V2-9 `CANDIDATE`；未知算法、特征、模板和 DSL 算子转换为 `implementation_required`，系统不得自动生成源码。候选晋升、影子、Champion 和回滚完全委托 V2-9，当前 TradePlan 和风控结果不因 LLM 文本改变。
 
 验收标准：
 
 ```text
-venv/bin/python -m pytest tests/v2/test_llm_hypothesis_*.py tests/v2/test_hypothesis_*.py -q
+venv/bin/python -m pytest tests/v2/test_research_*.py tests/v2/test_schema_migrations.py -q
 ```
 
 ## 12. UI 与报告重构
@@ -1118,7 +1079,7 @@ venv/bin/python -m pytest tests/ -q
 | V2-7 成交仿真层 | 已完成并复审 | OrderIntent、冻结条件触发、当前预览、历史仿真、Decimal 成本、双市场最终检查、migration 11 与 EX00-EX49 均已通过；不包含 V2-8 组合分配 |
 | V2-8 组合决策层 | 已完成并复审 | 不可变组合批次/风险快照/相关性证据、保护退出优先、双 profile 独立 waterfall、现金/heat/相关性约束、共享退出、替换研究候选、V2-7 最终股数装配及 migration 12 原子持久化已通过 PO00-PO49；实现严格止步于 V2-8。 |
 | V2-9 学习层 | 已完成并复审 | 精确合同见 `docs/v2/V2_9_LEARNING.md`；已实现到期验证、三本账、六层归因、purged OOF、股票绑定自优化、候选生命周期、migration 13/14 和 LE00-LE59，止步于学习层 |
-| V2-10 LLM 假设层 | 未开始 | 可复用 V1 observation，但需拆预测/策略假设并限制为 DSL |
+| V2-10 LLM 假设层 | 设计已冻结，待实现 | 精确合同见 `docs/v2/V2_10_LLM_HYPOTHESES.md`；严格 JSON、冻结事实验证、候选桥接、LLM 独立账、migration 15 和 LL00-LL49 |
 | V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
 | V2-12 迁移/端到端/发布 | 未开始 | 每层单测通过后执行完整矩阵与跨平台烟雾 |
 
@@ -1181,3 +1142,11 @@ V2-9 已按 [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) 完成并复�
 落地内容包括不可变 learning contracts、目标会话 MaturityResolver 与无环 superseded revision 持久化、概率/策略/联合账和 PlanEvidenceSnapshot 投影、固定 V2-3→V2-8 purged walk-forward 主链与显式 ReplayAccountPolicy、候选/挑战者/影子/Champion/漂移/回滚生命周期、migration 13 及成熟度身份纠错 migration 14、强类型 repository 恢复，以及 LE00-LE59 的 60 个独立行为测试和额外真实链路回归。复审重点修复了动态波动率方向标签、同目标日不同预测来源冲突、OOF/在线样本混账、窗口退出成本被当作零、部分成交遗漏、联合账缺失、非法生命周期跳转和回滚未切换部署等问题；全链回放现在还会逐层验证四周期预测、情景、策略、风控、组合分配、成交事实和 outcome 的身份闭合，空壳阶段不能生成伪 OOF 证据。
 
 最终验证：学习专项 `99 passed in 1.42s`；V2 全量 `541 passed, 3 skipped in 41.68s`；项目全量 `801 passed, 3 skipped in 74.16s`；默认关闭的 3 条真实 Provider 冒烟显式启用后 `3 passed in 30.33s`。3 个 skip 均为同一组显式联网测试，已单独执行通过。实现严格停止于 V2-9，未进入 V2-10 LLM 或 V2-11 UI/报告。
+
+## 18. 当前实施点：V2-10 设计已冻结
+
+V2-10 已按 [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) 完成精确设计，当前尚未实现。设计吸收 V1 “研究员观察 vs 系统确认、分歧可见、观察形态复盘”的有效经验，同时删除 Markdown 表格解析、关键词猜形态和观察直接获得执行等级等旧耦合。
+
+固定主链为：冻结上游事实 -> `ResearchFactManifest` -> 严格 JSON LLM 响应 -> 五类结构化假设 -> 确定性 DSL/注册表验证 -> V2-9 candidate bridge 与独立复盘。LLM 不接触账户金额、股数或 API Key，不生成当前交易指令；未知模型、特征、策略模板和算子只保存为 `implementation_required`，不能自动改写源码。
+
+本阶段冻结 migration 15、LL00-LL49、Tab1/Tab3 与 A股/美股一致性、响应 revision、prompt injection 防护、失败不阻断确定性主链和可选真实 LLM 冒烟。下一步只实现 V2-10；完成专项、V2 全量、项目全量和可配置的真实 LLM schema 冒烟后停止，不进入 V2-11 UI/报告。
