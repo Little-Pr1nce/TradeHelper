@@ -194,7 +194,7 @@ LLM 观察无论被系统确认、反驳、待验证或因数据无效无法判�
 当前实施边界：
 
 ```text
-V2-0 至 V2-9 已完成并复审；V2-10 设计已冻结，等待实现
+V2-0 至 V2-10 已完成并复审；当前停止于 LLM 假设层
 ```
 
-V2-9 已按 [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) 完成并复审。V2-10 已按 [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) 冻结设计：LLM 只提出五类结构化研究假设，代码使用冻结事实和现有 DSL 验证，再由 V2-9 对可映射候选进行 OOF、影子和晋升；当前 TradePlan、风控结果和组合决定不因 LLM 文本改变。V2-10 尚未实现，报告和 UI 仍属于 V2-11。
+V2-9 已按 [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) 完成并复审。V2-10 已按 [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) 完成并复审：LLM 只提出五类结构化研究假设，代码使用同市场冻结事实和 V2-5 同一条件 DSL 验证，再由 V2-9 对可映射候选进行 OOF、影子和晋升；当前 TradePlan、风控结果和组合决定不因 LLM 文本改变。报告和 UI 仍属于 V2-11。

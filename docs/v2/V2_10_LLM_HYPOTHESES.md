@@ -1,6 +1,6 @@
 # TradeHelper V2-10 LLM 假设层精确设计
 
-> 状态：设计已冻结，等待实现。本文是 V2-10 的规范性合同，优先级高于 `V2_REFACTOR_PLAN.md` 中的概念示例。实现建立在已完成并复审的 V2-2 特征、V2-3 预测、V2-4 情景、V2-5 策略、V2-6 风控、V2-8 组合和 V2-9 学习合同之上。V2-10 只负责提出、结构化、验证和孵化研究假设；不得提前实现 V2-11 UI/报告，也不得修改当前预测、TradePlan、ExecutionDecision 或生产源码。
+> 状态：已完成并通过回归。本文是 V2-10 的规范性合同，优先级高于 `V2_REFACTOR_PLAN.md` 中的概念示例。实现建立在已完成并复审的 V2-2 特征、V2-3 预测、V2-4 情景、V2-5 策略、V2-6 风控、V2-8 组合和 V2-9 学习合同之上。V2-10 只负责提出、结构化、验证和孵化研究假设；不得提前实现 V2-11 UI/报告，也不得修改当前预测、TradePlan、ExecutionDecision 或生产源码。
 
 ## 1. 阶段目标
 
@@ -895,6 +895,8 @@ venv/bin/python -m pytest tests/v2/integration/test_live_llm_research.py -vv -rs
 6. LL47：migration 15、repository 原子保存和强类型恢复。
 7. LL48-LL49：架构、性能、失败降级、双市场和可选真实 LLM 冒烟。
 8. 跑 V2-10 专项、V2 全量、项目全量，更新阶段状态后停止。
+
+完成复审后的测试基线为：V2-10 研究专项 `72 passed`，V2 全量 `613 passed, 4 skipped`，项目全量 `873 passed, 4 skipped`；4 条默认关闭的真实 Provider/LLM 冒烟已合并显式执行并全部通过。组合分片必须携带当前分片的 instrument keys，候选作用域必须由冻结标的、市场或 `feature.context.industry` 事实决定，不能由调用方自由改写；同一 candidate 的 pending/matured outcome 在指标层只计一次。
 
 ## 22. 阶段停止点
 

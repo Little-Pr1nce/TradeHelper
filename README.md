@@ -29,7 +29,7 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-10 LLM 假设层规范：[docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 至 V2-9 已完成并复审。V2-10 LLM 假设层精确设计已经冻结，当前等待实现；它只负责结构化研究假设、事实确认、候选桥接和 LLM 独立复盘，不直接生成交易指令，也不提前实现 V2-11 UI/报告。
+V2-0 至 V2-10 已完成并复审。V2-10 LLM 假设层已实现冻结事实、严格 JSON、确定性四态验证、V2-9 候选桥接、LLM 独立复盘与 migration 15；它不直接生成交易指令，也未进入 V2-11 UI/报告。
 
 ## 一以贯之的系统目标
 
@@ -115,6 +115,8 @@ tests/v2/
 ```
 
 V2-9 已完成并复审：LE00-LE59 已逐号映射为 60 个独立行为测试，并补充真实 V2-5→V2-8 成交/组合链、截止日、冲突、revision 链、全链身份闭合和回滚测试。学习专项 `99 passed`，V2 全量 `541 passed, 3 skipped`，项目全量 `801 passed, 3 skipped`；3 条真实 Provider 冒烟显式启用后 `3 passed in 30.33s`。实现严格停止在 V2-9 学习层。
+
+V2-10 已完成并复审：研究事实只能来自注册命名空间和同市场冻结 artifact，Tab3 按持仓优先稳定分片并限制模型只能回答当前分片标的；严格 JSON Schema、V2-5 同源三值验证、股票/行业/市场候选作用域绑定、V2-9 maturity/forecast/promotion 复盘和 migration 15 引用闭合均已补齐。LL00-LL49 一编号一行为测试，真实 Provider 与真实 LLM 冒烟均已显式执行通过；实现未进入 V2-11 UI/报告。
 
 ## 历史资料
 

@@ -66,6 +66,7 @@ from tradehelper_v2.contracts.risk import (ConstraintResult, DecisionDisposition
 from tradehelper_v2.contracts.execution import (ExecutionEvidenceGrade, ExecutionMode, ExecutionRun, ExecutionStateDelta, EventGranularity, FillEvidence, FillOutcome, IntentBuildStatus, IntentState, OrderIntent, OrderIntentBuildRecord, OrderSide, OrderStyle, PathAssumption, TriggerEvaluation, TriggerState)
 from tradehelper_v2.contracts.portfolio import (AllocationStatus, CorrelationPair, CorrelationStatus, HoldingRiskSnapshot, HoldingRiskStatus, InstrumentReturnRisk, PortfolioAllocation, PortfolioCandidate, PortfolioCorrelationSnapshot, PortfolioDecisionBundle, PortfolioEvidenceGrade, PortfolioHeatStatus, PortfolioInputBatch, PortfolioPolicy, PortfolioProfileDecision, PortfolioReservationGroup, PortfolioReservationSnapshot, PortfolioRiskSnapshot, PortfolioRole, ReplacementCandidate, ReplacementStatus)
 from tradehelper_v2.contracts.learning import CandidateKind, CandidateLifecycle, CandidateScope, EvidenceOrigin, ForecastOutcome, JointOutcome, JointOutcomeKind, LearningCandidateVersion, LearningEvidenceGrade, LearningMetricSnapshot, LearningRun, LearningRunStatus, LedgerKind, MaturityEvidence, OutcomeStatus, PromotionDecision, PromotionEvent, ScenarioOutcome, StrategyOutcome
+from tradehelper_v2.contracts.research import (CandidateEligibility, HypothesisCandidateLink, HypothesisKind, HypothesisNovelty, HypothesisOutcome, HypothesisOutcomeStatus, HypothesisValidation, HypothesisValidationStatus, RawResearchResponse, ResearchContext, ResearchFact, ResearchFactManifest, ResearchHypothesis, ResearchMetricSnapshot, ResearchScope)
 from .migrations.schema import apply_schema
 
 
@@ -1231,7 +1232,9 @@ class SQLiteRepository:
             if row["payload_hash"]==payload_hash: return ForecastWriteResult(0,1,0)
             connection.execute("INSERT INTO quarantine_records(record_type,instrument_key,trading_date,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)",("learning_conflict",instrument_key,None,"CONFLICTING_LEARNING_RECORD",payload,utc_iso(datetime.now(timezone.utc))))
             return ForecastWriteResult(0,0,1)
-        connection.execute(f"INSERT INTO {table}({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",values+(payload_hash,payload,utc_iso(record.generated_at),1))
+        generated_at=getattr(record,"generated_at",getattr(record,"created_at",None))
+        if generated_at is None: raise ContractViolation("immutable record requires generated_at or created_at")
+        connection.execute(f"INSERT INTO {table}({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",values+(payload_hash,payload,utc_iso(generated_at),1))
         return ForecastWriteResult(1,0,0)
 
     def save_maturity_evidence(self, evidence: MaturityEvidence) -> ForecastWriteResult:
@@ -1528,6 +1531,213 @@ class SQLiteRepository:
         candidate=self.get_learning_candidate(row["candidate_id"])
         if candidate is None: raise ContractViolation("learning deployment references missing candidate")
         return candidate,row["promotion_id"]
+
+    def save_research_result(self, context: ResearchContext, response: RawResearchResponse, hypotheses: tuple[ResearchHypothesis,...], validations: tuple[HypothesisValidation,...], links: tuple[HypothesisCandidateLink,...], *, candidates: tuple[LearningCandidateVersion,...]=()) -> None:
+        """研究上下文、假设、验证和候选链接必须同一事务闭合保存。"""
+        if {item.hypothesis_id for item in validations}!={item.hypothesis_id for item in hypotheses} or {item.hypothesis_id for item in links}!={item.hypothesis_id for item in hypotheses}: raise ContractViolation("research result references are incomplete")
+        if any(item.context_id!=context.context_id for item in hypotheses) or any(item.context_id!=context.context_id for item in validations): raise ContractViolation("research result context mismatch")
+        if response.context_id!=context.context_id or any(item.response_id!=response.response_id for item in hypotheses): raise ContractViolation("research result response mismatch")
+        fact_ids={item.fact_id for item in context.manifest.facts}
+        if any(item.instrument is not None and item.instrument not in context.manifest.instruments for item in hypotheses) or any(not set(item.evidence_refs).issubset(fact_ids) for item in hypotheses): raise ContractViolation("research hypothesis references foreign context facts")
+        hypotheses_by_id={item.hypothesis_id:item for item in hypotheses}
+        candidates_by_id={item.candidate_id:item for item in candidates}
+        linked_candidate_ids={item.candidate_id for item in links if item.candidate_id}
+        if not set(candidates_by_id).issubset(linked_candidate_ids):
+            raise ContractViolation("research result contains an unlinked learning candidate")
+        if any(item.candidate_id and item.candidate_id not in candidates_by_id and self.get_learning_candidate(item.candidate_id) is None for item in links): raise ContractViolation("research link references missing learning candidate")
+        for link in links:
+            if not link.candidate_id:
+                continue
+            candidate=candidates_by_id.get(link.candidate_id) or self.get_learning_candidate(link.candidate_id)
+            hypothesis=hypotheses_by_id[link.hypothesis_id]
+            if candidate.market is not context.market:
+                raise ContractViolation("research candidate market does not match context")
+            if candidate.scope is CandidateScope.STOCK and (hypothesis.instrument is None or candidate.scope_key!=hypothesis.instrument.stable_key):
+                raise ContractViolation("research stock candidate scope does not match hypothesis")
+            if candidate.scope is CandidateScope.MARKET and candidate.scope_key!=context.market.value:
+                raise ContractViolation("research market candidate scope does not match context")
+            if candidate.scope is CandidateScope.INDUSTRY:
+                industries={
+                    str(fact.value) for fact in context.manifest.facts
+                    if fact.instrument==hypothesis.instrument and fact.key=="feature.context.industry" and fact.status=="available"
+                }
+                if candidate.scope_key not in industries:
+                    raise ContractViolation("research industry candidate lacks matching frozen fact")
+        response_payload=canonical_json(response); response_hash=stable_hash(_without_generated_at(json.loads(response_payload)))
+        response_existing=self._fetchone("SELECT payload_hash FROM llm_research_invocations WHERE response_id=? OR (request_id=? AND revision=?)",(response.response_id,response.request_id,response.revision))
+        if response_existing is not None and response_existing["payload_hash"]!=response_hash:
+            self._quarantine_research_conflict("research_response_conflict",None,"CONFLICTING_RESEARCH_RESPONSE",response_payload,response.received_at)
+            raise ContractViolation("research response conflicts with stored revision")
+        records=[
+            ("research_contexts","context_id",context,context.context_id,None),
+            *(("learning_candidate_versions","candidate_id",item,item.candidate_id,None) for item in candidates),
+            *(("research_hypotheses","hypothesis_id",item,item.hypothesis_id,item.instrument.stable_key if item.instrument else None) for item in hypotheses),
+            *(("hypothesis_validations","validation_id",item,item.validation_id,None) for item in validations),
+            *(("hypothesis_candidate_links","link_id",item,item.link_id,None) for item in links),
+        ]
+        for table,id_column,record,event_key,instrument_key in records:
+            self._preflight_research_record(table,id_column,record,event_key,instrument_key)
+        with self._transaction() as connection:
+            payload=response_payload; hashed=response_hash
+            existing=connection.execute("SELECT payload_hash FROM llm_research_invocations WHERE response_id=? OR (request_id=? AND revision=?)",(response.response_id,response.request_id,response.revision)).fetchone()
+            if existing is None: connection.execute("INSERT INTO llm_research_invocations(response_id,request_id,context_id,revision,provider_name,model_name,prompt_version,prompt_hash,content_hash,status,finish_reason,payload_hash,payload_json,received_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(response.response_id,response.request_id,response.context_id,response.revision,response.provider_name,response.model_name,response.prompt_version,response.prompt_hash,response.content_hash,response.invocation_status.value,response.finish_reason,hashed,payload,utc_iso(response.received_at)))
+            elif existing["payload_hash"]!=hashed: raise ContractViolation("research response conflicts with stored revision")
+            self._require_clean_research_write(self._save_learning_record(table="research_contexts",id_column="context_id",record=context,event_key=context.context_id,columns=("context_id","event_key","scope","market","cutoff_at","payload_hash","payload_json","generated_at","schema_version"),values=(context.context_id,context.context_id,context.scope.value,context.market.value,utc_iso(context.cutoff_at)),connection=connection))
+            for candidate in candidates:
+                result=self._save_learning_record(table="learning_candidate_versions",id_column="candidate_id",record=candidate,event_key=candidate.candidate_id,columns=("candidate_id","event_key","market","kind","scope","scope_key","lifecycle","projection_key","payload_hash","payload_json","generated_at","schema_version"),values=(candidate.candidate_id,candidate.candidate_id,candidate.market.value,candidate.kind.value,candidate.scope.value,candidate.scope_key,candidate.lifecycle.value,candidate.projection_key),connection=connection)
+                if result.conflicts: raise ContractViolation("research candidate conflicts with stored candidate")
+            for item in hypotheses:
+                self._require_clean_research_write(self._save_learning_record(table="research_hypotheses",id_column="hypothesis_id",record=item,event_key=item.hypothesis_id,columns=("hypothesis_id","event_key","response_id","context_id","instrument_key","kind","business_key","payload_hash","payload_json","generated_at","schema_version"),values=(item.hypothesis_id,item.hypothesis_id,item.response_id,item.context_id,item.instrument.stable_key if item.instrument else None,item.kind.value,item.business_key),instrument_key=item.instrument.stable_key if item.instrument else None,connection=connection))
+            for item in validations:
+                self._require_clean_research_write(self._save_learning_record(table="hypothesis_validations",id_column="validation_id",record=item,event_key=item.validation_id,columns=("validation_id","event_key","hypothesis_id","context_id","status","validator_version","payload_hash","payload_json","generated_at","schema_version"),values=(item.validation_id,item.validation_id,item.hypothesis_id,item.context_id,item.status.value,item.validator_version),connection=connection))
+            for item in links:
+                self._require_clean_research_write(self._save_learning_record(table="hypothesis_candidate_links",id_column="link_id",record=item,event_key=item.link_id,columns=("link_id","event_key","hypothesis_id","candidate_id","eligibility","mapping_version","payload_hash","payload_json","generated_at","schema_version"),values=(item.link_id,item.link_id,item.hypothesis_id,item.candidate_id,item.eligibility.value,item.mapping_registry_version),connection=connection))
+
+    @staticmethod
+    def _require_clean_research_write(result: ForecastWriteResult) -> None:
+        if result.conflicts:
+            raise ContractViolation("research record conflicts with canonical stored record")
+
+    def _preflight_research_record(self,table,id_column,record,event_key,instrument_key):
+        payload=canonical_json(record)
+        hashed=stable_hash(_without_generated_at(json.loads(payload)))
+        row=self._fetchone(f"SELECT payload_hash FROM {table} WHERE {id_column}=? OR event_key=?",(getattr(record,id_column),event_key))
+        if row is not None and row["payload_hash"]!=hashed:
+            self._quarantine_research_conflict("research_record_conflict",instrument_key,"CONFLICTING_RESEARCH_RECORD",payload,getattr(record,"generated_at",getattr(record,"created_at",datetime.now(timezone.utc))))
+            raise ContractViolation("research record conflicts with canonical stored record")
+
+    def _quarantine_research_conflict(self,record_type,instrument_key,reason,payload,created_at):
+        with self._transaction() as connection:
+            connection.execute("INSERT INTO quarantine_records(record_type,instrument_key,trading_date,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)",(record_type,instrument_key,None,reason,payload,utc_iso(created_at)))
+
+    def save_hypothesis_outcome(self, outcome: HypothesisOutcome) -> ForecastWriteResult:
+        hypothesis=self.get_research_hypothesis(outcome.hypothesis_id)
+        if hypothesis is None:
+            raise ContractViolation("research outcome references missing hypothesis")
+        if hypothesis.instrument!=outcome.instrument:
+            raise ContractViolation("research outcome instrument does not match hypothesis")
+        payload=dict(hypothesis.payload)
+        if outcome.horizon is not None and outcome.horizon not in payload.get("horizons",()):
+            raise ContractViolation("research outcome horizon does not match hypothesis")
+        if outcome.linked_maturity_evidence_id:
+            maturity=self.get_maturity_evidence(outcome.linked_maturity_evidence_id)
+            if maturity is None or maturity.instrument!=outcome.instrument or maturity.origin_session_date!=outcome.origin_session_date or maturity.target_session_date!=outcome.target_session_date:
+                raise ContractViolation("research outcome maturity evidence mismatch")
+        if outcome.linked_forecast_outcome_id:
+            forecast=self.get_forecast_outcome(outcome.linked_forecast_outcome_id)
+            if forecast is None or forecast.instrument!=outcome.instrument or forecast.origin_session_date!=outcome.origin_session_date or forecast.target_session_date!=outcome.target_session_date or forecast.horizon!=outcome.horizon or forecast.maturity_evidence_id!=outcome.linked_maturity_evidence_id:
+                raise ContractViolation("research outcome forecast evidence mismatch")
+        if outcome.linked_candidate_id and self.get_learning_candidate(outcome.linked_candidate_id) is None:
+            raise ContractViolation("research outcome candidate is missing")
+        if outcome.linked_candidate_id:
+            linked=self._fetchone(
+                "SELECT 1 FROM hypothesis_candidate_links WHERE hypothesis_id=? AND candidate_id=?",
+                (outcome.hypothesis_id,outcome.linked_candidate_id),
+            )
+            if linked is None:
+                raise ContractViolation("research outcome candidate is not linked to hypothesis")
+        for promotion_id in outcome.linked_promotion_ids:
+            row=self._fetchone("SELECT candidate_id FROM learning_promotion_events WHERE promotion_id=?",(promotion_id,))
+            if row is None or row["candidate_id"]!=outcome.linked_candidate_id:
+                raise ContractViolation("research outcome promotion evidence mismatch")
+        return self._save_learning_record(table="hypothesis_outcomes",id_column="outcome_id",record=outcome,event_key=outcome.outcome_id,columns=("outcome_id","event_key","hypothesis_id","instrument_key","horizon","status","payload_hash","payload_json","generated_at","schema_version"),values=(outcome.outcome_id,outcome.outcome_id,outcome.hypothesis_id,outcome.instrument.stable_key,outcome.horizon,outcome.status.value),instrument_key=outcome.instrument.stable_key)
+
+    def save_research_metric_snapshot(self, snapshot: ResearchMetricSnapshot) -> ForecastWriteResult:
+        return self._save_learning_record(table="research_metric_snapshots",id_column="snapshot_id",record=snapshot,event_key=snapshot.snapshot_id,columns=("snapshot_id","event_key","market","scope_key","cutoff_at","payload_hash","payload_json","generated_at","schema_version"),values=(snapshot.snapshot_id,snapshot.snapshot_id,snapshot.market.value,snapshot.scope_key,utc_iso(snapshot.cutoff_at)),instrument_key=None)
+
+    def get_hypothesis_outcome(self, outcome_id: str) -> HypothesisOutcome | None:
+        row=self._fetchone("SELECT * FROM hypothesis_outcomes WHERE outcome_id=?",(outcome_id,))
+        if row is None:return None
+        payload=json.loads(row["payload_json"])
+        value=HypothesisOutcome(payload["outcome_id"],payload["hypothesis_id"],payload["observation_event_key"],self._research_instrument(payload["instrument"]),date.fromisoformat(payload["origin_session_date"]),date.fromisoformat(payload["target_session_date"]) if payload["target_session_date"] else None,payload["horizon"],HypothesisValidationStatus(payload["trigger_status"]),payload["expected_direction"],payload["actual_direction"],payload["actual_return"],payload["direction_correct"],payload["linked_maturity_evidence_id"],payload["linked_forecast_outcome_id"],payload["linked_candidate_id"],tuple(payload["linked_promotion_ids"]),HypothesisOutcomeStatus(payload["status"]),payload["evidence_grade"],_parse_datetime(payload["evaluated_at"]),_parse_datetime(payload["generated_at"]))
+        expected={"event_key":value.outcome_id,"hypothesis_id":value.hypothesis_id,"instrument_key":value.instrument.stable_key,"horizon":value.horizon,"status":value.status.value,"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored research outcome columns do not match payload")
+        return value
+
+    def get_research_metric_snapshot(self, snapshot_id: str) -> ResearchMetricSnapshot | None:
+        row=self._fetchone("SELECT * FROM research_metric_snapshots WHERE snapshot_id=?",(snapshot_id,))
+        if row is None:return None
+        payload=json.loads(row["payload_json"])
+        value=ResearchMetricSnapshot(payload["snapshot_id"],Market(payload["market"]),payload["scope_key"],_parse_datetime(payload["cutoff_at"]),tuple((item[0],item[1]) for item in payload["metrics"]),_parse_datetime(payload["generated_at"]),tuple((item[0],item[1]) for item in payload.get("dimensions",())))
+        expected={"event_key":value.snapshot_id,"market":value.market.value,"scope_key":value.scope_key,"cutoff_at":utc_iso(value.cutoff_at),"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored research metric columns do not match payload")
+        return value
+
+    def save_research_response(self, response: RawResearchResponse) -> ForecastWriteResult:
+        """response revision 只追加；content hash 相同也按 request/revision 审计。"""
+        payload=canonical_json(response); hashed=stable_hash(_without_generated_at(json.loads(payload)))
+        with self._transaction() as connection:
+            row=connection.execute("SELECT payload_hash FROM llm_research_invocations WHERE response_id=? OR (request_id=? AND revision=?)",(response.response_id,response.request_id,response.revision)).fetchone()
+            if row is not None:
+                if row["payload_hash"]==hashed:return ForecastWriteResult(0,1,0)
+                connection.execute("INSERT INTO quarantine_records(record_type,instrument_key,trading_date,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)",("research_response_conflict",None,None,"CONFLICTING_RESEARCH_RESPONSE",payload,utc_iso(response.received_at)))
+                return ForecastWriteResult(0,0,1)
+            connection.execute("INSERT INTO llm_research_invocations(response_id,request_id,context_id,revision,provider_name,model_name,prompt_version,prompt_hash,content_hash,status,finish_reason,payload_hash,payload_json,received_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(response.response_id,response.request_id,response.context_id,response.revision,response.provider_name,response.model_name,response.prompt_version,response.prompt_hash,response.content_hash,response.invocation_status.value,response.finish_reason,hashed,payload,utc_iso(response.received_at)))
+            return ForecastWriteResult(1,0,0)
+
+    def get_research_response(self, response_id: str) -> RawResearchResponse | None:
+        row=self._fetchone("SELECT * FROM llm_research_invocations WHERE response_id=?",(response_id,))
+        if row is None:return None
+        payload=json.loads(row["payload_json"])
+        value=RawResearchResponse(payload["response_id"],payload["request_id"],payload["context_id"],int(payload["revision"]),payload["provider_name"],payload["model_name"],payload["content"],payload["content_hash"],payload["finish_reason"],payload["invocation_status"],_parse_datetime(payload["received_at"]),payload["prompt_version"],payload["prompt_hash"],payload.get("provider_request_id"),payload.get("token_usage"))
+        expected={"request_id":value.request_id,"context_id":value.context_id,"revision":value.revision,"provider_name":value.provider_name,"model_name":value.model_name,"prompt_version":value.prompt_version,"prompt_hash":value.prompt_hash,"content_hash":value.content_hash,"status":value.invocation_status.value,"finish_reason":value.finish_reason,"received_at":utc_iso(value.received_at)}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored research response columns do not match payload")
+        return value
+
+    @staticmethod
+    def _research_instrument(payload: dict | None) -> InstrumentId | None:
+        if payload is None:return None
+        return InstrumentId(payload["code"],Market(payload["market"]),Exchange(payload["exchange"]))
+
+    @classmethod
+    def _research_context_from_payload(cls, payload: dict) -> ResearchContext:
+        manifest_payload=payload["manifest"]
+        facts=tuple(ResearchFact(item["fact_id"],cls._research_instrument(item["instrument"]),item["key"],item["value"],item["value_type"],item["unit"],item["status"],_parse_datetime(item["available_at"]),tuple(item["source_refs"]),item["source_payload_hash"]) for item in manifest_payload["facts"])
+        manifest=ResearchFactManifest(manifest_payload["manifest_id"],ResearchScope(manifest_payload["scope"]),Market(manifest_payload["market"]),_parse_datetime(manifest_payload["cutoff_at"]),tuple(cls._research_instrument(item) for item in manifest_payload["instruments"]),facts,tuple(manifest_payload["artifact_refs"]),int(manifest_payload["schema_version"]),_parse_datetime(manifest_payload["generated_at"]))
+        roles=tuple((cls._research_instrument(item[0]),item[1]) for item in payload["instrument_roles"])
+        return ResearchContext(payload["context_id"],ResearchScope(payload["scope"]),Market(payload["market"]),payload["mode"],_parse_datetime(payload["cutoff_at"]),manifest,roles,tuple(payload["forecast_event_keys"]),tuple(payload["scenario_ids"]),tuple(payload["strategy_bundle_ids"]),tuple(payload["risk_bundle_ids"]),payload["portfolio_bundle_id"],tuple(payload["learning_snapshot_ids"]),payload["prompt_input_version"],_parse_datetime(payload["generated_at"]))
+
+    def get_research_context(self, context_id: str) -> ResearchContext | None:
+        row=self._fetchone("SELECT * FROM research_contexts WHERE context_id=?",(context_id,))
+        if row is None:return None
+        value=self._research_context_from_payload(json.loads(row["payload_json"]))
+        expected={"event_key":value.context_id,"scope":value.scope.value,"market":value.market.value,"cutoff_at":utc_iso(value.cutoff_at),"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored research context columns do not match payload")
+        return value
+
+    def get_research_hypothesis(self, hypothesis_id: str) -> ResearchHypothesis | None:
+        row=self._fetchone("SELECT * FROM research_hypotheses WHERE hypothesis_id=?",(hypothesis_id,))
+        if row is None:return None
+        payload=json.loads(row["payload_json"])
+        restored=[]
+        for key,item in payload["payload"]:
+            restored.append((key,self._execution_expression(item) if key=="condition_expression" and item is not None else item))
+        value=ResearchHypothesis(payload["hypothesis_id"],payload["business_key"],payload["response_id"],payload["context_id"],self._research_instrument(payload["instrument"]),HypothesisKind(payload["kind"]),payload["title"],payload["thesis"],tuple(payload["evidence_refs"]),tuple(restored),HypothesisNovelty(payload["novelty"]),_parse_datetime(payload["generated_at"]))
+        expected={"event_key":value.hypothesis_id,"response_id":value.response_id,"context_id":value.context_id,"instrument_key":value.instrument.stable_key if value.instrument else None,"kind":value.kind.value,"business_key":value.business_key,"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored research hypothesis columns do not match payload")
+        return value
+
+    def get_hypothesis_validation(self, validation_id: str) -> HypothesisValidation | None:
+        row=self._fetchone("SELECT * FROM hypothesis_validations WHERE validation_id=?",(validation_id,))
+        if row is None:return None
+        payload=json.loads(row["payload_json"])
+        condition=None
+        if payload.get("condition_evaluation") is not None:
+            item=payload["condition_evaluation"]
+            condition=ConditionEvaluation(item["condition_id"],ConditionResult(item["result"]),tuple(ObservedValue(value["key"],value["value"],value["status"],_parse_datetime(value["available_at"]) if value["available_at"] else None) for value in item["observed_values"]),tuple(item["missing_features"]),_parse_datetime(item["evaluated_at"]))
+        value=HypothesisValidation(payload["validation_id"],payload["hypothesis_id"],payload["context_id"],HypothesisValidationStatus(payload["status"]),tuple(payload["observed_fact_ids"]),tuple(payload["missing_fact_ids"]),tuple(payload["conflicting_fact_ids"]),tuple(payload["linked_artifact_ids"]),CandidateEligibility(payload["candidate_eligibility"]),payload["validator_version"],tuple(payload["reason_codes"]),_parse_datetime(payload["evaluated_at"]),_parse_datetime(payload["generated_at"]),condition)
+        expected={"event_key":value.validation_id,"hypothesis_id":value.hypothesis_id,"context_id":value.context_id,"status":value.status.value,"validator_version":value.validator_version,"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored research validation columns do not match payload")
+        return value
+
+    def get_hypothesis_candidate_link(self, link_id: str) -> HypothesisCandidateLink | None:
+        row=self._fetchone("SELECT * FROM hypothesis_candidate_links WHERE link_id=?",(link_id,))
+        if row is None:return None
+        payload=json.loads(row["payload_json"])
+        value=HypothesisCandidateLink(payload["link_id"],payload["hypothesis_id"],payload["candidate_id"],CandidateEligibility(payload["eligibility"]),payload["mapping_registry_version"],payload["mapping_key"],tuple(payload["rejection_reasons"]),_parse_datetime(payload["created_at"]))
+        expected={"event_key":value.link_id,"hypothesis_id":value.hypothesis_id,"candidate_id":value.candidate_id,"eligibility":value.eligibility.value,"mapping_version":value.mapping_registry_version,"generated_at":utc_iso(value.created_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored research candidate link columns do not match payload")
+        return value
 
     @staticmethod
     def _execution_expression(payload):

@@ -1,0 +1,52 @@
+"""Opt-in real LLM smoke: connection, strict JSON, parser and secret redaction."""
+from __future__ import annotations
+
+import os
+from datetime import datetime,timezone
+
+import pytest
+
+from tradehelper_v2.config.settings import V2Settings
+from tradehelper_v2.contracts import InstrumentId,InvocationStatus,Market,ResearchScope,stable_hash
+from tradehelper_v2.research.client import LLMResearchRequest,OpenAICompatibleResearchClient,ResearchClientCapabilities
+from tradehelper_v2.research.context import ResearchContextBuilder
+from tradehelper_v2.research.parser import StrictHypothesisParser
+from tradehelper_v2.research.prompt import PROMPT_VERSION,build_prompt
+from research_helpers import fact
+
+
+if os.environ.get("TRADEHELPER_LLM_LIVE_TESTS")!="1":
+    pytestmark=pytest.mark.skip(reason="set TRADEHELPER_LLM_LIVE_TESTS=1 to run the configured real LLM smoke")
+
+
+def _settings():
+    if os.environ.get("TRADEHELPER_LIVE_USE_V1_SETTINGS")=="1":
+        from config.settings import Settings
+        legacy=Settings.init(Settings.default_config_path())
+        return V2Settings.from_mapping({name:legacy.get(name) for name in ("llm_base_url","llm_api_key","llm_model","llm_enable_thinking")})
+    return V2Settings.load()
+
+
+def test_live_llm_research_strict_schema_and_secret_redaction():
+    settings=_settings()
+    if not settings.llm_base_url or not settings.llm_api_key or not settings.llm_model:
+        pytest.fail("real LLM smoke was enabled but configured LLM credentials are incomplete")
+    now=datetime.now(timezone.utc)
+    instrument=InstrumentId.from_code("AAPL",Market.US,"XNAS")
+    builder=ResearchContextBuilder()
+    facts=(fact(instrument,now),fact(instrument,now,key="position.shares",value=12345))
+    manifest=builder.build_manifest(scope=ResearchScope.SINGLE_STOCK,market=Market.US,cutoff_at=now,instruments=(instrument,),facts=facts,generated_at=now)
+    context=builder.build_context(scope=ResearchScope.SINGLE_STOCK,market=Market.US,mode="eod",cutoff_at=now,manifest=manifest,instrument_roles=((instrument,"subject"),),generated_at=now)
+    prompt,prompt_hash=build_prompt(context)
+    assert "12345" not in prompt
+    request=LLMResearchRequest("live-research-smoke",context.context_id,PROMPT_VERSION,prompt_hash,1,"configured",settings.llm_model,now,max_output_tokens=4000,timeout_seconds=90,thinking_enabled=False)
+    client=OpenAICompatibleResearchClient(
+        endpoint=settings.llm_base_url,api_key=settings.llm_api_key,prompts={request.request_id:prompt},
+        capabilities=ResearchClientCapabilities(False,True,False,False),
+    )
+    response=client.generate(request)
+    assert response.invocation_status is InvocationStatus.SUCCEEDED
+    assert settings.llm_api_key not in response.content
+    hypotheses=StrictHypothesisParser().parse(content=response.content,context=context,response=response)
+    assert len(hypotheses)<=5
+    assert response.content_hash==stable_hash(response.content)

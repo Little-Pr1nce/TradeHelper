@@ -74,7 +74,7 @@ TradePlan + ExecutionDecision
 | `AGENTS.md` | Codex 本地工作约定 |
 | `CLAUDE.md` | Claude Code 本地工作约定 |
 
-V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-10 分别以对应阶段规范为准。V2-9 已完成并复审；V2-10 精确设计已冻结，下一步只实现 V2-10，完成 LL00-LL49 后停止。
+V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-10 分别以对应阶段规范为准。V2-10 已完成并复审；实现严格停止于 LLM 假设层，未进入 V2-11。
 
 ## 1. V2 分层结构
 
@@ -1079,7 +1079,7 @@ venv/bin/python -m pytest tests/ -q
 | V2-7 成交仿真层 | 已完成并复审 | OrderIntent、冻结条件触发、当前预览、历史仿真、Decimal 成本、双市场最终检查、migration 11 与 EX00-EX49 均已通过；不包含 V2-8 组合分配 |
 | V2-8 组合决策层 | 已完成并复审 | 不可变组合批次/风险快照/相关性证据、保护退出优先、双 profile 独立 waterfall、现金/heat/相关性约束、共享退出、替换研究候选、V2-7 最终股数装配及 migration 12 原子持久化已通过 PO00-PO49；实现严格止步于 V2-8。 |
 | V2-9 学习层 | 已完成并复审 | 精确合同见 `docs/v2/V2_9_LEARNING.md`；已实现到期验证、三本账、六层归因、purged OOF、股票绑定自优化、候选生命周期、migration 13/14 和 LE00-LE59，止步于学习层 |
-| V2-10 LLM 假设层 | 设计已冻结，待实现 | 精确合同见 `docs/v2/V2_10_LLM_HYPOTHESES.md`；严格 JSON、冻结事实验证、候选桥接、LLM 独立账、migration 15 和 LL00-LL49 |
+| V2-10 LLM 假设层 | 已完成并复审 | 精确合同见 `docs/v2/V2_10_LLM_HYPOTHESES.md`；冻结事实 manifest、严格 JSON 五类假设、确定性四态验证、注册候选桥接、独立 outcome/metric 账、migration 15、强类型恢复、LL00-LL49 与双市场失败降级均已通过；未进入 V2-11。 |
 | V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
 | V2-12 迁移/端到端/发布 | 未开始 | 每层单测通过后执行完整矩阵与跨平台烟雾 |
 
@@ -1143,10 +1143,10 @@ V2-9 已按 [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) 完成并复�
 
 最终验证：学习专项 `99 passed in 1.42s`；V2 全量 `541 passed, 3 skipped in 41.68s`；项目全量 `801 passed, 3 skipped in 74.16s`；默认关闭的 3 条真实 Provider 冒烟显式启用后 `3 passed in 30.33s`。3 个 skip 均为同一组显式联网测试，已单独执行通过。实现严格停止于 V2-9，未进入 V2-10 LLM 或 V2-11 UI/报告。
 
-## 18. 当前实施点：V2-10 设计已冻结
+## 18. V2-10 完成并复审：LLM 假设层
 
-V2-10 已按 [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) 完成精确设计，当前尚未实现。设计吸收 V1 “研究员观察 vs 系统确认、分歧可见、观察形态复盘”的有效经验，同时删除 Markdown 表格解析、关键词猜形态和观察直接获得执行等级等旧耦合。
+V2-10 已按 [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) 实现并复审。研究层以冻结 `ResearchFactManifest`、最小披露 canonical JSON Prompt 和注入式 client 协议接收模型输出；严格 parser 只允许五类假设和有限 predicate，拒绝 Markdown、未知字段、交易指令、价格/概率和跨 manifest 引用。
 
-固定主链为：冻结上游事实 -> `ResearchFactManifest` -> 严格 JSON LLM 响应 -> 五类结构化假设 -> 确定性 DSL/注册表验证 -> V2-9 candidate bridge 与独立复盘。LLM 不接触账户金额、股数或 API Key，不生成当前交易指令；未知模型、特征、策略模板和算子只保存为 `implementation_required`，不能自动改写源码。
+固定主链为：冻结上游事实 -> `ResearchFactManifest` -> 严格 JSON LLM 响应 -> 五类结构化假设 -> 确定性 DSL/注册表验证 -> V2-9 candidate bridge 与独立复盘。LLM 不接触账户金额、股数或 API Key，不生成当前交易指令；未知模型、特征、策略模板和算子只保存为 `implementation_required`，不能自动改写源码。migration 15 以同一事务保存 context、response revision、hypothesis、validation 和 candidate link，冲突隔离并支持强类型重启恢复。
 
-本阶段冻结 migration 15、LL00-LL49、Tab1/Tab3 与 A股/美股一致性、响应 revision、prompt injection 防护、失败不阻断确定性主链和可选真实 LLM 冒烟。下一步只实现 V2-10；完成专项、V2 全量、项目全量和可配置的真实 LLM schema 冒烟后停止，不进入 V2-11 UI/报告。
+已完成 LL00-LL49 一编号一行为测试、Tab1/Tab3 稳定分片、A股/美股事实隔离、响应 revision、prompt injection 防护、V2-5 同源三值验证、V2-9 候选/到期引用闭合和失败降级。复审进一步补齐了分片输出标的白名单、全局事实去重、股票/行业/市场候选作用域绑定、同内容注册表校验、SHA-256 来源与 artifact 闭合、候选指标按 candidate 去重，以及 hypothesis -> candidate -> promotion 的数据库引用闭合。最终验证结果：研究专项 `72 passed`；V2 全量 `613 passed, 4 skipped`；项目全量 `873 passed, 4 skipped`。默认关闭的 4 条真实网络 smoke 已使用本机配置合并显式执行，结果 `4 passed in 42.92s`，覆盖 3 条真实数据 Provider 和 1 条真实 LLM 严格 JSON/脱敏链路；实现严格停止于 V2-10，未进入 V2-11 UI/报告。

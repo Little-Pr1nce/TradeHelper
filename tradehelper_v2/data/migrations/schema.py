@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import sqlite3
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -581,6 +581,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_maturity_active
 ON maturity_evidence(instrument_key, origin_session_date, target_session_date, revision);
 """.strip()
 
+_SCHEMA_V15_SQL = """
+CREATE TABLE IF NOT EXISTS research_contexts (context_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,scope TEXT NOT NULL,market TEXT NOT NULL,cutoff_at TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS llm_research_invocations (response_id TEXT PRIMARY KEY,request_id TEXT NOT NULL,context_id TEXT NOT NULL,revision INTEGER NOT NULL,provider_name TEXT NOT NULL,model_name TEXT NOT NULL,prompt_version TEXT NOT NULL,prompt_hash TEXT NOT NULL,content_hash TEXT NOT NULL,status TEXT NOT NULL,finish_reason TEXT,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,received_at TEXT NOT NULL,UNIQUE(request_id,revision));
+CREATE TABLE IF NOT EXISTS research_hypotheses (hypothesis_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,response_id TEXT NOT NULL,context_id TEXT NOT NULL,instrument_key TEXT,kind TEXT NOT NULL,business_key TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS hypothesis_validations (validation_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,hypothesis_id TEXT NOT NULL,context_id TEXT NOT NULL,status TEXT NOT NULL,validator_version TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS hypothesis_candidate_links (link_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,hypothesis_id TEXT NOT NULL,candidate_id TEXT,eligibility TEXT NOT NULL,mapping_version TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS hypothesis_outcomes (outcome_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,hypothesis_id TEXT NOT NULL,instrument_key TEXT NOT NULL,horizon INTEGER,status TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS research_metric_snapshots (snapshot_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,market TEXT NOT NULL,scope_key TEXT NOT NULL,cutoff_at TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+""".strip()
+
 
 def schema_checksum() -> str:
     return sha256(_SCHEMA_SQL.encode("utf-8")).hexdigest()
@@ -622,6 +632,8 @@ def schema_v13_checksum() -> str:
     return sha256(_SCHEMA_V13_SQL.encode("utf-8")).hexdigest()
 def schema_v14_checksum() -> str:
     return sha256(_SCHEMA_V14_SQL.encode("utf-8")).hexdigest()
+def schema_v15_checksum() -> str:
+    return sha256(_SCHEMA_V15_SQL.encode("utf-8")).hexdigest()
 
 
 def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, checksum: str) -> None:
@@ -662,4 +674,5 @@ def apply_schema(connection: sqlite3.Connection) -> None:
     _apply_migration(connection, 12, _SCHEMA_V12_SQL, schema_v12_checksum())
     _apply_migration(connection, 13, _SCHEMA_V13_SQL, schema_v13_checksum())
     _apply_migration(connection, 14, _SCHEMA_V14_SQL, schema_v14_checksum())
+    _apply_migration(connection, 15, _SCHEMA_V15_SQL, schema_v15_checksum())
     connection.commit()

@@ -146,11 +146,11 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
-| LLM 不能直接下单 | 防止不可复现建议 | `report/prompts.py`, docs | `research/` | V2-10设计已冻结，待实现 | `tests/v2/test_research_parser.py`, `test_research_validation.py` |
-| LLM 观察候选池 | 保留模型发现的新点子 | `services/research_observations.py` | `research/engine.py` | V2-10设计已冻结，待实现 | `tests/v2/test_research_context.py`, `test_research_parser.py` |
-| 系统确认/反驳/待验证 | 分歧可见，不静默删除 | `research_observations.py` | `research/validator.py` | V2-10设计已冻结为四状态，待实现 | `tests/v2/test_research_validation.py` |
-| LLM 和系统规则分账 | 不让系统规则冒领 LLM 命中率 | `research_observation_log` | `research/outcomes.py` | V2-10设计已冻结，待实现 | `tests/v2/test_research_outcomes.py` |
-| 有效假设沉淀候选模板 | 让系统越运行越聪明 | `research_observation_log` | `research/bridge.py` + `learning/` | V2-10设计已冻结，待实现 | `tests/v2/test_research_candidate_bridge.py` |
+| LLM 不能直接下单 | 防止不可复现建议 | `report/prompts.py`, docs | `research/` | V2-10严格 schema、禁执行字段和失败降级已完成并复审 | `tests/v2/test_research_parser.py`, `test_research_validation.py` |
+| LLM 观察候选池 | 保留模型发现的新点子 | `services/research_observations.py` | `research/engine.py` | V2-10冻结事实、稳定分片和五类假设已完成并复审 | `tests/v2/test_research_context.py`, `test_research_parser.py` |
+| 系统确认/反驳/待验证 | 分歧可见，不静默删除 | `research_observations.py` | `research/validator.py` | V2-10复用V2-5三值DSL的四状态验证已完成并复审 | `tests/v2/test_research_validation.py` |
+| LLM 和系统规则分账 | 不让系统规则冒领 LLM 命中率 | `research_observation_log` | `research/outcomes.py` | V2-10仅消费V2-9 maturity/forecast/promotion事实的独立账已完成并复审 | `tests/v2/test_research_outcomes.py` |
+| 有效假设沉淀候选模板 | 让系统越运行越聪明 | `research_observation_log` | `research/bridge.py` + `learning/` | V2-10注册映射、20候选上限和CANDIDATE生命周期已完成并复审 | `tests/v2/test_research_candidate_bridge.py` |
 
 ## P1 UI 与报告资产
 
