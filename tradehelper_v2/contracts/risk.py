@@ -148,8 +148,12 @@ class PlanEvidenceSnapshot:
         _hash(self.parameter_hash, "evidence parameter hash")
         if self.sample_count < 0 or self.oof_sample_count < 0 or self.oof_sample_count > self.sample_count or not self.strategy_id or not self.strategy_version or not self.source_ledger_version: raise ContractViolation("invalid evidence samples")
         values = (self.expected_net_return, self.confidence_low, self.confidence_high, self.win_rate, self.max_adverse_excursion)
-        if status is EvidenceStatus.UNAVAILABLE:
-            if self.sample_count or self.oof_sample_count or any(item is not None for item in values): raise ContractViolation("unavailable evidence cannot claim samples or metrics")
+        if status is EvidenceStatus.CONFLICTING:
+            pass
+        elif status is EvidenceStatus.UNAVAILABLE:
+            if self.oof_sample_count == 0 and any(item is not None for item in values): raise ContractViolation("unavailable evidence without OOF samples cannot claim metrics")
+            if 1 <= self.oof_sample_count < 10 and any(item is None for item in values): raise ContractViolation("observed but unavailable evidence needs complete metrics")
+            if self.oof_sample_count >= 10: raise ContractViolation("ten or more OOF samples require an evaluated status")
         elif any(item is None for item in values): raise ContractViolation("available evidence needs complete metrics")
         for name, value in zip(("expected return", "confidence low", "confidence high", "win rate", "max adverse excursion"), values):
             if value is not None: ensure_finite(value, name)
@@ -168,9 +172,10 @@ class PlanEvidenceSnapshot:
         # 不能用一组貌似正常的汇总指标把冲突降级为普通样本不足。
         if self.status is EvidenceStatus.CONFLICTING: return EvidenceStatus.CONFLICTING
         if self.expected_net_return is None: return EvidenceStatus.UNAVAILABLE
+        if 1 <= self.oof_sample_count < 10: return EvidenceStatus.UNAVAILABLE
         if self.confidence_high < 0 or (self.oof_sample_count >= 10 and self.expected_net_return < 0) or (self.oof_sample_count >= 30 and self.expected_net_return <= 0): return EvidenceStatus.NEGATIVE
         if self.oof_sample_count >= 30 and self.expected_net_return > 0 and self.confidence_low >= 0: return EvidenceStatus.RELIABLE_POSITIVE
-        if 1 <= self.oof_sample_count <= 29: return EvidenceStatus.INSUFFICIENT_SAMPLE
+        if 10 <= self.oof_sample_count <= 29: return EvidenceStatus.INSUFFICIENT_SAMPLE
         if self.oof_sample_count >= 30 and self.expected_net_return > 0: return EvidenceStatus.POSITIVE_UNCERTAIN
         return EvidenceStatus.UNAVAILABLE
 

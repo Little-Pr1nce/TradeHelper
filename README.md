@@ -28,7 +28,7 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-9 学习层规范：[docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 至 V2-8 已完成并复审。V2-9 学习层设计已经冻结，下一步只实现到期事实验证、预测账/策略账/联合账、六层归因、历史 OOF、股票绑定自优化、候选晋升/回滚、migration 13 和 LE00-LE59；不得提前实现 V2-10 LLM 或 V2-11 UI/报告。
+V2-0 至 V2-9 已完成并复审。V2-9 已实现到期事实验证、预测账/策略账/联合账、六层归因、历史 OOF、股票绑定自优化、候选晋升/回滚、migration 13 及纠错 migration 14 和 LE00-LE59；当前停止在学习层，不提前实现 V2-10 LLM 或 V2-11 UI/报告。
 
 ## 一以贯之的系统目标
 
@@ -87,7 +87,7 @@ V2-0 至 V2-8 已完成并复审。V2-9 学习层设计已经冻结，下一步�
 | [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) | V2-6 风控合同、真实账户估值、A/B/C/D、sizing、双市场规则和 RK00-RK42 |
 | [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) | V2-7 OrderIntent、触发状态机、当前预览、历史成交、费用/滑点、migration 11 和 EX00-EX49 |
 | [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) | V2-8 组合批次、排序、现金/heat/相关性分配、最终股数、migration 12 和 PO00-PO49 |
-| [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) | V2-9 到期验证、三本账、六层归因、OOF、自优化生命周期、migration 13 和 LE00-LE59 |
+| [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) | V2-9 到期验证、三本账、六层归因、OOF、自优化生命周期、migration 13/14 和 LE00-LE59 |
 | `AGENTS.md` | Codex 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 | `CLAUDE.md` | Claude Code 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 
@@ -112,7 +112,7 @@ venv/bin/python -m pytest tests/ -q
 tests/v2/
 ```
 
-V2-8 已完成并复审：PO00-PO49 已逐号映射为 50 个独立验收测试，V2-8 专项 `53 passed`，V2 回归 `442 passed, 3 skipped`，项目全量 `702 passed, 3 skipped`；3 条真实 Provider 冒烟显式启用后 `3 passed`。V2-9 精确设计已冻结，待按 LE00-LE59 实现和复审。
+V2-9 已完成并复审：LE00-LE59 已逐号映射为 60 个独立行为测试，并补充真实 V2-5→V2-8 成交/组合链、截止日、冲突、revision 链、全链身份闭合和回滚测试。学习专项 `99 passed`，V2 全量 `541 passed, 3 skipped`，项目全量 `801 passed, 3 skipped`；3 条真实 Provider 冒烟显式启用后 `3 passed in 30.33s`。实现严格停止在 V2-9 学习层。
 
 ## 历史资料
 

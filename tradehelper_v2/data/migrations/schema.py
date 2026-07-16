@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import sqlite3
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 14
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -555,6 +555,32 @@ CREATE TABLE IF NOT EXISTS portfolio_replacement_candidates (
 CREATE INDEX IF NOT EXISTS idx_v2_portfolio_replacements_lookup ON portfolio_replacement_candidates(portfolio_bundle_id, profile);
 """.strip()
 
+_SCHEMA_V13_SQL = """
+CREATE TABLE IF NOT EXISTS maturity_evidence (evidence_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,instrument_key TEXT NOT NULL,target_session_date TEXT NOT NULL,status TEXT NOT NULL,revision INTEGER NOT NULL,supersedes_id TEXT,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_maturity_active ON maturity_evidence(instrument_key,target_session_date,revision);
+CREATE TABLE IF NOT EXISTS forecast_outcomes (forecast_outcome_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,instrument_key TEXT NOT NULL,horizon INTEGER NOT NULL,evidence_origin TEXT NOT NULL,status TEXT NOT NULL,maturity_evidence_id TEXT,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS scenario_outcomes (scenario_outcome_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,instrument_key TEXT NOT NULL,status TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS strategy_outcomes (strategy_outcome_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,instrument_key TEXT NOT NULL,plan_id TEXT NOT NULL,status TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS joint_outcomes (joint_outcome_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,market TEXT NOT NULL,profile TEXT,outcome_kind TEXT NOT NULL,status TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS learning_metric_snapshots (snapshot_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,ledger_kind TEXT NOT NULL,scope_key TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS learning_replay_runs (run_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,market TEXT NOT NULL,status TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS learning_folds (fold_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,run_id TEXT,market TEXT NOT NULL,test_start TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS learning_candidate_versions (candidate_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,market TEXT NOT NULL,kind TEXT NOT NULL,scope TEXT NOT NULL,scope_key TEXT NOT NULL,lifecycle TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS learning_promotion_events (promotion_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,candidate_id TEXT NOT NULL,projection_key TEXT NOT NULL,decision TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS learning_deployments (projection_key TEXT PRIMARY KEY,candidate_id TEXT NOT NULL,promotion_id TEXT NOT NULL,updated_at TEXT NOT NULL,FOREIGN KEY(candidate_id) REFERENCES learning_candidate_versions(candidate_id));
+CREATE TABLE IF NOT EXISTS plan_evidence_snapshots (evidence_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,instrument_key TEXT NOT NULL,strategy_id TEXT NOT NULL,parameter_hash TEXT NOT NULL,profile TEXT,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+""".strip()
+
+_SCHEMA_V14_SQL = """
+ALTER TABLE maturity_evidence ADD COLUMN origin_session_date TEXT;
+UPDATE maturity_evidence
+SET origin_session_date = json_extract(payload_json, '$.origin_session_date')
+WHERE origin_session_date IS NULL;
+DROP INDEX IF EXISTS idx_v2_maturity_active;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_maturity_active
+ON maturity_evidence(instrument_key, origin_session_date, target_session_date, revision);
+""".strip()
+
 
 def schema_checksum() -> str:
     return sha256(_SCHEMA_SQL.encode("utf-8")).hexdigest()
@@ -592,6 +618,10 @@ def schema_v11_checksum() -> str:
     return sha256(_SCHEMA_V11_SQL.encode("utf-8")).hexdigest()
 def schema_v12_checksum() -> str:
     return sha256(_SCHEMA_V12_SQL.encode("utf-8")).hexdigest()
+def schema_v13_checksum() -> str:
+    return sha256(_SCHEMA_V13_SQL.encode("utf-8")).hexdigest()
+def schema_v14_checksum() -> str:
+    return sha256(_SCHEMA_V14_SQL.encode("utf-8")).hexdigest()
 
 
 def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, checksum: str) -> None:
@@ -630,4 +660,6 @@ def apply_schema(connection: sqlite3.Connection) -> None:
     _apply_migration(connection, 10, _SCHEMA_V10_SQL, schema_v10_checksum())
     _apply_migration(connection, 11, _SCHEMA_V11_SQL, schema_v11_checksum())
     _apply_migration(connection, 12, _SCHEMA_V12_SQL, schema_v12_checksum())
+    _apply_migration(connection, 13, _SCHEMA_V13_SQL, schema_v13_checksum())
+    _apply_migration(connection, 14, _SCHEMA_V14_SQL, schema_v14_checksum())
     connection.commit()

@@ -15,6 +15,7 @@ from tradehelper_v2.contracts import (
 from tradehelper_v2.data.calendar import TradingCalendar, TradingCalendarUnavailable
 
 from .feature_sets import FEATURE_SET_VERSION, model_input_hash
+from .labels import flat_band
 from .models import InsufficientRegimeSamples, local_replacement_drivers, predict_model
 from .registry import ForecastRegistry
 
@@ -73,7 +74,12 @@ class ForecastEngine:
         direction = ForecastDirection(ordered[0][1]); margin = float(ordered[0][0] - ordered[1][0])
         input_hash = model_input_hash(request.feature_snapshot, request.feature_snapshot.latest_bar_date, feature_set_id)
         key = "|".join((request.feature_snapshot.instrument.stable_key, request.feature_snapshot.latest_bar_date.isoformat(), target.isoformat(), str(horizon), version, input_hash))
-        return ForecastResult(request.feature_snapshot.instrument, request.feature_snapshot.cutoff_at, request.feature_snapshot.latest_bar_date, target, horizon, request.reference_bar.close, ForecastAvailability.AVAILABLE, probabilities, distribution, direction, margin, scope, scope_key, family, version, lifecycle, status, execution_eligible, feature_set_id, FEATURE_SET_VERSION, input_hash, training_hash, sample_count, oof_count, tuple(drivers), type(self.calendar).__name__, None, key, datetime.now(timezone.utc))
+        values = {item.name: item for item in request.feature_snapshot.values}
+        volatility = values.get("closed.realized_vol_20")
+        if volatility is None or volatility.status.value != "available" or not isinstance(volatility.value, (float, int)):
+            return self._unavailable(request, horizon, ForecastAvailability.DATA_BLOCKED, "origin volatility unavailable for label policy", target)
+        band = flat_band(float(volatility.value), horizon)
+        return ForecastResult(request.feature_snapshot.instrument, request.feature_snapshot.cutoff_at, request.feature_snapshot.latest_bar_date, target, horizon, request.reference_bar.close, ForecastAvailability.AVAILABLE, probabilities, distribution, direction, margin, scope, scope_key, family, version, lifecycle, status, execution_eligible, feature_set_id, FEATURE_SET_VERSION, input_hash, training_hash, sample_count, oof_count, tuple(drivers), type(self.calendar).__name__, None, key, datetime.now(timezone.utc), label_flat_band=band)
 
     def _unavailable(self, request, horizon, availability, reason, target=None):
         """发行带明确原因的不可用结果，不把样本不足伪装成中性预测。"""

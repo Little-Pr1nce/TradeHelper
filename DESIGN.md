@@ -58,7 +58,7 @@ TradeHelper 一以贯之的产品目标，是稳定回答五个问题：
 | [docs/v2/V2_6_RISK.md](./docs/v2/V2_6_RISK.md) | V2-6 规范：真实账户冻结估值、A/B/C/D、Decimal sizing、双市场规则和 RK00-RK42 |
 | [docs/v2/V2_7_EXECUTION.md](./docs/v2/V2_7_EXECUTION.md) | V2-7 规范：OrderIntent、触发状态机、成交证据、费用/滑点、migration 11 和 EX00-EX49 |
 | [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) | V2-8 规范：组合冻结批次、排序、现金/heat/相关性分配、最终股数、migration 12 和 PO00-PO49 |
-| [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) | V2-9 规范：到期验证、三本账、六层归因、历史 OOF、自优化生命周期、migration 13 和 LE00-LE59 |
+| [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) | V2-9 规范：到期验证、三本账、六层归因、历史 OOF、自优化生命周期、migration 13/14 和 LE00-LE59 |
 | `AGENTS.md` | Codex 本地约定：Codex 开发时先读它，再读 DESIGN 和 V2_REFACTOR_PLAN |
 | `CLAUDE.md` | Claude Code 本地约定：Claude 开发时先读它，再读 DESIGN 和 V2_REFACTOR_PLAN |
 
@@ -193,7 +193,7 @@ LLM 观察无论被系统确认、反驳、待验证或因数据无效无法判�
 当前实施边界：
 
 ```text
-V2-0 至 V2-8 已完成并复审；V2-9 学习层设计已冻结，待实现
+V2-0 至 V2-9 已完成并复审；当前停止在学习层
 ```
 
-V2-0 至 V2-8 已完成并复审。V2-9 按 [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) 单独验证预测、情景、策略、风控、成交和组合效果，并用预测账、策略账、联合账驱动受控候选生命周期。当前只授权 V2-9；LLM、报告和 UI 仍未实现。
+V2-9 已按 [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) 完成并复审：预测、情景、策略、风控、成交和组合效果分别记账，并由预测账、策略账、联合账驱动受控候选生命周期；历史 OOF 回放还会强制验证各层业务身份闭合，不能用空壳阶段伪造完整链路。数据库以 migration 13 建立学习表，再由 migration 14 修正成熟度事实的 origin/target/revision 唯一身份。当前停止在 V2-9；LLM、报告和 UI 仍未实现。

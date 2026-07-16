@@ -1117,7 +1117,7 @@ venv/bin/python -m pytest tests/ -q
 | V2-6 风控层 | 已完成并复审 | ExecutionDecision、真实账户冻结估值、A/B/C/D、Decimal 单计划容量、风险成本预留、A/美股规则预检、migration 10 与 RK00-RK42 测试映射已完成；不包含 V2-7/V2-8 模块 |
 | V2-7 成交仿真层 | 已完成并复审 | OrderIntent、冻结条件触发、当前预览、历史仿真、Decimal 成本、双市场最终检查、migration 11 与 EX00-EX49 均已通过；不包含 V2-8 组合分配 |
 | V2-8 组合决策层 | 已完成并复审 | 不可变组合批次/风险快照/相关性证据、保护退出优先、双 profile 独立 waterfall、现金/heat/相关性约束、共享退出、替换研究候选、V2-7 最终股数装配及 migration 12 原子持久化已通过 PO00-PO49；实现严格止步于 V2-8。 |
-| V2-9 学习层 | 设计冻结，待实现 | 精确合同见 `docs/v2/V2_9_LEARNING.md`；只实现到期验证、三本账、六层归因、purged OOF、股票绑定自优化、候选生命周期、migration 13 和 LE00-LE59 |
+| V2-9 学习层 | 已完成并复审 | 精确合同见 `docs/v2/V2_9_LEARNING.md`；已实现到期验证、三本账、六层归因、purged OOF、股票绑定自优化、候选生命周期、migration 13/14 和 LE00-LE59，止步于学习层 |
 | V2-10 LLM 假设层 | 未开始 | 可复用 V1 observation，但需拆预测/策略假设并限制为 DSL |
 | V2-11 报告/UI | 未开始 | 最后做展示，不再用报告反推计算正确性 |
 | V2-12 迁移/端到端/发布 | 未开始 | 每层单测通过后执行完整矩阵与跨平台烟雾 |
@@ -1174,8 +1174,10 @@ V2-8 已按 [docs/v2/V2_8_PORTFOLIO.md](./docs/v2/V2_8_PORTFOLIO.md) 完成并�
 
 PO00-PO49 已逐号映射为 50 个独立验收测试；V2-8 专项 `53 passed`，V2 全量 `442 passed, 3 skipped`（共 445 项），项目全量 `702 passed, 3 skipped`。默认关闭的 3 条真实 Provider 冒烟使用本地 V1 测试配置桥接显式启用后 `3 passed in 24.16s`。100 只股票、800 个真实上游 candidate 的双 profile 组合决策本机约 `0.05s`。V2-8 在 `b620bc7` 后形成完成基线；后续工作进入单独冻结的 V2-9 设计。
 
-## 17. 当前实施点：V2-9 设计冻结，待实现
+## 17. 当前实施点：V2-9 已完成并复审
 
-V2-9 已按 [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) 冻结精确设计。实现必须把在线到期事实与历史重建 OOF 分开，分别建立预测账、策略账和联合账，并对 Forecast、Scenario、Strategy、Risk、Execution、Portfolio 六层做配对归因。自动优化以股票为第一作用域，行业/市场只作样本不足 fallback；只能调整预注册模型、特征子集、策略参数和软政策，不能改写源码或放宽硬约束。
+V2-9 已按 [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) 完成并复审。学习层将在线到期事实与历史重建 OOF 显式隔离，分别建立预测账、策略账和联合账，并对 Forecast、Scenario、Strategy、Risk、Execution、Portfolio 六层进行配对反事实归因。自动优化以股票为第一作用域，行业/市场只作样本不足的观察 fallback；候选只能调整预注册模型、特征子集、策略参数和软政策，不能改写源码或放宽硬约束。
 
-Terra 当前只实现 learning contracts、MaturityResolver、三本账、purged walk-forward replay、PlanEvidenceSnapshot 投影、候选/影子/Champion/漂移/回滚生命周期、migration 13 和 LE00-LE59。完成 V2-9 专项、V2 全量、项目全量及现有真实 Provider 冒烟并更新阶段状态后停止，不得提前进入 V2-10 LLM 或 V2-11 UI/报告。
+落地内容包括不可变 learning contracts、目标会话 MaturityResolver 与无环 superseded revision 持久化、概率/策略/联合账和 PlanEvidenceSnapshot 投影、固定 V2-3→V2-8 purged walk-forward 主链与显式 ReplayAccountPolicy、候选/挑战者/影子/Champion/漂移/回滚生命周期、migration 13 及成熟度身份纠错 migration 14、强类型 repository 恢复，以及 LE00-LE59 的 60 个独立行为测试和额外真实链路回归。复审重点修复了动态波动率方向标签、同目标日不同预测来源冲突、OOF/在线样本混账、窗口退出成本被当作零、部分成交遗漏、联合账缺失、非法生命周期跳转和回滚未切换部署等问题；全链回放现在还会逐层验证四周期预测、情景、策略、风控、组合分配、成交事实和 outcome 的身份闭合，空壳阶段不能生成伪 OOF 证据。
+
+最终验证：学习专项 `99 passed in 1.42s`；V2 全量 `541 passed, 3 skipped in 41.68s`；项目全量 `801 passed, 3 skipped in 74.16s`；默认关闭的 3 条真实 Provider 冒烟显式启用后 `3 passed in 30.33s`。3 个 skip 均为同一组显式联网测试，已单独执行通过。实现严格停止于 V2-9，未进入 V2-10 LLM 或 V2-11 UI/报告。

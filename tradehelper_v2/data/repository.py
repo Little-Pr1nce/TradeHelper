@@ -65,6 +65,7 @@ from tradehelper_v2.contracts.strategy import (ConditionEvaluation, ConditionExp
 from tradehelper_v2.contracts.risk import (ConstraintResult, DecisionDisposition, EvidenceStatus, ExecutionDecision, ExecutionLevel, FrozenAccountValuation, InstrumentClassification, MarketEligibility, MarketRuleSet, PlanEvidenceSnapshot, PositionValuation, RiskAdjustment, RiskConstraintKind, RiskDecisionBundle, RiskPolicy, RiskProfile, ValuationStatus)
 from tradehelper_v2.contracts.execution import (ExecutionEvidenceGrade, ExecutionMode, ExecutionRun, ExecutionStateDelta, EventGranularity, FillEvidence, FillOutcome, IntentBuildStatus, IntentState, OrderIntent, OrderIntentBuildRecord, OrderSide, OrderStyle, PathAssumption, TriggerEvaluation, TriggerState)
 from tradehelper_v2.contracts.portfolio import (AllocationStatus, CorrelationPair, CorrelationStatus, HoldingRiskSnapshot, HoldingRiskStatus, InstrumentReturnRisk, PortfolioAllocation, PortfolioCandidate, PortfolioCorrelationSnapshot, PortfolioDecisionBundle, PortfolioEvidenceGrade, PortfolioHeatStatus, PortfolioInputBatch, PortfolioPolicy, PortfolioProfileDecision, PortfolioReservationGroup, PortfolioReservationSnapshot, PortfolioRiskSnapshot, PortfolioRole, ReplacementCandidate, ReplacementStatus)
+from tradehelper_v2.contracts.learning import CandidateKind, CandidateLifecycle, CandidateScope, EvidenceOrigin, ForecastOutcome, JointOutcome, JointOutcomeKind, LearningCandidateVersion, LearningEvidenceGrade, LearningMetricSnapshot, LearningRun, LearningRunStatus, LedgerKind, MaturityEvidence, OutcomeStatus, PromotionDecision, PromotionEvent, ScenarioOutcome, StrategyOutcome
 from .migrations.schema import apply_schema
 
 
@@ -145,6 +146,18 @@ class ForecastWriteResult:
     inserted: int
     idempotent: int
     conflicts: int
+
+
+@dataclass(frozen=True, slots=True)
+class SimpleNamespaceFoldRecord:
+    """仅用于把 FoldDefinition 与其所属 run 的持久化元数据绑定。"""
+    run_id: str
+    fold: object
+    generated_at: datetime
+
+    @property
+    def fold_id(self) -> str:
+        return self.fold.fold_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -688,6 +701,8 @@ class SQLiteRepository:
             calendar_source=str(payload["calendar_source"]), reason=str(payload["reason"]) if payload.get("reason") else None,
             event_key=str(payload["event_key"]), generated_at=_parse_datetime(str(payload["generated_at"])),
             schema_version=int(payload.get("schema_version", 1)),
+            label_policy_version=str(payload.get("label_policy_version", "direction_v1_vol_scaled")),
+            label_flat_band=float(payload["label_flat_band"]) if payload.get("label_flat_band") is not None else None,
         )
 
     def get_forecast_result(self, event_key: str) -> ForecastResult | None:
@@ -1206,6 +1221,313 @@ class SQLiteRepository:
 
     def list_portfolio_decision_bundles(self, market: Market) -> tuple[PortfolioDecisionBundle, ...]:
         return tuple(self.get_portfolio_decision_bundle(row["portfolio_bundle_id"]) for row in self._fetchall("SELECT portfolio_bundle_id FROM portfolio_decision_bundles WHERE market=? ORDER BY generated_at,portfolio_bundle_id", (market.value,)))
+
+    def _save_learning_record(self, *, table, id_column, record, event_key, columns, values, instrument_key=None, connection=None):
+        if connection is None:
+            with self._transaction() as active: return self._save_learning_record(table=table,id_column=id_column,record=record,event_key=event_key,columns=columns,values=values,instrument_key=instrument_key,connection=active)
+        payload=canonical_json(record); payload_hash=stable_hash(_without_generated_at(json.loads(payload)))
+        row=connection.execute(f"SELECT payload_hash FROM {table} WHERE {id_column}=? OR event_key=?",(getattr(record,id_column),event_key)).fetchone()
+        if row:
+            if row["payload_hash"]==payload_hash: return ForecastWriteResult(0,1,0)
+            connection.execute("INSERT INTO quarantine_records(record_type,instrument_key,trading_date,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)",("learning_conflict",instrument_key,None,"CONFLICTING_LEARNING_RECORD",payload,utc_iso(datetime.now(timezone.utc))))
+            return ForecastWriteResult(0,0,1)
+        connection.execute(f"INSERT INTO {table}({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",values+(payload_hash,payload,utc_iso(record.generated_at),1))
+        return ForecastWriteResult(1,0,0)
+
+    def save_maturity_evidence(self, evidence: MaturityEvidence) -> ForecastWriteResult:
+        columns=("evidence_id","event_key","instrument_key","target_session_date","status","revision","supersedes_id","origin_session_date","payload_hash","payload_json","generated_at","schema_version")
+        values=(evidence.evidence_id,evidence.evidence_id,evidence.instrument.stable_key,evidence.target_session_date.isoformat(),evidence.status.value,evidence.revision,evidence.supersedes_evidence_id,evidence.origin_session_date.isoformat())
+        with self._transaction() as connection:
+            result=self._save_learning_record(table="maturity_evidence",id_column="evidence_id",record=evidence,event_key=evidence.evidence_id,columns=columns,values=values,instrument_key=evidence.instrument.stable_key,connection=connection)
+            if result.conflicts or evidence.supersedes_evidence_id is None: return result
+            row=connection.execute("SELECT payload_json FROM maturity_evidence WHERE evidence_id=?",(evidence.supersedes_evidence_id,)).fetchone()
+            if row is None: raise ContractViolation("maturity revision references missing predecessor")
+            prior=self._maturity_from_payload(json.loads(row["payload_json"]))
+            if (
+                prior.instrument != evidence.instrument
+                or prior.origin_session_date != evidence.origin_session_date
+                or prior.target_session_date != evidence.target_session_date
+                or prior.revision + 1 != evidence.revision
+                or prior.status is OutcomeStatus.SUPERSEDED
+            ):
+                raise ContractViolation("maturity revision does not extend the active predecessor")
+            from tradehelper_v2.learning.maturity import MaturityResolver
+            superseded=MaturityResolver().supersede(prior,generated_at=evidence.generated_at)
+            payload=canonical_json(superseded); payload_hash=stable_hash(_without_generated_at(json.loads(payload)))
+            connection.execute("UPDATE maturity_evidence SET status=?, payload_hash=?, payload_json=?, generated_at=? WHERE evidence_id=?",(superseded.status.value,payload_hash,payload,utc_iso(superseded.generated_at),superseded.evidence_id))
+            return result
+
+    @staticmethod
+    def _maturity_from_payload(payload: dict) -> MaturityEvidence:
+        raw=payload["instrument"]; instrument=InstrumentId(raw["code"],Market(raw["market"]),Exchange(raw["exchange"]))
+        money=lambda name: Decimal(payload[name]) if payload[name] is not None else None
+        return MaturityEvidence(payload["evidence_id"],instrument,date.fromisoformat(payload["origin_session_date"]),date.fromisoformat(payload["target_session_date"]),payload["reference_adjustment_mode"],Decimal(payload["reference_price"]),payload["target_bar_key"],money("target_price"),money("actual_return"),ForecastDirection(payload["actual_direction"]) if payload["actual_direction"] else None,Decimal(payload["flat_band"]),payload["bar_source"],payload["bar_payload_hash"],_parse_datetime(payload["bar_fetched_at"]) if payload["bar_fetched_at"] else None,_parse_datetime(payload["available_at"]) if payload["available_at"] else None,_parse_datetime(payload["evaluated_at"]),OutcomeStatus(payload["status"]),LearningEvidenceGrade(payload["evidence_grade"]),int(payload["revision"]),payload["supersedes_evidence_id"],tuple(payload["reason_codes"]),_parse_datetime(payload["generated_at"]))
+
+    def get_maturity_evidence(self, evidence_id: str) -> MaturityEvidence | None:
+        row=self._fetchone("SELECT * FROM maturity_evidence WHERE evidence_id=?",(evidence_id,))
+        if row is None:return None
+        value=self._maturity_from_payload(json.loads(row["payload_json"]))
+        expected={"event_key":value.evidence_id,"instrument_key":value.instrument.stable_key,"origin_session_date":value.origin_session_date.isoformat(),"target_session_date":value.target_session_date.isoformat(),"status":value.status.value,"revision":value.revision,"supersedes_id":value.supersedes_evidence_id,"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()): raise ContractViolation("stored maturity evidence columns do not match payload")
+        return value
+
+    def list_active_maturity_evidence(self, instrument: InstrumentId) -> tuple[MaturityEvidence,...]:
+        """每个 origin/target 只返回最新 revision，旧修订不会双计入 ledger。"""
+        rows=self._fetchall("""SELECT m.evidence_id FROM maturity_evidence m
+            WHERE m.instrument_key=? AND m.revision=(SELECT MAX(x.revision) FROM maturity_evidence x
+            WHERE x.instrument_key=m.instrument_key AND x.origin_session_date=m.origin_session_date
+            AND x.target_session_date=m.target_session_date)
+            AND m.status!='superseded' ORDER BY m.origin_session_date,m.target_session_date,m.evidence_id""",(instrument.stable_key,))
+        return tuple(self.get_maturity_evidence(row["evidence_id"]) for row in rows)
+
+    def save_forecast_outcome(self, outcome: ForecastOutcome) -> ForecastWriteResult:
+        return self._save_learning_record(table="forecast_outcomes",id_column="forecast_outcome_id",record=outcome,event_key=outcome.forecast_outcome_id,columns=("forecast_outcome_id","event_key","instrument_key","horizon","evidence_origin","status","maturity_evidence_id","payload_hash","payload_json","generated_at","schema_version"),values=(outcome.forecast_outcome_id,outcome.forecast_outcome_id,outcome.instrument.stable_key,outcome.horizon,outcome.evidence_origin.value,outcome.status.value,outcome.maturity_evidence_id),instrument_key=outcome.instrument.stable_key)
+
+    @staticmethod
+    def _forecast_outcome_from_payload(payload:dict)->ForecastOutcome:
+        raw=payload["instrument"]; instrument=InstrumentId(raw["code"],Market(raw["market"]),Exchange(raw["exchange"])); probabilities=None if payload["probabilities"] is None else DirectionProbabilities(**payload["probabilities"])
+        money=lambda key: Decimal(payload[key]) if payload[key] is not None else None
+        return ForecastOutcome(payload["forecast_outcome_id"],payload["forecast_event_key"],instrument,date.fromisoformat(payload["origin_session_date"]),date.fromisoformat(payload["target_session_date"]),int(payload["horizon"]),ForecastScope(payload["model_scope"]),payload["scope_key"],payload["model_family"],payload["model_version"],payload["feature_set_id"],payload["model_input_hash"],payload["training_data_hash"],EvidenceOrigin(payload["evidence_origin"]),payload["maturity_evidence_id"],ForecastDirection(payload["predicted_direction"]) if payload["predicted_direction"] else None,probabilities,payload["predicted_p10"],payload["predicted_p50"],payload["predicted_p90"],ForecastDirection(payload["actual_direction"]) if payload["actual_direction"] else None,money("actual_return"),money("actual_price"),payload["direction_correct"],payload["event_brier"],payload["event_log_loss"],payload["interval_hit"],payload["absolute_return_error"],payload["market_regime_key"],OutcomeStatus(payload["status"]),LearningEvidenceGrade(payload["evidence_grade"]),tuple(payload["reason_codes"]),_parse_datetime(payload["evaluated_at"]),_parse_datetime(payload["generated_at"]))
+
+    def get_forecast_outcome(self,outcome_id:str)->ForecastOutcome|None:
+        row=self._fetchone("SELECT * FROM forecast_outcomes WHERE forecast_outcome_id=?",(outcome_id,))
+        if row is None:return None
+        value=self._forecast_outcome_from_payload(json.loads(row["payload_json"]))
+        expected={"event_key":value.forecast_outcome_id,"instrument_key":value.instrument.stable_key,"horizon":value.horizon,"evidence_origin":value.evidence_origin.value,"status":value.status.value,"maturity_evidence_id":value.maturity_evidence_id,"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored forecast outcome columns do not match payload")
+        return value
+
+    def list_forecast_outcomes(self, instrument: InstrumentId, *, origin: EvidenceOrigin | None=None) -> tuple[ForecastOutcome,...]:
+        sql="SELECT forecast_outcome_id FROM forecast_outcomes WHERE instrument_key=?"; values=[instrument.stable_key]
+        if origin is not None: sql+=" AND evidence_origin=?"; values.append(origin.value)
+        sql+=" ORDER BY generated_at,forecast_outcome_id"
+        return tuple(self.get_forecast_outcome(row["forecast_outcome_id"]) for row in self._fetchall(sql,tuple(values)))
+
+    def save_scenario_outcome(self, outcome: ScenarioOutcome) -> ForecastWriteResult:
+        return self._save_learning_record(table="scenario_outcomes",id_column="scenario_outcome_id",record=outcome,event_key=outcome.scenario_outcome_id,columns=("scenario_outcome_id","event_key","instrument_key","status","payload_hash","payload_json","generated_at","schema_version"),values=(outcome.scenario_outcome_id,outcome.scenario_outcome_id,outcome.instrument.stable_key,outcome.status.value),instrument_key=outcome.instrument.stable_key)
+
+    @staticmethod
+    def _scenario_outcome_from_payload(payload: dict) -> ScenarioOutcome:
+        raw=payload["instrument"]; instrument=InstrumentId(raw["code"],Market(raw["market"]),Exchange(raw["exchange"]))
+        return ScenarioOutcome(payload["scenario_outcome_id"],payload["scenario_id"],instrument,tuple(payload["forecast_outcome_ids"]),payload["expected_bias"],payload["realized_bias"],payload["policy_version"],EvidenceOrigin(payload["evidence_origin"]),OutcomeStatus(payload["status"]),LearningEvidenceGrade(payload["evidence_grade"]),tuple(payload["reason_codes"]),_parse_datetime(payload["evaluated_at"]),_parse_datetime(payload["generated_at"]))
+
+    def get_scenario_outcome(self, outcome_id: str) -> ScenarioOutcome | None:
+        row=self._fetchone("SELECT * FROM scenario_outcomes WHERE scenario_outcome_id=?",(outcome_id,))
+        if row is None:return None
+        value=self._scenario_outcome_from_payload(json.loads(row["payload_json"]))
+        expected={"event_key":value.scenario_outcome_id,"instrument_key":value.instrument.stable_key,"status":value.status.value,"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored scenario outcome columns do not match payload")
+        return value
+
+    def save_strategy_outcome(self, outcome: StrategyOutcome) -> ForecastWriteResult:
+        return self._save_learning_record(table="strategy_outcomes",id_column="strategy_outcome_id",record=outcome,event_key=outcome.strategy_outcome_id,columns=("strategy_outcome_id","event_key","instrument_key","plan_id","status","payload_hash","payload_json","generated_at","schema_version"),values=(outcome.strategy_outcome_id,outcome.strategy_outcome_id,outcome.instrument.stable_key,outcome.plan_id,outcome.status.value),instrument_key=outcome.instrument.stable_key)
+
+    @staticmethod
+    def _strategy_outcome_from_payload(payload:dict)->StrategyOutcome:
+        raw=payload["instrument"]; instrument=InstrumentId(raw["code"],Market(raw["market"]),Exchange(raw["exchange"])); money=lambda key: Decimal(payload[key]) if payload[key] is not None else None
+        return StrategyOutcome(payload["strategy_outcome_id"],payload["plan_id"],payload["scenario_id"],payload["decision_id"],instrument,payload["action"],payload["family"],payload["strategy_id"],payload["strategy_version"],payload["parameter_hash"],payload["profile"],EvidenceOrigin(payload["evidence_origin"]),int(payload["evaluation_horizon"]),date.fromisoformat(payload["target_session_date"]),payload["trigger_state"],_parse_datetime(payload["trigger_at"]) if payload["trigger_at"] else None,payload["fill_outcome"],money("fill_price"),Decimal(payload["filled_shares"]),money("gross_return"),money("net_return"),money("benchmark_return"),money("excess_return"),money("mae"),money("mfe"),LearningEvidenceGrade(payload["execution_evidence_grade"]),OutcomeStatus(payload["status"]),tuple(payload["reason_codes"]),_parse_datetime(payload["generated_at"]),_parse_datetime(payload["valid_from"]) if payload.get("valid_from") else None,_parse_datetime(payload["expires_at"]) if payload.get("expires_at") else None,payload.get("exit_type"),_parse_datetime(payload["exit_at"]) if payload.get("exit_at") else None,money("exit_price"),payload.get("holding_sessions"),money("commission"),money("tax"),money("slippage"),money("exit_avoided_loss"),money("exit_opportunity_cost"),money("exit_quality"),payload.get("entry_fill_id"),payload.get("exit_fill_id"),payload.get("market_regime_key"),_parse_datetime(payload["evaluated_at"]) if payload.get("evaluated_at") else None)
+
+    def get_strategy_outcome(self,outcome_id:str)->StrategyOutcome|None:
+        row=self._fetchone("SELECT * FROM strategy_outcomes WHERE strategy_outcome_id=?",(outcome_id,))
+        if row is None:return None
+        value=self._strategy_outcome_from_payload(json.loads(row["payload_json"]))
+        expected={"event_key":value.strategy_outcome_id,"instrument_key":value.instrument.stable_key,"plan_id":value.plan_id,"status":value.status.value,"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored strategy outcome columns do not match payload")
+        return value
+
+    def list_strategy_outcomes(self, instrument: InstrumentId) -> tuple[StrategyOutcome,...]:
+        return tuple(self.get_strategy_outcome(row["strategy_outcome_id"]) for row in self._fetchall("SELECT strategy_outcome_id FROM strategy_outcomes WHERE instrument_key=? ORDER BY generated_at,strategy_outcome_id",(instrument.stable_key,)))
+
+    def save_joint_outcome(self, outcome: JointOutcome) -> ForecastWriteResult:
+        return self._save_learning_record(table="joint_outcomes",id_column="joint_outcome_id",record=outcome,event_key=outcome.joint_outcome_id,columns=("joint_outcome_id","event_key","market","profile","outcome_kind","status","payload_hash","payload_json","generated_at","schema_version"),values=(outcome.joint_outcome_id,outcome.joint_outcome_id,outcome.market.value,outcome.profile,outcome.outcome_kind.value,outcome.status.value),instrument_key=None)
+
+    @staticmethod
+    def _joint_outcome_from_payload(payload:dict)->JointOutcome:
+        money=lambda key: Decimal(payload[key]) if payload[key] is not None else None
+        window=payload.get("replay_window")
+        return JointOutcome(payload["joint_outcome_id"],JointOutcomeKind(payload["outcome_kind"]),payload["portfolio_bundle_id"],payload["profile"],payload["batch_id"],payload["account_hash"],payload["valuation_id"],Market(payload["market"]),payload["currency"],tuple(payload["ordered_allocation_ids"]),tuple(payload["intent_ids"]),tuple(payload["execution_run_ids"]),EvidenceOrigin(payload["evidence_origin"]),Decimal(payload["starting_equity"]),Decimal(payload["ending_equity"]),Decimal(payload["net_cash_flow"]),Decimal(payload["time_weighted_return"]),money("benchmark_return"),money("alpha"),Decimal(payload["max_drawdown"]),money("volatility"),money("sharpe"),money("calmar"),Decimal(payload["realized_friction"]),money("planned_loss"),money("realized_loss"),int(payload["entry_count"]),int(payload["exit_count"]),int(payload["rejected_count"]),OutcomeStatus(payload["status"]),LearningEvidenceGrade(payload["evidence_grade"]),tuple(payload["reason_codes"]),_parse_datetime(payload["generated_at"]),None if window is None else (date.fromisoformat(window[0]),date.fromisoformat(window[1])),money("risk_contribution"),money("execution_contribution"),money("portfolio_contribution"))
+
+    def get_joint_outcome(self,outcome_id:str)->JointOutcome|None:
+        row=self._fetchone("SELECT * FROM joint_outcomes WHERE joint_outcome_id=?",(outcome_id,))
+        if row is None:return None
+        value=self._joint_outcome_from_payload(json.loads(row["payload_json"]))
+        expected={"event_key":value.joint_outcome_id,"market":value.market.value,"profile":value.profile,"outcome_kind":value.outcome_kind.value,"status":value.status.value,"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored joint outcome columns do not match payload")
+        return value
+
+    def list_joint_outcomes(self, market: Market, *, profile: str | None=None) -> tuple[JointOutcome,...]:
+        sql="SELECT joint_outcome_id FROM joint_outcomes WHERE market=?"; values=[market.value]
+        if profile is not None: sql+=" AND profile=?"; values.append(profile)
+        sql+=" ORDER BY generated_at,joint_outcome_id"
+        return tuple(self.get_joint_outcome(row["joint_outcome_id"]) for row in self._fetchall(sql,tuple(values)))
+
+    def save_learning_run(self, run: LearningRun) -> ForecastWriteResult:
+        return self._save_learning_record(table="learning_replay_runs",id_column="run_id",record=run,event_key=run.run_id,columns=("run_id","event_key","market","status","payload_hash","payload_json","generated_at","schema_version"),values=(run.run_id,run.run_id,run.market.value,run.status.value),instrument_key=None)
+
+    @staticmethod
+    def _learning_run_from_payload(payload: dict) -> LearningRun:
+        return LearningRun(payload["run_id"],Market(payload["market"]),payload["scope_key"],_parse_datetime(payload["cutoff_at"]),payload["task_kind"],payload["candidate_set_hash"],LearningRunStatus(payload["status"]),payload["cancel_reason"],payload["result_hash"],_parse_datetime(payload["generated_at"]))
+
+    def get_learning_run(self, run_id: str) -> LearningRun | None:
+        row=self._fetchone("SELECT * FROM learning_replay_runs WHERE run_id=?",(run_id,))
+        if row is None:return None
+        value=self._learning_run_from_payload(json.loads(row["payload_json"]))
+        expected={"event_key":value.run_id,"market":value.market.value,"status":value.status.value,"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored learning run columns do not match payload")
+        return value
+
+    def save_learning_metric_snapshot(self, snapshot: LearningMetricSnapshot) -> ForecastWriteResult:
+        return self._save_learning_record(table="learning_metric_snapshots",id_column="snapshot_id",record=snapshot,event_key=snapshot.snapshot_id,columns=("snapshot_id","event_key","ledger_kind","scope_key","payload_hash","payload_json","generated_at","schema_version"),values=(snapshot.snapshot_id,snapshot.snapshot_id,snapshot.ledger_kind.value,snapshot.scope_key),instrument_key=None)
+
+    def get_learning_metric_snapshot(self, snapshot_id: str) -> LearningMetricSnapshot | None:
+        row=self._fetchone("SELECT * FROM learning_metric_snapshots WHERE snapshot_id=?",(snapshot_id,))
+        if row is None:return None
+        payload=json.loads(row["payload_json"])
+        value=LearningMetricSnapshot(payload["snapshot_id"],LedgerKind(payload["ledger_kind"]),payload["scope_key"],_parse_datetime(payload["data_cutoff_at"]),int(payload["sample_count"]),tuple(tuple(item) for item in payload["metrics"]),_parse_datetime(payload["generated_at"]))
+        expected={"event_key":value.snapshot_id,"ledger_kind":value.ledger_kind.value,"scope_key":value.scope_key,"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored learning metric columns do not match payload")
+        return value
+
+    def save_learning_fold(self, run_id: str, fold, *, generated_at: datetime) -> ForecastWriteResult:
+        """保存可重跑 OOF 折定义；运行重启后仍使用原冻结窗口和版本选择。"""
+        from tradehelper_v2.learning.replay import FoldDefinition
+        if not isinstance(fold,FoldDefinition): raise ContractViolation("learning fold must use FoldDefinition")
+        record=SimpleNamespaceFoldRecord(run_id,fold,generated_at)
+        return self._save_learning_record(table="learning_folds",id_column="fold_id",record=record,event_key=fold.fold_id,columns=("fold_id","event_key","run_id","market","test_start","payload_hash","payload_json","generated_at","schema_version"),values=(fold.fold_id,fold.fold_id,run_id,fold.market.value,fold.test_start.isoformat()),instrument_key=None)
+
+    def get_learning_fold(self, fold_id: str):
+        from tradehelper_v2.learning.replay import FoldDefinition
+        row=self._fetchone("SELECT * FROM learning_folds WHERE fold_id=?",(fold_id,))
+        if row is None:return None
+        payload=json.loads(row["payload_json"]); fold=payload["fold"]
+        value=FoldDefinition(fold["fold_id"],Market(fold["market"]),fold["scope"],fold["scope_key"],date.fromisoformat(fold["train_start"]),date.fromisoformat(fold["train_end"]),date.fromisoformat(fold["embargo_start"]),date.fromisoformat(fold["embargo_end"]),date.fromisoformat(fold["test_start"]),date.fromisoformat(fold["test_end"]),date.fromisoformat(fold["data_cutoff_at"]),fold["training_event_hash"],tuple(fold.get("selected_forecast_versions",())),tuple(fold.get("selected_strategy_parameter_hashes",())),fold.get("risk_policy_version", ""),fold.get("execution_policy_version", ""),fold.get("portfolio_policy_version", ""))
+        if row["event_key"]!=value.fold_id or row["market"]!=value.market.value or row["test_start"]!=value.test_start.isoformat(): raise ContractViolation("stored learning fold columns do not match payload")
+        return value
+
+    def reserve_learning_run(self, run: LearningRun) -> LearningRun:
+        """同 scope/cutoff/task/candidate 集合只保留一个活动任务身份。"""
+        with self._transaction() as connection:
+            row=connection.execute("SELECT payload_json FROM learning_replay_runs WHERE market=? AND status IN ('pending','running')",(run.market.value,)).fetchall()
+            for item in row:
+                payload=json.loads(item["payload_json"])
+                if payload["scope_key"]==run.scope_key and payload["cutoff_at"]==utc_iso(run.cutoff_at) and payload["task_kind"]==run.task_kind and payload["candidate_set_hash"]==run.candidate_set_hash:
+                    return LearningRun(payload["run_id"],Market(payload["market"]),payload["scope_key"],_parse_datetime(payload["cutoff_at"]),payload["task_kind"],payload["candidate_set_hash"],LearningRunStatus(payload["status"]),payload["cancel_reason"],payload["result_hash"],_parse_datetime(payload["generated_at"]))
+            self._save_learning_record(table="learning_replay_runs",id_column="run_id",record=run,event_key=run.run_id,columns=("run_id","event_key","market","status","payload_hash","payload_json","generated_at","schema_version"),values=(run.run_id,run.run_id,run.market.value,run.status.value),connection=connection)
+            return run
+
+    def save_plan_evidence_snapshot(self, evidence: PlanEvidenceSnapshot) -> ForecastWriteResult:
+        """V2-6 消费的学习投影独立持久化，禁止覆盖历史 outcome。"""
+        return self._save_learning_record(table="plan_evidence_snapshots",id_column="evidence_id",record=evidence,event_key=evidence.evidence_id,columns=("evidence_id","event_key","instrument_key","strategy_id","parameter_hash","profile","payload_hash","payload_json","generated_at","schema_version"),values=(evidence.evidence_id,evidence.evidence_id,evidence.instrument.stable_key,evidence.strategy_id,evidence.parameter_hash,evidence.profile.value if evidence.profile else None),instrument_key=evidence.instrument.stable_key)
+
+    @staticmethod
+    def _plan_evidence_from_payload(payload: dict) -> PlanEvidenceSnapshot:
+        raw=payload["instrument"]; instrument=InstrumentId(raw["code"],Market(raw["market"]),Exchange(raw["exchange"]))
+        return PlanEvidenceSnapshot(payload["evidence_id"],instrument,payload["strategy_id"],payload["strategy_version"],payload["parameter_hash"],RiskProfile(payload["profile"]) if payload["profile"] else None,int(payload["sample_count"]),int(payload["oof_sample_count"]),payload["expected_net_return"],payload["confidence_low"],payload["confidence_high"],payload["win_rate"],payload["max_adverse_excursion"],EvidenceStatus(payload["status"]),payload["source_ledger_version"],_parse_datetime(payload["data_cutoff_at"]),_parse_datetime(payload["evaluated_at"]),_parse_datetime(payload["generated_at"]))
+
+    def get_plan_evidence_snapshot(self, evidence_id: str) -> PlanEvidenceSnapshot | None:
+        row=self._fetchone("SELECT * FROM plan_evidence_snapshots WHERE evidence_id=?",(evidence_id,))
+        if row is None:return None
+        value=self._plan_evidence_from_payload(json.loads(row["payload_json"]))
+        expected={"event_key":value.evidence_id,"instrument_key":value.instrument.stable_key,"strategy_id":value.strategy_id,"parameter_hash":value.parameter_hash,"profile":value.profile.value if value.profile else None,"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored plan evidence columns do not match payload")
+        return value
+
+    def save_learning_candidate(self, candidate: LearningCandidateVersion) -> ForecastWriteResult:
+        if candidate.lifecycle is not CandidateLifecycle.CANDIDATE:
+            raise ContractViolation("new learning candidates must enter through candidate lifecycle")
+        return self._save_learning_record(table="learning_candidate_versions",id_column="candidate_id",record=candidate,event_key=candidate.candidate_id,columns=("candidate_id","event_key","market","kind","scope","scope_key","lifecycle","payload_hash","payload_json","generated_at","schema_version"),values=(candidate.candidate_id,candidate.candidate_id,candidate.market.value,candidate.kind.value,candidate.scope.value,candidate.scope_key,candidate.lifecycle.value),instrument_key=None)
+
+    @staticmethod
+    def _learning_candidate_from_payload(payload: dict) -> LearningCandidateVersion:
+        return LearningCandidateVersion(payload["candidate_id"],CandidateKind(payload["kind"]),CandidateScope(payload["scope"]),payload["scope_key"],Market(payload["market"]),payload["profile"],payload["base_version"],payload["parameter_hash"],payload["search_space_hash"],CandidateLifecycle(payload["lifecycle"]),EvidenceOrigin(payload["evidence_origin"]),_parse_datetime(payload["created_at"]),_parse_datetime(payload["generated_at"]),tuple(payload["reason_codes"]),payload.get("projection_key",""))
+
+    def get_learning_candidate(self,candidate_id:str)->LearningCandidateVersion|None:
+        row=self._fetchone("SELECT * FROM learning_candidate_versions WHERE candidate_id=?",(candidate_id,))
+        if row is None:return None
+        value=self._learning_candidate_from_payload(json.loads(row["payload_json"]))
+        expected={"event_key":value.candidate_id,"market":value.market.value,"kind":value.kind.value,"scope":value.scope.value,"scope_key":value.scope_key,"lifecycle":value.lifecycle.value,"generated_at":utc_iso(value.generated_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored learning candidate columns do not match payload")
+        return value
+
+    def promote_learning_candidate(self, candidate: LearningCandidateVersion, event: PromotionEvent) -> ForecastWriteResult:
+        """候选事件与唯一生产投影在同一事务中切换，禁止双 Champion。"""
+        if event.candidate_id!=candidate.candidate_id or event.projection_key!=candidate.projection_key:
+            raise ContractViolation("promotion references another candidate or projection")
+        if event.previous_candidate_id is None:
+            raise ContractViolation("promotion requires the previous lifecycle version")
+        with self._transaction() as connection:
+            previous_row=connection.execute("SELECT payload_json FROM learning_candidate_versions WHERE candidate_id=?",(event.previous_candidate_id,)).fetchone()
+            if previous_row is None:
+                raise ContractViolation("promotion previous candidate does not exist")
+            previous=self._learning_candidate_from_payload(json.loads(previous_row["payload_json"]))
+            from tradehelper_v2.learning.lifecycle import next_lifecycle
+            expected_lifecycle=next_lifecycle(previous.lifecycle,event.decision)
+            same_lineage=(
+                previous.kind==candidate.kind and previous.scope==candidate.scope and previous.scope_key==candidate.scope_key
+                and previous.market==candidate.market and previous.profile==candidate.profile
+                and previous.base_version==candidate.base_version and previous.parameter_hash==candidate.parameter_hash
+                and previous.search_space_hash==candidate.search_space_hash and previous.evidence_origin==candidate.evidence_origin
+                and previous.projection_key==candidate.projection_key
+            )
+            if not same_lineage or expected_lifecycle is previous.lifecycle or candidate.lifecycle is not expected_lifecycle:
+                raise ContractViolation("promotion does not follow the registered lifecycle")
+            guarded_decisions={
+                PromotionDecision.PROMOTE_TO_CHALLENGER,
+                PromotionDecision.PROMOTE_TO_SHADOW,
+                PromotionDecision.PROMOTE_TO_CHAMPION,
+            }
+            if event.decision in guarded_decisions and not event.hard_guardrails_ok:
+                raise ContractViolation("promotion cannot bypass hard guardrails")
+            if candidate.lifecycle is CandidateLifecycle.CHAMPION and event.evidence_sample_count < 20:
+                raise ContractViolation("champion promotion requires shadow evidence")
+            if event.decision in {PromotionDecision.ROLLBACK,PromotionDecision.SUSPEND_NEW_RISK}:
+                active=connection.execute(
+                    "SELECT candidate_id FROM learning_deployments WHERE projection_key=?",
+                    (event.projection_key,),
+                ).fetchone()
+                if active is None or active["candidate_id"]!=previous.candidate_id:
+                    raise ContractViolation("drift action must target the currently deployed champion")
+            deployment_target=None
+            if event.decision is PromotionDecision.PROMOTE_TO_CHAMPION:
+                deployment_target=candidate
+            elif event.decision is PromotionDecision.ROLLBACK:
+                target_row=connection.execute(
+                    "SELECT payload_json FROM learning_candidate_versions WHERE candidate_id=?",
+                    (event.deployment_candidate_id,),
+                ).fetchone()
+                if target_row is None:
+                    raise ContractViolation("rollback deployment target does not exist")
+                deployment_target=self._learning_candidate_from_payload(json.loads(target_row["payload_json"]))
+                if (
+                    deployment_target.lifecycle is not CandidateLifecycle.CHAMPION
+                    or deployment_target.projection_key!=candidate.projection_key
+                    or deployment_target.market is not candidate.market
+                ):
+                    raise ContractViolation("rollback target is not a healthy champion for this projection")
+            payload=canonical_json(event); hashed=stable_hash(_without_generated_at(json.loads(payload)))
+            existing=connection.execute("SELECT payload_hash FROM learning_promotion_events WHERE promotion_id=? OR event_key=?",(event.promotion_id,event.promotion_id)).fetchone()
+            if existing and existing["payload_hash"]!=hashed:
+                connection.execute("INSERT INTO quarantine_records(record_type,instrument_key,trading_date,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)",("learning_promotion_conflict",None,None,"CONFLICTING_LEARNING_RECORD",payload,utc_iso(datetime.now(timezone.utc))))
+                return ForecastWriteResult(0,0,1)
+            result=self._save_learning_record(table="learning_candidate_versions",id_column="candidate_id",record=candidate,event_key=candidate.candidate_id,columns=("candidate_id","event_key","market","kind","scope","scope_key","lifecycle","payload_hash","payload_json","generated_at","schema_version"),values=(candidate.candidate_id,candidate.candidate_id,candidate.market.value,candidate.kind.value,candidate.scope.value,candidate.scope_key,candidate.lifecycle.value),connection=connection)
+            if result.conflicts:
+                # 候选版本冲突时也绝不能写入 promotion 或改变部署投影。
+                return result
+            if existing is None:
+                connection.execute("INSERT INTO learning_promotion_events(promotion_id,event_key,candidate_id,projection_key,decision,payload_hash,payload_json,generated_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?)",(event.promotion_id,event.promotion_id,event.candidate_id,event.projection_key,event.decision.value,hashed,payload,utc_iso(event.generated_at),1))
+            if deployment_target is not None:
+                # 一个 projection 只有一个 Champion；旧部署仅被替换，不会被删除。
+                connection.execute("INSERT INTO learning_deployments(projection_key,candidate_id,promotion_id,updated_at) VALUES (?,?,?,?) ON CONFLICT(projection_key) DO UPDATE SET candidate_id=excluded.candidate_id,promotion_id=excluded.promotion_id,updated_at=excluded.updated_at",(event.projection_key,deployment_target.candidate_id,event.promotion_id,utc_iso(event.decided_at)))
+            elif event.decision is PromotionDecision.SUSPEND_NEW_RISK:
+                connection.execute("DELETE FROM learning_deployments WHERE projection_key=?",(event.projection_key,))
+            return result
+
+    def get_learning_deployment(self, projection_key: str) -> tuple[LearningCandidateVersion, str] | None:
+        row=self._fetchone("SELECT candidate_id,promotion_id FROM learning_deployments WHERE projection_key=?",(projection_key,))
+        if row is None:return None
+        candidate=self.get_learning_candidate(row["candidate_id"])
+        if candidate is None: raise ContractViolation("learning deployment references missing candidate")
+        return candidate,row["promotion_id"]
 
     @staticmethod
     def _execution_expression(payload):

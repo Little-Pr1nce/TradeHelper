@@ -1,6 +1,6 @@
 # TradeHelper V2-9 学习层精确设计
 
-> 状态：设计冻结，待实现。本文是 V2-9 的规范性合同。实现必须建立在已完成并复审的 V2-3 预测、V2-4 情景、V2-5 策略、V2-6 风控、V2-7 成交仿真和 V2-8 组合决策合同之上。V2-9 只负责到期验证、分账归因、历史 OOF 回放、健康度和受控候选生命周期；不得提前实现 V2-10 LLM、V2-11 UI/报告、券商自动下单或自动改写生产源码。
+> 状态：已实现并复审。本文是 V2-9 的规范性合同。实现建立在已完成并复审的 V2-3 预测、V2-4 情景、V2-5 策略、V2-6 风控、V2-7 成交仿真和 V2-8 组合决策合同之上。V2-9 只负责到期验证、分账归因、历史 OOF 回放、健康度和受控候选生命周期；不得提前实现 V2-10 LLM、V2-11 UI/报告、券商自动下单或自动改写生产源码。
 
 ## 1. 阶段目标
 
@@ -67,7 +67,7 @@ point-in-time 历史事实
 - 联合组合净收益、基准、Alpha、回撤、风险利用和成交差异。
 - 候选、影子、挑战者、Champion、漂移、回滚和停用生命周期。
 - 只在预注册搜索空间内调整模型配置、特征子集、策略参数和软政策。
-- migration 13、幂等持久化、修订链、原子晋升和强类型恢复。
+- migration 13 建表、纠错 migration 14、幂等持久化、修订链、原子晋升和强类型恢复。
 
 ### 3.2 V2-9 不负责
 
@@ -100,7 +100,7 @@ tradehelper_v2/
     lifecycle.py         # 影子、晋升、漂移、回滚、停用
     engine.py            # 单一学习入口，不访问 UI/LLM
   data/
-    migrations/schema.py # migration 13
+    migrations/schema.py # migration 13 建表；migration 14 修正成熟度唯一身份
     repository.py        # outcome/ledger/candidate 原子持久化
 
 tests/v2/
@@ -384,6 +384,7 @@ status / reason_codes
 - 成交：使用同一 V2-7 触发、费用、滑点和市场规则路径。
 - 有明确止损/止盈：按事件顺序先发生者退出。
 - 单条已发行入场计划没有量化止盈时，不得事后发明动态止盈；在各 `evaluation_horizon` 的目标日完成日 K 收盘，标记 `window_close`。
+- `window_close` 只有在提供可审计的预计总退出成本时才能计算净收益；该成本必须覆盖预计佣金、税费和滑点，缺失时为 `unverifiable`，不得把卖出成本静默当作零。
 - 全链 policy OOF 每个会话重新运行 V2-3 至 V2-8，因此后续会话真实生成的减仓/卖出 TradePlan 可以退出；这与单条计划到期评价分开。
 - 日 K 同时穿越止损和止盈但无分钟顺序时，沿用 V2-7 adverse path，证据为 low，不能单独支持晋升路径敏感策略。
 
@@ -616,7 +617,7 @@ V2-9 必须从策略账产生 V2-6 已定义的 `PlanEvidenceSnapshot`：
 
 同一个当前分析不得消费在 `as_of` 之后评估出的 evidence，防止历史回放偷看未来。
 
-## 18. Repository 与 migration 13
+## 18. Repository 与 migration 13/14
 
 migration 13 新增：
 
@@ -645,6 +646,7 @@ plan_evidence_snapshots
 - 每个生产投影键只能有一个 active Champion，`learning_deployments` 必须以该键建立唯一约束。
 - repository 重启恢复后对象、Decimal、枚举、UTC 时间和哈希必须完全相等。
 - migration 13 在新库、已有 migration 12 库和重复启动时均安全；不得读取或修改 V1 数据库。
+- migration 14 将 `maturity_evidence` 唯一身份修正为 `instrument + origin_session_date + target_session_date + revision`，避免多个不同起点预测落在同一目标日时互相冲突。
 - `SCHEMA_VERSION` 必须等于实际最高 migration，并由测试直接断言。
 
 ## 19. 并发、任务与性能
@@ -753,7 +755,7 @@ LE55 自动优化不改源码、硬风控、账户权益或市场规则
 LE56 牛市风险调整通道可晋升稳健候选，高回撤不能只靠总收益晋升
 LE57 confirmation/shadow 未通过不替换 Champion
 LE58 漂移触发可回滚；无健康版本时停止新增风险但保留保护退出
-LE59 migration 13 原子/幂等/恢复、双市场和性能边界
+LE59 migration 13/14 原子/幂等/恢复、双市场和性能边界
 ```
 
 每个编号必须有唯一具名可执行测试；不能用循环编号、注释或一条 smoke 冒充多个行为。
@@ -777,7 +779,7 @@ V2-9 测试默认离线，不访问用户数据库。真实 Provider 冒烟不�
 5. LE40-LE49：JointLedger、顺序组合回放和六层配对归因。
 6. LE50-LE55：purged walk-forward、股票绑定、搜索空间。
 7. LE56-LE58：晋升、影子、漂移、回滚和停止新增风险。
-8. LE59：migration 13、repository、双市场和性能。
+8. LE59：migration 13/14、repository、双市场和性能。
 9. 跑 V2-9 专项、V2 全量、项目全量和现有真实 Provider 冒烟，更新阶段状态后停止。
 
 ## 25. 阶段停止点
@@ -790,3 +792,18 @@ V2-9 完成后停止。不得顺手实现：
 - 券商连接、真实订单状态或自动执行。
 
 开始 V2-10 前必须另行冻结 LLM 假设类型、结构化 DSL、事实验证、候选转正和研究观察可见性合同。
+
+## 26. 完成复审记录
+
+V2-9 最终复审修复了动态波动率方向标签冻结、成熟度 origin/target/revision 身份、OOF 与在线样本隔离、部分成交、窗口退出成本、联合账聚合、真实 TWR 现金流路径、候选生命周期与部署回滚等问题。固定全链回放还会验证四周期预测、情景、策略、风控、组合分配、成交事实与 outcome 的跨层身份，拒绝用空返回值或无关联对象伪造完整 OOF。LE00-LE59 保持 60 个唯一编号测试，并增加真实 V2-5→V2-8 成交链、冲突、截止日、全链身份闭合和回滚回归。
+
+最终验证：
+
+```text
+学习专项：99 passed in 1.42s
+V2 全量：541 passed, 3 skipped in 41.68s
+项目全量：801 passed, 3 skipped in 74.16s
+真实 Provider 冒烟：3 passed in 30.33s
+```
+
+默认全量中的 3 个 skip 均为显式联网 Provider 测试，已经使用本地 V1 配置桥接单独启用并通过。V2-9 复审后停止，未进入 V2-10、V2-11 或 V2-12。

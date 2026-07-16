@@ -17,7 +17,7 @@ def _forecast(instrument,horizon,direction="bullish",*,confirmed=True, input_has
     version=f"v{horizon}"; key="|".join((instrument.stable_key,origin.isoformat(),target.isoformat(),str(horizon),version,"a"*64))
     key="|".join((instrument.stable_key,origin.isoformat(),target.isoformat(),str(horizon),version,input_hash))
     margin=.4 if direction=="neutral" else .5
-    return ForecastResult(instrument,NOW,origin,target,horizon,100.,ForecastAvailability.AVAILABLE,probs,result,ForecastDirection(direction),margin,ForecastScope.STOCK,instrument.stable_key,ModelFamily.ANALOG,version,ModelLifecycle.CHAMPION,ValidationStatus.CONFIRMATION_PASSED,confirmed,"tech","forecast_feature_sets_v1",input_hash,"b"*64,100,60,(),"fixture",None,key,NOW)
+    return ForecastResult(instrument,NOW,origin,target,horizon,100.,ForecastAvailability.AVAILABLE,probs,result,ForecastDirection(direction),margin,ForecastScope.STOCK,instrument.stable_key,ModelFamily.ANALOG,version,ModelLifecycle.CHAMPION,ValidationStatus.CONFIRMATION_PASSED,confirmed,"tech","forecast_feature_sets_v1",input_hash,"b"*64,100,60,(),"fixture",None,key,NOW,label_flat_band=.005)
 def _request(instrument, forecasts):
     origin=_snapshot(instrument,DecisionMode.EOD,date(2026,7,10)); current=_snapshot(instrument,DecisionMode.EOD,date(2026,7,10)); session=DecisionSession(instrument.market,instrument.exchange,forecasts[0].target_session_date,datetime(2026,7,12,13,30,tzinfo=timezone.utc),datetime(2026,7,12,20,tzinfo=timezone.utc),(),"fixture")
     quality=DataQualityReport(QualityStatus.OK,QualityAction.NORMAL,100.,1.,False,(),DataCapabilities(),NOW)

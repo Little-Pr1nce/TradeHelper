@@ -342,9 +342,13 @@ class ForecastResult:
     event_key: str
     generated_at: datetime
     schema_version: int = 1
+    label_policy_version: str = "direction_v1_vol_scaled"
+    label_flat_band: float | None = None
 
     def __post_init__(self) -> None:
-        if self.horizon not in {1, 3, 5, 10} or self.sample_count < 0 or self.oof_sample_count < 0 or not self.scope_key or not self.model_version or len(self.model_input_hash) != 64:
+        if (self.horizon not in {1, 3, 5, 10} or self.sample_count < 0 or self.oof_sample_count < 0 or
+                not self.scope_key or not self.model_version or len(self.model_input_hash) != 64 or
+                self.label_policy_version != "direction_v1_vol_scaled"):
             raise ContractViolation("invalid forecast result identity")
         availability = _coerce(ForecastAvailability, self.availability, "forecast availability")
         scope = _coerce(ForecastScope, self.model_scope, "forecast scope")
@@ -376,7 +380,11 @@ class ForecastResult:
             raise ContractViolation("forecast event key does not match identity")
         if tuple(sorted(self.drivers, key=lambda driver: driver.rank)) != self.drivers or len(self.drivers) > 5:
             raise ContractViolation("forecast drivers must be ordered and limited to five")
+        band = None if self.label_flat_band is None else _finite(self.label_flat_band, "forecast label flat band")
+        if band is not None and not 0 <= band <= 0.04:
+            raise ContractViolation("forecast label flat band is out of range")
         object.__setattr__(self, "reference_price", _finite(self.reference_price, "forecast reference price"))
+        object.__setattr__(self, "label_flat_band", band)
         object.__setattr__(self, "cutoff_at", ensure_utc(self.cutoff_at, "forecast cutoff_at"))
         object.__setattr__(self, "generated_at", ensure_utc(self.generated_at, "forecast generated_at"))
         object.__setattr__(self, "availability", availability); object.__setattr__(self, "model_scope", scope); object.__setattr__(self, "model_family", family); object.__setattr__(self, "lifecycle", lifecycle); object.__setattr__(self, "validation_status", validation); object.__setattr__(self, "direction", direction)
