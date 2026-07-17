@@ -28,9 +28,10 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-9 学习层规范：[docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md)
 - V2-10 LLM 假设层规范：[docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md)
 - V2-11 报告与 UI 层规范：[docs/v2/V2_11_REPORT_UI.md](./docs/v2/V2_11_REPORT_UI.md)
+- V2-12 迁移、端到端与发布规范：[docs/v2/V2_12_MIGRATION_RELEASE.md](./docs/v2/V2_12_MIGRATION_RELEASE.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 至 V2-11 已完成并复审。V2-11 已按冻结规范实现结构化报告、历史评估、Tab1/Tab3、任务进度、历史报告、设置和导出；当前实现停止在 V2-11，不进入 V2-12 迁移/端到端/发布。
+V2-0 至 V2-11 已完成并复审。V2-12 是 TradeHelper 2.0 最后一个开发阶段，迁移、production 端到端接线、V1 退出和跨平台发布的精确设计已经冻结，当前待按该规范实施。
 
 ## 一以贯之的系统目标
 
@@ -92,6 +93,7 @@ V2-0 至 V2-11 已完成并复审。V2-11 已按冻结规范实现结构化报�
 | [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) | V2-9 到期验证、三本账、六层归因、OOF、自优化生命周期、migration 13/14 和 LE00-LE59 |
 | [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) | V2-10 研究事实清单、严格 JSON 假设、确定性验证、候选桥接、migration 15 和 LL00-LL49 |
 | [docs/v2/V2_11_REPORT_UI.md](./docs/v2/V2_11_REPORT_UI.md) | V2-11 展示输入、ReportDocument、Tab1/Tab3、历史评估、进度、导出、migration 16 和 UX00-UX59 |
+| [docs/v2/V2_12_MIGRATION_RELEASE.md](./docs/v2/V2_12_MIGRATION_RELEASE.md) | V2-12 production composition、V1 可信迁移、端到端矩阵、V1 退出、migration 17、跨平台发布和 RL00-RL79 |
 | `AGENTS.md` | Codex 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 | `CLAUDE.md` | Claude Code 本地工作约定，被 `.gitignore` 忽略但保留在根目录 |
 

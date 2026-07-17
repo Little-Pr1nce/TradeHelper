@@ -72,10 +72,11 @@ TradePlan + ExecutionDecision
 | [docs/v2/V2_9_LEARNING.md](./docs/v2/V2_9_LEARNING.md) | V2-9 到期验证、三本账、六层归因、OOF、自优化生命周期、migration 13/14 和 LE00-LE59 |
 | [docs/v2/V2_10_LLM_HYPOTHESES.md](./docs/v2/V2_10_LLM_HYPOTHESES.md) | V2-10 研究事实清单、严格 JSON、确定性验证、候选桥接、migration 15 和 LL00-LL49 |
 | [docs/v2/V2_11_REPORT_UI.md](./docs/v2/V2_11_REPORT_UI.md) | V2-11 展示输入、ReportDocument、历史评估、Tab1/Tab3、任务进度、导出、migration 16 和 UX00-UX59 |
+| [docs/v2/V2_12_MIGRATION_RELEASE.md](./docs/v2/V2_12_MIGRATION_RELEASE.md) | V2-12 production composition、V1 迁移、端到端矩阵、V1 退出、migration 17、发布和 RL00-RL79 |
 | `AGENTS.md` | Codex 本地工作约定 |
 | `CLAUDE.md` | Claude Code 本地工作约定 |
 
-V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-11 分别以对应阶段规范为准。V2-11 已完成并复审；实现必须停止在 V2-11，不得进入 V2-12。
+V2-0/V2-1 冲突优先级：三份基础规范 > 本计划中的概念示例 > V1 能力清单 > V1 参考代码。V2-2 至 V2-12 分别以对应阶段规范为准。V2-11 已完成并复审；V2-12 精确设计已冻结，是 TradeHelper 2.0 最后一个实施阶段。
 
 ## 1. V2 分层结构
 
@@ -1084,7 +1085,7 @@ venv/bin/python -m pytest tests/ -q
 | V2-9 学习层 | 已完成并复审 | 精确合同见 `docs/v2/V2_9_LEARNING.md`；已实现到期验证、三本账、六层归因、purged OOF、股票绑定自优化、候选生命周期、migration 13/14 和 LE00-LE59，止步于学习层 |
 | V2-10 LLM 假设层 | 已完成并复审 | 精确合同见 `docs/v2/V2_10_LLM_HYPOTHESES.md`；冻结事实 manifest、严格 JSON 五类假设、确定性四态验证、注册候选桥接、独立 outcome/metric 账、migration 15、强类型恢复、LL00-LL49 与双市场失败降级均已通过；未进入 V2-11。 |
 | V2-11 报告/UI | 已完成并复审 | 精确合同见 `docs/v2/V2_11_REPORT_UI.md`；确定性 PresentationInput/ReportDocument、Tab1/Tab3、历史评估、进度、历史快照/反馈/比较/归档、导出、migration 16、UX00-UX59 和双市场 Golden Cases 已通过，严格止步于本阶段 |
-| V2-12 迁移/端到端/发布 | 未开始 | 每层单测通过后执行完整矩阵与跨平台烟雾 |
+| V2-12 迁移/端到端/发布 | 设计已冻结，待实现 | 精确合同见 `docs/v2/V2_12_MIGRATION_RELEASE.md`；production composition、V1 可信迁移与证据隔离、Tab1/Tab3 双市场三时段、V1 退出、migration 17、macOS/Windows 发布和 RL00-RL79 已冻结 |
 
 ### 2026-07-15 V2-6 设计完成：风控层（待实现）
 
@@ -1165,3 +1166,11 @@ V2-11 已按 [docs/v2/V2_11_REPORT_UI.md](./docs/v2/V2_11_REPORT_UI.md) 完成�
 设计冻结了单股与组合展示输入的身份闭合、天气预报式当前/历史预测表、预测账/策略账/联合账/LLM 独立账、Tab1/Tab3 全宽交互、持仓行内编辑和不可变账户快照、关注列表快照、逐股进度与取消、历史报告/评分/比较、设置能力矩阵、HTML/PDF 一致渲染、migration 16 和 UX00-UX59 一编号一行为验收。
 
 阶段专项 `90 passed`，V2 全量 `714 passed, 4 skipped`，项目全量 `974 passed, 4 skipped`。默认跳过项为 3 条真实数据 Provider 和 1 条真实 LLM 集成测试；它们均已用本机 V1 配置桥接另行显式启用：Provider 为 `3 passed in 61.70s`，真实 LLM 严格 JSON、提示词脱敏和响应身份链为 `1 passed in 10.37s`。固定 A股/美股、盘前/盘中/盘后 Flet 构造烟雾通过；确定性 HTML 在 1280×800、900×700、390×844 三种真实浏览器视口完成视觉检查，正文无溢出或遮挡，移动端宽表限制在自身横向滚动容器内。V1 正式数据迁移、完整真实链端到端接线、macOS/Windows 发布和 Web 部署仍属于 V2-12。
+
+## 20. V2-12 设计冻结：迁移、端到端与发布
+
+V2-12 是 TradeHelper 2.0 的最后一个既定开发阶段，精确合同见 [docs/v2/V2_12_MIGRATION_RELEASE.md](./docs/v2/V2_12_MIGRATION_RELEASE.md)。本阶段不重写 V2-1 至 V2-11 的算法，而是建立唯一 production composition root，把数据、特征、预测、情景、策略、风控、成交、组合、学习、LLM 和展示层接成真正由桌面入口运行的主链。
+
+实施拆为八批：运行时合同与 migration 17；V1 可信迁移与旧证据隔离；双市场 lookup、FinBERT 和 production container；Tab1 全链；Tab3 全链；LLM/学习后台与失败恢复；V1 运行面退出和跨平台打包；最终 12 格、联网、性能、视觉与安装包验收。V1 设置、真实账户、持仓、关注列表和旧报告可受控迁移；旧行情、预测、策略、回测参数和学习结果只能归档或重新获取，不能污染 V2 正式事实与三本账。
+
+RL00-RL79 已冻结为一编号一行为的验收矩阵。当前状态仅为“设计已冻结，待实现”；在 RL00-RL79、A股/美股 × 盘前/盘中/盘后 × Tab1/Tab3、真实 Provider、真实 LLM、macOS/Windows 打包产物和 V1 退出全部通过前，不得把 TradeHelper 2.0 标记为发布完成。

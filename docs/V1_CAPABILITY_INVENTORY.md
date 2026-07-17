@@ -33,14 +33,14 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 | 当前动作判断 | 买/卖/减仓/加仓/持有/观察 | `core/signal_check.py`, `strategies/` | `scenario/`, `strategies/`, `risk/`, `execution/` | V2-6执行等级和V2-7订单意图已迁移并复审 | `tests/v2/test_risk_officer.py`, `tests/v2/test_order_intent.py` |
 | 条件触发计划 | 不能操作时告诉用户等什么条件 | `strategies/conditional_trigger.py`, `services/portfolio_service.py` | `strategies/engine.py` | V2-5已迁移 | `tests/v2/test_strategy_engine_by_scenario.py` |
 | 最大亏损和失效条件 | 用户知道错了亏多少、哪里错 | `strategies/base.py`, `core/signal_check.py` | `risk/sizing.py`, `risk/officer.py`, `execution/` | V2-5失效、V2-6计划亏损和V2-7跳空成交已迁移并复审 | `tests/v2/test_risk_sizing.py`, `tests/v2/test_fill_simulator.py` |
-| 历史正期望和可信度 | 建议不能只靠当下判断 | `prediction_log`, `trade_plan_log`, `joint_oof_runs` | `learning/` 三本账 | V2-9设计已冻结，待实现 | `tests/v2/test_learning_ledgers.py` |
-| 明确目标日预测 | 预测必须说清预测哪一天 | `forecast_log`, `core/forecast_engine.py` | `forecast/engine.py`, `learning/` | 预测发行已迁移；V2-9目标日到期事实和预测账设计已冻结 | `tests/v2/test_forecast_contracts.py`, `tests/v2/test_learning_maturity.py` |
+| 历史正期望和可信度 | 建议不能只靠当下判断 | `prediction_log`, `trade_plan_log`, `joint_oof_runs` | `learning/` 三本账 | V2-9 三本账、指标和归因已迁移并复审 | `tests/v2/test_learning_ledgers.py` |
+| 明确目标日预测 | 预测必须说清预测哪一天 | `forecast_log`, `core/forecast_engine.py` | `forecast/engine.py`, `learning/` | V2-3 预测发行和 V2-9 目标日到期验证已迁移并复审 | `tests/v2/test_forecast_contracts.py`, `tests/v2/test_learning_maturity.py` |
 
 ## P0 数据源与市场支持
 
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
-| A股/美股同等支持 | 不能只服务美股用户 | `data/stock_fetcher.py`, `utils/market.py` | `contracts/market_data.py`, `data/providers/`, `risk/market_rules.py` | 迁移中（数据层已迁移） | `tests/v2/test_data_contracts.py` |
+| A股/美股同等支持 | 不能只服务美股用户 | `data/stock_fetcher.py`, `utils/market.py` | `contracts/market_data.py`, `data/providers/`, `risk/market_rules.py` | 各业务层已迁移并复审；最终 12 格真实端到端矩阵留待 V2-12 | `tests/v2/test_data_contracts.py`, `tests/v2/test_e2e_mode_matrix.py` |
 | 美股盘中 TickFlow | 盘中实时数据主源 | `data/stock_fetcher.py` | `data/providers/tickflow.py` | 已迁移 | `tests/v2/test_provider_fallbacks.py` |
 | 美股已完成日K Nasdaq 主源 | 用户券商K线与 Nasdaq 历史 OHLCV 核对一致；TickFlow 不再承担美股日K主源 | V1 未独立实现 | `data/providers/nasdaq.py` | 已迁移 | `tests/v2/test_provider_fallbacks.py` |
 | 美股日K应急降级 | Nasdaq 无结果时 yfinance、再 TickFlow 仅补已完成交易日 | `data/stock_fetcher.py` | `data/providers/us_daily.py` | 已迁移 | `tests/v2/test_provider_fallbacks.py` |
@@ -59,8 +59,8 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 | Provider 配额治理 | TickFlow 拆批、Nasdaq/Finnhub 并发上限、超时退避 | `data/stock_fetcher.py`, services | `data/providers/`, `data/quality.py` | 已迁移 | `tests/v2/test_rate_queue_and_drift.py` |
 | 分模式缓存失效 | 盘前/盘中/盘后按数据类型刷新，失败缓存不冒充最新事实 | news service, portfolio prefetch | `data/repository.py`, providers | 已迁移 | `tests/v2/test_provider_fallbacks.py` |
 | 缺失字段不填 0 | Nasdaq 缺 OHLCV 时保留能力边界，避免假数据 | quote quality gate | `contracts/market_data.py`, `data/quality.py` | 已迁移 | `tests/v2/test_data_quality.py` |
-| Tab3 逐股质量隔离 | 单股缺价只阻断该股，不被组合其他股票带过 | `portfolio_service.py` | `data/quality.py`, `portfolio/` | 迁移中（数据批次已隔离） | `tests/v2/test_rate_queue_and_drift.py` |
-| Tab1/Tab3 独立刷新 | 页面不能互相依赖 | `services/news_service.py`, `portfolio_service.py` | `data/repository.py`, use cases | 迁移中（共享刷新服务已迁移） | `tests/v2/test_provider_fallbacks.py` |
+| Tab3 逐股质量隔离 | 单股缺价只阻断该股，不被组合其他股票带过 | `portfolio_service.py` | `data/quality.py`, `portfolio/` | 数据批次和组合展示已迁移；真实全链留待 V2-12 | `tests/v2/test_rate_queue_and_drift.py`, `tests/v2/test_report_sections.py` |
+| Tab1/Tab3 独立刷新 | 页面不能互相依赖 | `services/news_service.py`, `portfolio_service.py` | `data/repository.py`, use cases | 共享刷新能力已迁移；独立 production use case 留待 V2-12 | `tests/v2/test_provider_fallbacks.py`, `tests/v2/test_e2e_single_stock.py`, `tests/v2/test_e2e_portfolio.py` |
 | 实时价不写日 K | 避免盘中价污染收盘价 | `core/pipeline.py`, `data/stock_fetcher.py` | `data/repository.py`, `data/quality.py` | 已迁移 | `tests/v2/test_market_data_repository.py` |
 | SQLite 幂等迁移与去重 | 旧用户升级、新用户建库都能安全运行 | `data/database.py` migrations | `data/migrations/schema.py` | 已迁移 | `tests/v2/test_schema_migrations.py` |
 
@@ -68,17 +68,17 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
-| Tab1 单股完整研究 | 单只股票深度分析入口 | `services/analysis_service.py`, `ui/main_page.py` | V2 single-stock use case | 待迁移 | `tests/v2/test_e2e_single_stock.py` |
-| Tab1 三时段模式 | 盘前/盘中/盘后语义不同 | `analysis_service.py`, `core/pipeline.py` | V2 use cases + data session | V2-4逐股会话与情景已迁移；Tab1编排待V2-11/12 | `tests/v2/test_scenario_sessions.py` |
-| Tab3 组合工作台 | 真实持仓决策，不是批量单股 | `services/portfolio_service.py`, `ui/portfolio_page.py` | V2 portfolio use case | V2-8组合决策已完成并复审；UI/端到端留待V2-11/12 | `tests/v2/test_portfolio_allocator.py`, `tests/v2/test_e2e_portfolio.py` |
+| Tab1 单股完整研究 | 单只股票深度分析入口 | `services/analysis_service.py`, `ui/main_page.py` | V2 single-stock use case | V2-11 页面/报告已迁移；production 全链留待 V2-12 | `tests/v2/test_ui_state_flow.py`, `tests/v2/test_e2e_single_stock.py` |
+| Tab1 三时段模式 | 盘前/盘中/盘后语义不同 | `analysis_service.py`, `core/pipeline.py` | V2 use cases + data session | V2-4 会话语义和 V2-11 展示已迁移；真实编排留待 V2-12 | `tests/v2/test_scenario_sessions.py`, `tests/v2/test_e2e_mode_matrix.py` |
+| Tab3 组合工作台 | 真实持仓决策，不是批量单股 | `services/portfolio_service.py`, `ui/portfolio_page.py` | V2 portfolio use case | V2-8 组合决策和 V2-11 页面已迁移；production 全链留待 V2-12 | `tests/v2/test_portfolio_allocator.py`, `tests/v2/test_e2e_portfolio.py` |
 | Tab3 三时段模式 | 组合盘前/盘中/盘后使用对应数据和计划有效期 | `portfolio_service.py`, `core/pipeline.py` | `use_cases/portfolio.py`, `portfolio/` | V2-4逐股情景和 V2-8 同模式/同 as_of 组合批次合同已迁移 | `tests/v2/test_portfolio_contracts.py`, `tests/v2/test_scenario_degradation.py` |
 | Tab3 真实余额/持仓/成本 | 禁止虚构10万本金 | `data/database.py`, `portfolio_service.py` | `contracts/account.py`, `risk/valuation.py`, `risk/sizing.py` | V2-6冻结估值和单计划 sizing 已迁移 | `tests/v2/test_risk_valuation.py` |
-| Tab3 持仓行内编辑 | 用户卖一部分后可直接修改 | `ui/portfolio_page.py` | V2 UI portfolio component | 待迁移 | `tests/v2/test_ui_state_flow.py` |
+| Tab3 持仓行内编辑 | 用户卖一部分后可直接修改 | `ui/portfolio_page.py` | V2 UI portfolio component | V2-11 已迁移并复审 | `tests/v2/test_portfolio_editor_flow.py` |
 | Tab3 组合集中度/风险容量 | 单票集中度、现金和剩余风险 | `portfolio_service.py` | `risk/sizing.py`, `portfolio/allocator.py` | V2-6单计划上限与 V2-8 现金/heat/相关性最终分配已迁移并复审 | `tests/v2/test_portfolio_allocator.py`, `tests/v2/test_risk_sizing.py` |
 | Tab3 冻结估值 | 同一批现价计算权益、市值和仓位，避免伪 103.6% | `portfolio_service.py` | `risk/valuation.py`, `portfolio/allocator.py` | V2-6账户冻结估值与 V2-8 只读消费/reservation 合同已迁移并复审 | `tests/v2/test_portfolio_evidence.py`, `tests/v2/test_risk_valuation.py` |
 | Tab3 跨股票排序与冲突消解 | 先处理风险，再比较关注股替换机会 | `portfolio_service.py` | `portfolio/ranking.py` | V2-8结构化字典序排序、保护退出优先和跨股票预算已完成并复审 | `tests/v2/test_portfolio_ranking.py` |
 | Tab3 关注股替换机会 | 组合视角比较持仓与关注股 | `portfolio_service.py` | `portfolio/replacement.py` | V2-8仅研究候选、独立退出和不复用预计回款已完成并复审 | `tests/v2/test_portfolio_replacements.py` |
-| Tab3 历史评估 | 用户看系统能力是否变好 | `ui/portfolio_page.py`, `portfolio_service.py` | `learning/`, V2 UI | V2-9 三本账/归因设计已冻结；展示留待V2-11 | `tests/v2/test_learning_ledgers.py`, `tests/v2/test_learning_attribution.py` |
+| Tab3 历史评估 | 用户看系统能力是否变好 | `ui/portfolio_page.py`, `portfolio_service.py` | `learning/`, V2 UI | V2-9 三本账和 V2-11 历史评估展示已迁移并复审 | `tests/v2/test_learning_ledgers.py`, `tests/v2/test_evaluation_views.py` |
 
 ## P0 特征资产
 
@@ -122,25 +122,25 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 | 无分钟证据不伪造路径 | 盘中方案不能用整日K冒充信号后走势 | `intraday_bar_log`, trade plan verifier | `execution/simulator.py` | V2-7严格触发证据与同bar adverse path已完成并复审 | `tests/v2/test_trigger_engine.py`, `tests/v2/test_fill_simulator.py` |
 | Decision/Broker 分账 | 保留策略建议与成交/拒单差异 | `joint_oof_runs` | `execution/`, `learning/` | V2-7 保存成交证据；V2-9 六层配对归因和联合账设计已冻结 | `tests/v2/test_execution_smoke.py`, `tests/v2/test_learning_attribution.py` |
 | A股一手、T+1、涨跌停、费用 | A股交易规则不能缺 | `utils/market_rules.py` | `risk/market_rules.py`, `execution/` | V2-7最终一手、T+1、涨跌停/停牌、费用和双市场专项已完成并复审 | `tests/v2/test_execution_market_rules.py`, `tests/v2/test_execution_costs.py` |
-| 策略审计 Bootstrap | 样本外置信区间 | `core/strategy_audit.py` | `learning/metrics.py` | V2-9时间块Bootstrap设计已冻结，待实现 | `tests/v2/test_learning_metrics.py` |
-| 参数 walk-forward 晋升 | 防止未来数据选参数 | `core/strategy_pool.py` | `learning/optimizer.py` | V2-9 purged walk-forward设计已冻结，待实现 | `tests/v2/test_learning_replay.py`, `tests/v2/test_learning_optimizer.py` |
-| 负期望 recovery | 策略自我修复 | `core/strategy_pool.py` | `learning/lifecycle.py` | V2-9漂移、回滚和停止新增风险设计已冻结，待实现 | `tests/v2/test_learning_lifecycle.py` |
+| 策略审计 Bootstrap | 样本外置信区间 | `core/strategy_audit.py` | `learning/metrics.py` | V2-9 时间块 Bootstrap 已迁移并复审 | `tests/v2/test_learning_metrics.py` |
+| 参数 walk-forward 晋升 | 防止未来数据选参数 | `core/strategy_pool.py` | `learning/optimizer.py` | V2-9 purged walk-forward 已迁移并复审 | `tests/v2/test_learning_replay.py`, `tests/v2/test_learning_optimizer.py` |
+| 负期望 recovery | 策略自我修复 | `core/strategy_pool.py` | `learning/lifecycle.py` | V2-9 漂移、回滚和停止新增风险已迁移并复审 | `tests/v2/test_learning_lifecycle.py` |
 
 ## P0 预测与学习资产
 
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
 | 独立 ForecastResult | 预测不由交易动作反推 | `core/forecast_engine.py` | `forecast/engine.py` | V2-3已完成；只产生预测事实 | `tests/v2/test_forecast_contracts.py` |
-| 明确目标交易日 | 用户知道预测哪天 | `forecast_log` | V2-3 `ForecastResult`；V2-9 `MaturityEvidence` | V2-3发行已完成；V2-9到期验证设计已冻结 | `tests/v2/test_forecast_labels.py`, `tests/v2/test_learning_maturity.py` |
+| 明确目标交易日 | 用户知道预测哪天 | `forecast_log` | V2-3 `ForecastResult`；V2-9 `MaturityEvidence` | V2-3 发行和 V2-9 到期验证已迁移并复审 | `tests/v2/test_forecast_labels.py`, `tests/v2/test_learning_maturity.py` |
 | OOF Champion/Challenger | 只让样本外通过模型参与执行 | `forecast_model_versions` | `forecast/registry.py` | V2-3已完成并复审；selection/confirmation按完整交易日隔离、重启可恢复 | `tests/v2/test_forecast_oof_no_leakage.py`, `tests/v2/test_forecast_repository.py` |
 | Brier/LogLoss/ECE/区间命中 | 评价概率预测质量 | `core/forecast_engine.py`, DB metrics | `forecast/diagnostics.py` | V2-3已完成并复审；温度校准和向量化时间块Bootstrap进入真实训练链 | `tests/v2/test_forecast_diagnostics.py`, `tests/v2/test_forecast_models.py` |
 | 独立 TradingScenario | 预测与策略强绑定但不混为同一信号 | V1 无清晰独立层 | `scenario/planner.py` | V2-4已迁移；只声明环境与家族兼容性 | `tests/v2/test_scenario_planner.py` |
 | 预测后新增事实显式证据 | 避免新闻时间衰减被误判为新消息 | V1 当前/预测上下文混合 | `ScenarioFactUpdate` | V2-4已迁移；点时更新不解释方向 | `tests/v2/test_scenario_current_overlay.py` |
-| 三本账思路 | 区分预测错、策略错、联合错 | `forecast_log`, `trade_plan_log`, `joint_oof_runs` | `learning/` | V2-9精确设计已冻结，待实现 | `tests/v2/test_learning_ledgers.py` |
-| 联合 OOF | 预测+策略+风控整体回放 | `core/joint_oof.py` | `learning/replay.py` | V2-9顺序组合OOF设计已冻结，待实现 | `tests/v2/test_learning_replay.py` |
-| 六层效果归因 | 分开评价预测、情景、策略、风控、成交和组合贡献 | V1 三本账与 Decision/Broker 分账 | `learning/attribution.py` | V2-9配对反事实设计已冻结，待实现 | `tests/v2/test_learning_attribution.py` |
-| 股票级自优化 | 不同股票适合不同模型/策略 | `per_stock_params`, forecast versions | `learning/optimizer.py` | V2-9股票优先和行业/市场fallback设计已冻结，待实现 | `tests/v2/test_learning_optimizer.py` |
-| 受控优化与可回滚版本 | 只调注册候选和参数，不自动改源码或取消硬风控 | model versions, strategy candidates | `learning/lifecycle.py` | V2-9候选/影子/Champion/回滚设计已冻结，待实现 | `tests/v2/test_learning_lifecycle.py` |
+| 三本账思路 | 区分预测错、策略错、联合错 | `forecast_log`, `trade_plan_log`, `joint_oof_runs` | `learning/` | V2-9 已迁移并复审 | `tests/v2/test_learning_ledgers.py` |
+| 联合 OOF | 预测+策略+风控整体回放 | `core/joint_oof.py` | `learning/replay.py` | V2-9 顺序组合 OOF 已迁移并复审 | `tests/v2/test_learning_replay.py` |
+| 六层效果归因 | 分开评价预测、情景、策略、风控、成交和组合贡献 | V1 三本账与 Decision/Broker 分账 | `learning/attribution.py` | V2-9 配对反事实已迁移并复审 | `tests/v2/test_learning_attribution.py` |
+| 股票级自优化 | 不同股票适合不同模型/策略 | `per_stock_params`, forecast versions | `learning/optimizer.py` | V2-9 股票优先及行业/市场 fallback 已迁移并复审 | `tests/v2/test_learning_optimizer.py` |
+| 受控优化与可回滚版本 | 只调注册候选和参数，不自动改源码或取消硬风控 | model versions, strategy candidates | `learning/lifecycle.py` | V2-9 候选/影子/Champion/回滚已迁移并复审 | `tests/v2/test_learning_lifecycle.py` |
 
 ## P1 LLM 研究员资产
 
@@ -156,17 +156,17 @@ V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”
 
 | 能力 | V1 价值 | V1 位置 | V2 目标位置 | V2 状态 | 验证测试 |
 |------|---------|---------|-------------|---------|----------|
-| 全宽报告阅读 | 减少左右布局浪费 | `ui/main_page.py`, `ui/portfolio_page.py` | V2 UI pages | V2-11 精确设计已冻结，待实现 | `tests/v2/test_ui_state_flow.py` UX35/UX49 |
-| 报告一分钟操作台 | 用户先看最该做什么 | `services/portfolio_service.py` | `presentation/sections/overview.py` | V2-11 精确设计已冻结，待实现 | `tests/v2/test_report_sections.py` UX10 |
-| 预测表通俗化 | 像天气预报一样看预测对错 | `report/prompts.py` | `presentation/sections/forecast.py` | V2-11 精确设计已冻结，待实现 | `tests/v2/test_report_sections.py` UX13/UX23 |
-| 历史评估图表和表格 | 用户评估系统能力 | `ui/portfolio_page.py` | V2 evaluation read model/UI | V2-11 精确设计已冻结，待实现 | `tests/v2/test_evaluation_views.py` UX20-UX29 |
-| 指标解释和图表读法 | 显示样本数、横纵轴、基线、目标日和一句话结论 | V1 历史评估说明 | V2 glossary/charts | V2-11 精确设计已冻结，待实现 | `tests/v2/test_report_readability.py` UX21/UX22 |
-| 分阶段进度与后台优化 | 前台不等待深度 OOF，用户知道运行到哪一步 | services background optimizer, Flet progress | `application/tasks.py`, UI progress | V2-11 精确设计已冻结，待实现 | `tests/v2/test_task_progress.py` UX30-UX34 |
-| 前台性能预算 | 缓存命中主链与网络/LLM延迟分开度量 | V1 并发预取和后台优化 | V2 presentation/task benchmark | V2-11 精确设计已冻结，待实现 | `tests/v2/test_presentation_performance.py` UX58 |
-| HTML/PDF 导出 | 用户保存报告 | `report/html_enhancer.py`, `pdf_exporter.py` | `presentation/renderers/` | V2-11 精确设计已冻结，待实现 | `tests/v2/test_report_renderers.py` UX53-UX55 |
-| 历史报告检索与评分 | 按股票、市场、模式、日期和评分查阅旧报告 | `ui/history_page.py` | `application/history.py`, `ui/pages/report_history.py` | V2-11 精确设计已冻结，待实现 | `tests/v2/test_report_history_flow.py` UX50-UX52 |
-| 首次运行与设置页 | 配置工作目录、行情 token、LLM、代理并控制页面可用性 | `ui/settings_ui.py`, `config/settings.py` | `application/settings.py`, `ui/pages/settings.py` | V2-11 精确设计已冻结，待实现 | `tests/v2/test_settings_flow.py` UX56 |
-| macOS/Windows 运行烟雾 | 构建后实际启动，防止 jaraco/资源文件缺失 | `scripts/`, `.github/workflows/` | V2 release acceptance | 待迁移 | 构建后 smoke |
+| 全宽报告阅读 | 减少左右布局浪费 | `ui/main_page.py`, `ui/portfolio_page.py` | V2 UI pages | V2-11 已迁移并复审 | `tests/v2/test_ui_state_flow.py` UX35/UX49 |
+| 报告一分钟操作台 | 用户先看最该做什么 | `services/portfolio_service.py` | `presentation/sections/overview.py` | V2-11 已迁移并复审 | `tests/v2/test_report_sections.py` UX10 |
+| 预测表通俗化 | 像天气预报一样看预测对错 | `report/prompts.py` | `presentation/sections/forecast.py` | V2-11 已迁移并复审 | `tests/v2/test_report_sections.py` UX13/UX23 |
+| 历史评估图表和表格 | 用户评估系统能力 | `ui/portfolio_page.py` | V2 evaluation read model/UI | V2-11 已迁移并复审 | `tests/v2/test_evaluation_views.py` UX20-UX29 |
+| 指标解释和图表读法 | 显示样本数、横纵轴、基线、目标日和一句话结论 | V1 历史评估说明 | V2 glossary/charts | V2-11 已迁移并复审 | `tests/v2/test_report_readability.py` UX21/UX22 |
+| 分阶段进度与后台优化 | 前台不等待深度 OOF，用户知道运行到哪一步 | services background optimizer, Flet progress | `application/tasks.py`, UI progress | V2-11 展示和任务合同已迁移；真实后台调度留待 V2-12 | `tests/v2/test_task_progress.py` UX30-UX34 |
+| 前台性能预算 | 缓存命中主链与网络/LLM延迟分开度量 | V1 并发预取和后台优化 | V2 presentation/task benchmark | V2-11 基准已迁移；production 预算留待 V2-12 | `tests/v2/test_presentation_performance.py` UX58, RL71-RL73 |
+| HTML/PDF 导出 | 用户保存报告 | `report/html_enhancer.py`, `pdf_exporter.py` | `presentation/renderers/` | V2-11 已迁移并复审；打包产物验收留待 V2-12 | `tests/v2/test_report_renderers.py` UX53-UX55, RL65 |
+| 历史报告检索与评分 | 按股票、市场、模式、日期和评分查阅旧报告 | `ui/history_page.py` | `application/history.py`, `ui/pages/report_history.py` | V2-11 已迁移并复审 | `tests/v2/test_report_history_flow.py` UX50-UX52 |
+| 首次运行与设置页 | 配置工作目录、行情 token、LLM、代理并控制页面可用性 | `ui/settings_ui.py`, `config/settings.py` | `application/settings.py`, `ui/pages/settings.py` | V2-11 页面已迁移；首次正式迁移流程留待 V2-12 | `tests/v2/test_settings_flow.py` UX56, `tests/v2/test_v1_to_v2_migration.py` |
+| macOS/Windows 运行烟雾 | 构建后实际启动，防止 jaraco/资源文件缺失 | `scripts/`, `.github/workflows/` | V2 release acceptance | V2-12 待实现 | `tests/v2/test_release_smoke.py`, RL60-RL69 |
 
 ## P2/P3 可暂缓但需保留位置
 
