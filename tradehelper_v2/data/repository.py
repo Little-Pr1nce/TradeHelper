@@ -67,6 +67,10 @@ from tradehelper_v2.contracts.execution import (ExecutionEvidenceGrade, Executio
 from tradehelper_v2.contracts.portfolio import (AllocationStatus, CorrelationPair, CorrelationStatus, HoldingRiskSnapshot, HoldingRiskStatus, InstrumentReturnRisk, PortfolioAllocation, PortfolioCandidate, PortfolioCorrelationSnapshot, PortfolioDecisionBundle, PortfolioEvidenceGrade, PortfolioHeatStatus, PortfolioInputBatch, PortfolioPolicy, PortfolioProfileDecision, PortfolioReservationGroup, PortfolioReservationSnapshot, PortfolioRiskSnapshot, PortfolioRole, ReplacementCandidate, ReplacementStatus)
 from tradehelper_v2.contracts.learning import CandidateKind, CandidateLifecycle, CandidateScope, EvidenceOrigin, ForecastOutcome, JointOutcome, JointOutcomeKind, LearningCandidateVersion, LearningEvidenceGrade, LearningMetricSnapshot, LearningRun, LearningRunStatus, LedgerKind, MaturityEvidence, OutcomeStatus, PromotionDecision, PromotionEvent, ScenarioOutcome, StrategyOutcome
 from tradehelper_v2.contracts.research import (CandidateEligibility, HypothesisCandidateLink, HypothesisKind, HypothesisNovelty, HypothesisOutcome, HypothesisOutcomeStatus, HypothesisValidation, HypothesisValidationStatus, RawResearchResponse, ResearchContext, ResearchFact, ResearchFactManifest, ResearchHypothesis, ResearchMetricSnapshot, ResearchScope)
+from tradehelper_v2.contracts.presentation import (ChartKind, ChartSpec, ExportFormat, ExportStatus,
+    MetricDefinition, ReportBlock, ReportBlockKind, ReportDocument, ReportExportArtifact,
+    ReportFeedback, ReportHistoryQuery, ReportHistoryPage, ReportKind, ReportSection,
+    ReportSeverity, ReportSnapshot, ReportTable, ReportTableRow, WatchlistSnapshot)
 from .migrations.schema import apply_schema
 
 
@@ -1236,6 +1240,122 @@ class SQLiteRepository:
         if generated_at is None: raise ContractViolation("immutable record requires generated_at or created_at")
         connection.execute(f"INSERT INTO {table}({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",values+(payload_hash,payload,utc_iso(generated_at),1))
         return ForecastWriteResult(1,0,0)
+
+    def save_watchlist_snapshot(self, snapshot: WatchlistSnapshot) -> ForecastWriteResult:
+        """关注列表与成员同一事务写入；旧快照永不被原地修改。"""
+        with self._transaction() as connection:
+            result=self._save_learning_record(table="watchlist_snapshots",id_column="watchlist_id",record=snapshot,event_key=snapshot.watchlist_id,columns=("watchlist_id","event_key","market","payload_hash","payload_json","created_at","schema_version"),values=(snapshot.watchlist_id,snapshot.watchlist_id,snapshot.market.value),connection=connection)
+            if result.conflicts:return result
+            for position,instrument in enumerate(snapshot.instruments):
+                connection.execute("INSERT OR IGNORE INTO watchlist_snapshot_members(watchlist_id,instrument_key,position) VALUES (?,?,?)",(snapshot.watchlist_id,instrument.stable_key,position))
+            return result
+
+    def get_watchlist_snapshot(self, watchlist_id: str) -> WatchlistSnapshot | None:
+        row=self._fetchone("SELECT * FROM watchlist_snapshots WHERE watchlist_id=?",(watchlist_id,))
+        if row is None:return None
+        payload=json.loads(row["payload_json"])
+        instruments=tuple(InstrumentId(item["code"],Market(item["market"]),Exchange(item["exchange"])) for item in payload["instruments"])
+        value=WatchlistSnapshot(payload["watchlist_id"],Market(payload["market"]),instruments,_parse_datetime(payload["created_at"]))
+        members=self._fetchall("SELECT instrument_key,position FROM watchlist_snapshot_members WHERE watchlist_id=? ORDER BY position",(watchlist_id,))
+        if tuple(row["instrument_key"] for row in members)!=tuple(item.stable_key for item in value.instruments) or tuple(row["position"] for row in members)!=tuple(range(len(value.instruments))):
+            raise ContractViolation("stored watchlist members do not match payload")
+        expected={"event_key":value.watchlist_id,"market":value.market.value,"created_at":utc_iso(value.created_at),"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()): raise ContractViolation("stored watchlist columns do not match payload")
+        return value
+
+    def latest_watchlist_snapshot(self, market: Market) -> WatchlistSnapshot | None:
+        row=self._fetchone("SELECT watchlist_id FROM watchlist_snapshots WHERE market=? ORDER BY created_at DESC,watchlist_id DESC LIMIT 1",(market.value,))
+        return None if row is None else self.get_watchlist_snapshot(row["watchlist_id"])
+
+    def save_report_document(self, document: ReportDocument) -> ForecastWriteResult:
+        """报告快照先完整写入，导出失败不影响其历史可读性。"""
+        return self._save_learning_record(table="report_snapshots",id_column="report_id",record=document,event_key=document.report_id,columns=("report_id","event_key","document_hash","report_kind","market","instrument_key","analysis_mode","as_of","source_refs_json","renderer_version","payload_hash","payload_json","created_at","schema_version"),values=(document.report_id,document.report_id,document.document_hash,document.report_kind.value,document.market.value,document.instrument.stable_key if document.instrument else None,document.analysis_mode.value,utc_iso(document.as_of),canonical_json(document.source_artifact_refs),document.renderer_version),instrument_key=document.instrument.stable_key if document.instrument else None)
+
+    def archive_report(self, report_id: str, *, archived: bool=True) -> None:
+        with self._transaction() as connection:
+            if connection.execute("UPDATE report_snapshots SET archived=? WHERE report_id=?",(1 if archived else 0,report_id)).rowcount!=1: raise ContractViolation("report does not exist")
+
+    def save_report_feedback(self, feedback: ReportFeedback) -> ForecastWriteResult:
+        if self._fetchone("SELECT 1 FROM report_snapshots WHERE report_id=?",(feedback.report_id,)) is None: raise ContractViolation("feedback references missing report")
+        return self._save_learning_record(table="report_feedback",id_column="feedback_id",record=feedback,event_key=feedback.feedback_id,columns=("feedback_id","event_key","report_id","rating","payload_hash","payload_json","created_at","schema_version"),values=(feedback.feedback_id,feedback.feedback_id,feedback.report_id,feedback.rating))
+
+    def save_report_export(self, artifact: ReportExportArtifact) -> ForecastWriteResult:
+        if self._fetchone("SELECT 1 FROM report_snapshots WHERE report_id=?",(artifact.report_id,)) is None: raise ContractViolation("export references missing report")
+        return self._save_learning_record(table="report_exports",id_column="export_id",record=artifact,event_key=artifact.export_id,columns=("export_id","event_key","report_id","format","status","content_hash","error_code","payload_hash","payload_json","created_at","schema_version"),values=(artifact.export_id,artifact.export_id,artifact.report_id,artifact.format.value,artifact.status.value,artifact.content_hash,artifact.error_code))
+
+    def list_report_history_rows(self, query: ReportHistoryQuery):
+        sql="SELECT report_id,payload_json,archived FROM report_snapshots WHERE 1=1"; params=[]
+        if not query.include_archived: sql+=" AND archived=0"
+        if query.market: sql+=" AND market=?"; params.append(query.market.value)
+        if query.report_kind: sql+=" AND report_kind=?"; params.append(query.report_kind.value)
+        if query.instrument: sql+=" AND instrument_key=?"; params.append(query.instrument.stable_key)
+        if query.analysis_mode: sql+=" AND analysis_mode=?"; params.append(query.analysis_mode.value)
+        sql+=" ORDER BY as_of DESC,report_id DESC LIMIT ? OFFSET ?"; params.extend((query.page_size,(query.page-1)*query.page_size))
+        return tuple(self._fetchall(sql,tuple(params)))
+
+    def get_report_document_payload(self, report_id: str) -> dict | None:
+        """历史页面获得冻结 JSON，不触发任何重新分析或外部查询。"""
+        row=self._fetchone("SELECT payload_json,archived,document_hash FROM report_snapshots WHERE report_id=?",(report_id,))
+        if row is None:return None
+        payload=json.loads(row["payload_json"])
+        if stable_hash({"report_id":payload["report_id"],"sections":payload["sections"],"refs":payload["source_artifact_refs"],"renderer":payload["renderer_version"]}) != row["document_hash"]: raise ContractViolation("stored report document hash mismatch")
+        payload["archived"]=bool(row["archived"])
+        return payload
+
+    @staticmethod
+    def _report_document_from_payload(payload: dict) -> ReportDocument:
+        """反序列化只允许 V2-11 的固定展示合同，避免历史页回算业务对象。"""
+        def instrument(value):
+            return None if value is None else InstrumentId(value["code"],Market(value["market"]),Exchange(value["exchange"]))
+        def row(value):
+            return ReportTableRow(value["row_id"],tuple(value["cells"]),value.get("severity"),tuple(value["source_artifact_refs"]))
+        def table(value):
+            return ReportTable(value["table_id"],value["title"],tuple(value["columns"]),tuple(row(item) for item in value["rows"]),value.get("empty_state"),value.get("interpretation"))
+        def chart(value):
+            return ChartSpec(value["chart_id"],ChartKind(value["chart_kind"]),value["title"],value["x_axis"],value["y_axis"],tuple((name,tuple((x,float(y)) for x,y in points)) for name,points in value["series"]),tuple((x,float(y)) for x,y in value["baseline"]),int(value["sample_count"]),None if value.get("sample_range") is None else tuple(value["sample_range"]),value["interpretation"],value.get("empty_state"))
+        def block(value):
+            kind=ReportBlockKind(value["kind"]); raw=value["payload"]
+            return ReportBlock(kind,table(raw) if kind is ReportBlockKind.TABLE else chart(raw) if kind is ReportBlockKind.CHART else raw,tuple(value["source_artifact_refs"]))
+        def section(value):
+            return ReportSection(value["section_id"],value["title"],value["purpose"],value.get("severity"),tuple(block(item) for item in value["blocks"]))
+        glossary=tuple(MetricDefinition(item["metric_key"],item["display_name"],item["plain_language_definition"],item["preferred_direction"],item["minimum_sample_guidance"],item.get("unit")) for item in payload["glossary_entries"])
+        return ReportDocument(payload["report_id"],ReportKind(payload["report_kind"]),Market(payload["market"]),instrument(payload.get("instrument")),DecisionMode(payload["analysis_mode"]),_parse_datetime(payload["as_of"]),payload["title"],payload["subtitle"],payload["summary"],tuple(section(item) for item in payload["sections"]),glossary,tuple(payload["source_artifact_refs"]),int(payload["schema_version"]),payload["renderer_version"],_parse_datetime(payload["generated_at"]))
+
+    def get_report_document(self, report_id: str) -> ReportDocument | None:
+        payload=self.get_report_document_payload(report_id)
+        if payload is None:return None
+        return self._report_document_from_payload(payload)
+
+    def get_report_snapshot(self, report_id: str) -> ReportSnapshot | None:
+        row=self._fetchone("SELECT r.*,(SELECT f.rating FROM report_feedback f WHERE f.report_id=r.report_id ORDER BY f.created_at DESC,f.feedback_id DESC LIMIT 1) AS latest_rating FROM report_snapshots r WHERE r.report_id=?",(report_id,))
+        if row is None:return None
+        document=self.get_report_document(report_id)
+        assert document is not None
+        expected={"event_key":document.report_id,"document_hash":document.document_hash,"report_kind":document.report_kind.value,"market":document.market.value,"instrument_key":document.instrument.stable_key if document.instrument else None,"analysis_mode":document.analysis_mode.value,"as_of":utc_iso(document.as_of),"source_refs_json":canonical_json(document.source_artifact_refs),"renderer_version":document.renderer_version,"schema_version":1}
+        if any(row[key]!=item for key,item in expected.items()): raise ContractViolation("stored report snapshot columns do not match payload")
+        return ReportSnapshot(document.report_id,row["payload_json"],row["document_hash"],document.report_kind,document.market,document.instrument,document.analysis_mode,document.as_of,document.source_artifact_refs,document.renderer_version,document.subtitle,bool(row["archived"]),_parse_datetime(row["created_at"]),None if row["latest_rating"] is None else int(row["latest_rating"]))
+
+    def list_report_history(self, query: ReportHistoryQuery) -> ReportHistoryPage:
+        where=["1=1"]; params=[]
+        if not query.include_archived: where.append("r.archived=0")
+        if query.market: where.append("r.market=?");params.append(query.market.value)
+        if query.report_kind: where.append("r.report_kind=?");params.append(query.report_kind.value)
+        if query.instrument: where.append("r.instrument_key=?");params.append(query.instrument.stable_key)
+        if query.analysis_mode: where.append("r.analysis_mode=?");params.append(query.analysis_mode.value)
+        if query.history_period: where.append("json_extract(r.payload_json,'$.subtitle')=?");params.append(query.history_period)
+        if query.date_from: where.append("r.as_of>=?");params.append(utc_iso(query.date_from))
+        if query.date_to: where.append("r.as_of<=?");params.append(utc_iso(query.date_to))
+        rating="(SELECT f.rating FROM report_feedback f WHERE f.report_id=r.report_id ORDER BY f.created_at DESC,f.feedback_id DESC LIMIT 1)"
+        if query.minimum_rating is not None: where.append(f"COALESCE({rating},0)>=?");params.append(query.minimum_rating)
+        clause=" AND ".join(where)
+        total=int(self._fetchone(f"SELECT COUNT(*) AS count FROM report_snapshots r WHERE {clause}",tuple(params))["count"])
+        rows=self._fetchall(f"SELECT r.report_id FROM report_snapshots r WHERE {clause} ORDER BY r.as_of DESC,r.report_id DESC LIMIT ? OFFSET ?",tuple(params+[query.page_size,(query.page-1)*query.page_size]))
+        items=tuple(self.get_report_snapshot(row["report_id"]) for row in rows)
+        return ReportHistoryPage(query,items,total,query.page*query.page_size<total)
+
+    def list_report_feedback(self, report_id: str) -> tuple[ReportFeedback,...]:
+        rows=self._fetchall("SELECT payload_json FROM report_feedback WHERE report_id=? ORDER BY created_at,feedback_id",(report_id,))
+        return tuple(ReportFeedback(item["feedback_id"],item["report_id"],int(item["rating"]),item.get("note"),_parse_datetime(item["created_at"])) for item in (json.loads(row["payload_json"]) for row in rows))
 
     def save_maturity_evidence(self, evidence: MaturityEvidence) -> ForecastWriteResult:
         columns=("evidence_id","event_key","instrument_key","target_session_date","status","revision","supersedes_id","origin_session_date","payload_hash","payload_json","generated_at","schema_version")

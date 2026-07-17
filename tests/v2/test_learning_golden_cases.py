@@ -297,6 +297,6 @@ def test_le58_drift_rolls_back_or_suspends_new_risk():
 
 def test_le59_migration_14_restarts_and_is_idempotent(tmp_path):
     path=Path(tmp_path)/"le59.sqlite"; first=SQLiteRepository(path); first.close(); second=SQLiteRepository(path)
-    # V2-10 只追加 migration 15；V2-9 的 migration 14 仍保持原 checksum。
-    try: assert second._connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 15
+    # V2-11 只追加 migration 16；V2-9/V2-10 的历史 checksum 保持不变。
+    try: assert second._connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 16
     finally: second.close()

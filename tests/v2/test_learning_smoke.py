@@ -30,7 +30,7 @@ def test_learning_maturity_and_probability_metrics_are_market_isolated(us_instru
 def test_learning_migration_14_is_idempotent(tmp_path):
     repo=SQLiteRepository(Path(tmp_path)/'learning.sqlite')
     try:
-        # V2-10 在既有 learning migration 之后只追加版本 15。
-        assert repo._connection.execute('select max(version) from schema_migrations').fetchone()[0]==15
+        # V2-11 在既有 learning/report migration 之后只追加版本 16。
+        assert repo._connection.execute('select max(version) from schema_migrations').fetchone()[0]==16
         assert repo._connection.execute("select name from sqlite_master where type='table' and name='learning_candidate_versions'").fetchone()[0]=='learning_candidate_versions'
     finally: repo.close()

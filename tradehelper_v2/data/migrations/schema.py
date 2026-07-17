@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import sqlite3
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -591,6 +591,15 @@ CREATE TABLE IF NOT EXISTS hypothesis_outcomes (outcome_id TEXT PRIMARY KEY,even
 CREATE TABLE IF NOT EXISTS research_metric_snapshots (snapshot_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,market TEXT NOT NULL,scope_key TEXT NOT NULL,cutoff_at TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
 """.strip()
 
+_SCHEMA_V16_SQL = """
+CREATE TABLE IF NOT EXISTS watchlist_snapshots (watchlist_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,market TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS watchlist_snapshot_members (watchlist_id TEXT NOT NULL,instrument_key TEXT NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(watchlist_id,instrument_key),FOREIGN KEY(watchlist_id) REFERENCES watchlist_snapshots(watchlist_id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS report_snapshots (report_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,document_hash TEXT NOT NULL,report_kind TEXT NOT NULL,market TEXT NOT NULL,instrument_key TEXT,analysis_mode TEXT NOT NULL,as_of TEXT NOT NULL,source_refs_json TEXT NOT NULL,renderer_version TEXT NOT NULL,archived INTEGER NOT NULL DEFAULT 0,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_v2_report_history ON report_snapshots(archived,market,report_kind,as_of DESC);
+CREATE TABLE IF NOT EXISTS report_feedback (feedback_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,report_id TEXT NOT NULL,rating INTEGER NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL,schema_version INTEGER NOT NULL,FOREIGN KEY(report_id) REFERENCES report_snapshots(report_id));
+CREATE TABLE IF NOT EXISTS report_exports (export_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,report_id TEXT NOT NULL,format TEXT NOT NULL,status TEXT NOT NULL,content_hash TEXT,error_code TEXT,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL,schema_version INTEGER NOT NULL,FOREIGN KEY(report_id) REFERENCES report_snapshots(report_id));
+""".strip()
+
 
 def schema_checksum() -> str:
     return sha256(_SCHEMA_SQL.encode("utf-8")).hexdigest()
@@ -634,6 +643,8 @@ def schema_v14_checksum() -> str:
     return sha256(_SCHEMA_V14_SQL.encode("utf-8")).hexdigest()
 def schema_v15_checksum() -> str:
     return sha256(_SCHEMA_V15_SQL.encode("utf-8")).hexdigest()
+def schema_v16_checksum() -> str:
+    return sha256(_SCHEMA_V16_SQL.encode("utf-8")).hexdigest()
 
 
 def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, checksum: str) -> None:
@@ -675,4 +686,5 @@ def apply_schema(connection: sqlite3.Connection) -> None:
     _apply_migration(connection, 13, _SCHEMA_V13_SQL, schema_v13_checksum())
     _apply_migration(connection, 14, _SCHEMA_V14_SQL, schema_v14_checksum())
     _apply_migration(connection, 15, _SCHEMA_V15_SQL, schema_v15_checksum())
+    _apply_migration(connection, 16, _SCHEMA_V16_SQL, schema_v16_checksum())
     connection.commit()

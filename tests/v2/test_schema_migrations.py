@@ -4,7 +4,7 @@ from pathlib import Path
 import sqlite3
 
 from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.data.migrations.schema import SCHEMA_VERSION, apply_schema, schema_checksum, schema_v2_checksum, schema_v3_checksum, schema_v4_checksum, schema_v5_checksum, schema_v6_checksum, schema_v7_checksum, schema_v8_checksum, schema_v9_checksum, schema_v10_checksum, schema_v11_checksum, schema_v12_checksum, schema_v13_checksum, schema_v14_checksum, schema_v15_checksum
+from tradehelper_v2.data.migrations.schema import SCHEMA_VERSION, apply_schema, schema_checksum, schema_v2_checksum, schema_v3_checksum, schema_v4_checksum, schema_v5_checksum, schema_v6_checksum, schema_v7_checksum, schema_v8_checksum, schema_v9_checksum, schema_v10_checksum, schema_v11_checksum, schema_v12_checksum, schema_v13_checksum, schema_v14_checksum, schema_v15_checksum, schema_v16_checksum
 
 
 def test_g53_v1_database_remains_untouched(tmp_path, now) -> None:
@@ -36,6 +36,7 @@ def test_g54_schema_migrations_are_idempotent(tmp_path) -> None:
     assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=13").fetchone()[0] == 1
     assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=14").fetchone()[0] == 1
     assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=15").fetchone()[0] == 1
+    assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=16").fetchone()[0] == 1
     assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == SCHEMA_VERSION
     assert schema_checksum() == schema_checksum()
     assert schema_v2_checksum() == schema_v2_checksum()
@@ -52,6 +53,7 @@ def test_g54_schema_migrations_are_idempotent(tmp_path) -> None:
     assert schema_v13_checksum() == schema_v13_checksum()
     assert schema_v14_checksum() == schema_v14_checksum()
     assert schema_v15_checksum() == schema_v15_checksum()
+    assert schema_v16_checksum() == schema_v16_checksum()
     expected_tables = {
         "order_intents", "order_intent_build_records", "trigger_evaluations",
         "execution_runs", "fill_evidence",
@@ -59,6 +61,7 @@ def test_g54_schema_migrations_are_idempotent(tmp_path) -> None:
         "joint_outcomes", "learning_candidate_versions", "learning_promotion_events", "learning_deployments",
         "research_contexts", "llm_research_invocations", "research_hypotheses", "hypothesis_validations",
         "hypothesis_candidate_links", "hypothesis_outcomes", "research_metric_snapshots",
+        "watchlist_snapshots", "watchlist_snapshot_members", "report_snapshots", "report_feedback", "report_exports",
     }
     actual_tables = {
         row[0] for row in connection.execute(
