@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import sqlite3
 
-SCHEMA_VERSION = 16
+# V2-12 迁移版本；旧版本 SQL/checksum 保持不可变。
+SCHEMA_VERSION = 17
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -600,6 +601,22 @@ CREATE TABLE IF NOT EXISTS report_feedback (feedback_id TEXT PRIMARY KEY,event_k
 CREATE TABLE IF NOT EXISTS report_exports (export_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,report_id TEXT NOT NULL,format TEXT NOT NULL,status TEXT NOT NULL,content_hash TEXT,error_code TEXT,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL,schema_version INTEGER NOT NULL,FOREIGN KEY(report_id) REFERENCES report_snapshots(report_id));
 """.strip()
 
+# 迁移审计、别名、运行状态和研究报告修订链接。旧行情等证据只能进入
+# archive 表，不能借迁移过程变成 V2 正式事实。
+_SCHEMA_V17_SQL = """
+CREATE TABLE IF NOT EXISTS legacy_migration_runs (run_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,plan_id TEXT NOT NULL,source_path TEXT NOT NULL,source_fingerprint TEXT NOT NULL,migration_version INTEGER NOT NULL,status TEXT NOT NULL,preflight_hash TEXT NOT NULL,backup_path TEXT,reason_codes_json TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,started_at TEXT NOT NULL,completed_at TEXT,generated_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS legacy_migration_items (item_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,run_id TEXT NOT NULL,source_table TEXT NOT NULL,source_key TEXT NOT NULL,target_kind TEXT NOT NULL,status TEXT NOT NULL,reason_codes_json TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL,schema_version INTEGER NOT NULL,FOREIGN KEY(run_id) REFERENCES legacy_migration_runs(run_id));
+CREATE TABLE IF NOT EXISTS legacy_report_archives (archive_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,run_id TEXT NOT NULL,source_fingerprint TEXT NOT NULL,source_id TEXT NOT NULL,market TEXT,code TEXT,title TEXT,content TEXT,path TEXT,rating TEXT,created_at TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,schema_version INTEGER NOT NULL,FOREIGN KEY(run_id) REFERENCES legacy_migration_runs(run_id));
+CREATE TABLE IF NOT EXISTS legacy_evidence_archives (archive_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,run_id TEXT NOT NULL,source_table TEXT NOT NULL,source_id TEXT NOT NULL,market TEXT,code TEXT,evidence_kind TEXT NOT NULL,reason_codes_json TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL,schema_version INTEGER NOT NULL,FOREIGN KEY(run_id) REFERENCES legacy_migration_runs(run_id));
+CREATE TABLE IF NOT EXISTS instrument_aliases (alias_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,market TEXT NOT NULL,legacy_code TEXT NOT NULL,canonical_instrument_key TEXT NOT NULL,status TEXT NOT NULL,source TEXT NOT NULL,created_at TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS analysis_runs (run_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,command_id TEXT NOT NULL,report_kind TEXT NOT NULL,market TEXT NOT NULL,instrument_key TEXT,mode TEXT NOT NULL,history_period TEXT NOT NULL,status TEXT NOT NULL,deterministic_report_id TEXT,research_report_id TEXT,background_task_ids_json TEXT NOT NULL,source_refs_json TEXT NOT NULL,reason_codes_json TEXT NOT NULL,started_at TEXT NOT NULL,completed_at TEXT,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS report_revision_links (link_id TEXT PRIMARY KEY,event_key TEXT UNIQUE NOT NULL,base_report_id TEXT NOT NULL,revised_report_id TEXT NOT NULL,revision_kind TEXT NOT NULL,invariant_section_hash TEXT NOT NULL,payload_hash TEXT NOT NULL,payload_json TEXT NOT NULL,created_at TEXT NOT NULL,schema_version INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_legacy_items_run ON legacy_migration_items(run_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_legacy_alias_lookup ON instrument_aliases(market,legacy_code);
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_command ON analysis_runs(command_id,started_at);
+CREATE INDEX IF NOT EXISTS idx_revision_links_base ON report_revision_links(base_report_id,created_at);
+""".strip()
+
 
 def schema_checksum() -> str:
     return sha256(_SCHEMA_SQL.encode("utf-8")).hexdigest()
@@ -646,6 +663,9 @@ def schema_v15_checksum() -> str:
 def schema_v16_checksum() -> str:
     return sha256(_SCHEMA_V16_SQL.encode("utf-8")).hexdigest()
 
+def schema_v17_checksum() -> str:
+    return sha256(_SCHEMA_V17_SQL.encode("utf-8")).hexdigest()
+
 
 def _apply_migration(connection: sqlite3.Connection, version: int, sql: str, checksum: str) -> None:
     """执行一次迁移并固化 checksum；重复执行只校验，不重放旧 SQL。"""
@@ -687,4 +707,5 @@ def apply_schema(connection: sqlite3.Connection) -> None:
     _apply_migration(connection, 14, _SCHEMA_V14_SQL, schema_v14_checksum())
     _apply_migration(connection, 15, _SCHEMA_V15_SQL, schema_v15_checksum())
     _apply_migration(connection, 16, _SCHEMA_V16_SQL, schema_v16_checksum())
+    _apply_migration(connection, 17, _SCHEMA_V17_SQL, schema_v17_checksum())
     connection.commit()

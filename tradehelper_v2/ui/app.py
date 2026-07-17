@@ -2,9 +2,9 @@
 from __future__ import annotations
 import flet as ft
 
-def build_app(single_stock, history, portfolio, settings):
-    labels = ("单股分析", "历史报告", "我的持仓", "设置")
-    views = (single_stock.build(), history.build(), portfolio.build(), settings)
+def build_app(single_stock, history, portfolio, settings, migration=None):
+    labels = ("单股分析", "历史报告", "我的持仓", "设置") + (("迁移",) if migration is not None else ())
+    views = (single_stock.build(), history.build(), portfolio.build(), settings) + ((migration.build(),) if migration is not None else ())
     return ft.Tabs(
         content=ft.Column(
             [

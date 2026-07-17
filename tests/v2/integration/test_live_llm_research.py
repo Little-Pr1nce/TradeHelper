@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 from datetime import datetime,timezone
 
 import pytest
@@ -21,13 +22,13 @@ if os.environ.get("TRADEHELPER_LLM_LIVE_TESTS")!="1":
 
 def _settings():
     if os.environ.get("TRADEHELPER_LIVE_USE_V1_SETTINGS")=="1":
-        from config.settings import Settings
-        legacy=Settings.init(Settings.default_config_path())
-        return V2Settings.from_mapping({name:legacy.get(name) for name in ("llm_base_url","llm_api_key","llm_model","llm_enable_thinking")})
+        path=V2Settings.default_path().with_name("config.json")
+        legacy=json.loads(path.read_text(encoding="utf-8"))
+        return V2Settings.from_mapping({name:legacy.get(name,"") for name in ("llm_base_url","llm_api_key","llm_model","llm_enable_thinking")})
     return V2Settings.load()
 
 
-def test_live_llm_research_strict_schema_and_secret_redaction():
+def test_RL78_live_llm_strict_json_and_secret_redaction():
     settings=_settings()
     if not settings.llm_base_url or not settings.llm_api_key or not settings.llm_model:
         pytest.fail("real LLM smoke was enabled but configured LLM credentials are incomplete")

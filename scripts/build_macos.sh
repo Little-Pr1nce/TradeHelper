@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 # ============================================================
 # TradeHelper macOS 打包脚本
 #
@@ -38,28 +39,29 @@ echo "========================================="
 
 # ── 1. 环境检查 ──
 echo ""
-echo "[1/4] 检查依赖..."
+echo "[1/5] 检查依赖..."
 if ! $PYTHON -c "import flet, transformers, tickflow, yfinance" 2>/dev/null; then
     echo "安装/补齐项目依赖..."
-    $PIP install -r requirements.txt
+    $PIP install -r requirements-runtime.txt
 fi
 if ! $PYTHON -c "import PyInstaller" 2>/dev/null; then
     echo "安装 PyInstaller..."
-    $PIP install pyinstaller
+    $PIP install -r requirements-dev.txt
 fi
 
 # ── 2. FinBERT 模型 ──
 echo ""
-echo "[2/4] 准备 FinBERT 模型..."
+echo "[2/5] 准备 FinBERT 模型..."
 if [ ! -f "dist_data/finbert_model/config.json" ]; then
     $PYTHON scripts/prepare_model.py
 else
     echo "模型已就绪，跳过。"
 fi
+$PYTHON scripts/write_release_manifest.py
 
 # ── 3. 清理 + 打包 ──
 echo ""
-echo "[3/4] PyInstaller 打包（约 5 分钟）..."
+echo "[3/5] PyInstaller 打包（约 5 分钟）..."
 rm -rf dist/mac build/mac 2>/dev/null || true
 $PYTHON -m PyInstaller tradehelper.spec --distpath dist/mac --workpath build/mac --noconfirm
 
@@ -68,6 +70,29 @@ echo ""
 if [ -d "dist/mac/TradeHelper.app" ]; then
     APP_SIZE=$(du -sh dist/mac/TradeHelper.app | cut -f1)
     echo "✓ 打包成功！ dist/mac/TradeHelper.app ($APP_SIZE)"
+    echo "[5/5] 运行临时 HOME 的离线 runtime smoke..."
+    # PyInstaller 刚退出时给系统片刻回收峰值内存，再加载包内 FinBERT。
+    sleep 3
+    export TRADEHELPER_SMOKE_TEST=1
+    export TRADEHELPER_REQUIRE_FINBERT=1
+    export TRADEHELPER_REQUIRE_MANIFEST=1
+    ORIGINAL_HOME="$HOME"
+    SMOKE_HOME="$(mktemp -d)"
+    export HOME="$SMOKE_HOME"
+    set +e
+    "dist/mac/TradeHelper.app/Contents/MacOS/TradeHelper"
+    SMOKE_EXIT=$?
+    set -e
+    rm -rf "$SMOKE_HOME"
+    export HOME="$ORIGINAL_HOME"
+    unset TRADEHELPER_SMOKE_TEST
+    unset TRADEHELPER_REQUIRE_FINBERT
+    unset TRADEHELPER_REQUIRE_MANIFEST
+    if [ $SMOKE_EXIT -ne 0 ]; then
+        echo "✗ runtime smoke 失败（$SMOKE_EXIT）"
+        exit $SMOKE_EXIT
+    fi
+    echo "✓ runtime smoke 通过"
 else
     echo "✗ 打包失败！"
     exit 1

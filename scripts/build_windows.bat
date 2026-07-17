@@ -23,7 +23,6 @@ if exist "venv\Scripts\python.exe" (
     set PIP=%PROJECT_DIR%\venv\Scripts\pip.exe
     echo venv created.
 )
-
 echo.
 echo ============================================
 echo   TradeHelper  Windows Build (all-in-one)
@@ -33,10 +32,12 @@ echo ============================================
 echo.
 echo [1/5] Installing dependencies (may take 5-10 min)...
 !PIP! install --upgrade pip
-if exist "requirements.txt" (
-    !PIP! install -r requirements.txt
+if exist "requirements-runtime.txt" (
+    !PIP! install -r requirements-runtime.txt
 )
-!PIP! install pyinstaller
+if exist "requirements-dev.txt" (
+    !PIP! install -r requirements-dev.txt
+)
 if !ERRORLEVEL! NEQ 0 (
     echo ERROR: pip install failed. Check network connection.
     pause
@@ -54,6 +55,8 @@ if not exist "dist_data\finbert_model\config.json" (
 ) else (
     echo [FinBERT model ready, skipping download]
 )
+!PYTHON! scripts\write_release_manifest.py
+if !ERRORLEVEL! NEQ 0 exit /b 1
 
 echo.
 echo [3/5] Cleaning previous build artifacts...
@@ -82,9 +85,13 @@ set OUTPUT_DIR=%PROJECT_DIR%\dist\win\TradeHelper
 if exist "!OUTPUT_DIR!\TradeHelper.exe" (
     echo Running packaged runtime smoke test...
     set TRADEHELPER_SMOKE_TEST=1
+    set TRADEHELPER_REQUIRE_FINBERT=1
+    set TRADEHELPER_REQUIRE_MANIFEST=1
     start "" /wait "!OUTPUT_DIR!\TradeHelper.exe"
     set SMOKE_EXIT=!ERRORLEVEL!
     set TRADEHELPER_SMOKE_TEST=
+    set TRADEHELPER_REQUIRE_FINBERT=
+    set TRADEHELPER_REQUIRE_MANIFEST=
     if !SMOKE_EXIT! NEQ 0 (
         echo ERROR: Packaged executable failed runtime smoke test with exit code !SMOKE_EXIT!.
         pause

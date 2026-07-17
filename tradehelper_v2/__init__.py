@@ -1,9 +1,8 @@
-"""TradeHelper V2 package.
+"""TradeHelper 2.0 V2 package。
 
-V2 is intentionally isolated from the V1 business modules during the staged
-refactor.  V2-0/V2-1 expose only contracts, configuration, and the data layer.
+生产入口、迁移 reader 和所有业务层均保持与旧业务包的 import 隔离。
 """
 
 __all__ = ["__version__"]
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"

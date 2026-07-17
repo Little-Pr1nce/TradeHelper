@@ -71,6 +71,8 @@ from tradehelper_v2.contracts.presentation import (ChartKind, ChartSpec, ExportF
     MetricDefinition, ReportBlock, ReportBlockKind, ReportDocument, ReportExportArtifact,
     ReportFeedback, ReportHistoryQuery, ReportHistoryPage, ReportKind, ReportSection,
     ReportSeverity, ReportSnapshot, ReportTable, ReportTableRow, WatchlistSnapshot)
+from tradehelper_v2.contracts.migration import MigrationItem, MigrationPlan, MigrationRun
+from tradehelper_v2.contracts.runtime import AnalysisRunResult, AnalysisRunStatus, ReportRevisionLink, report_revision_invariant
 from .migrations.schema import apply_schema
 
 
@@ -1511,6 +1513,32 @@ class SQLiteRepository:
         if any(row[key]!=item for key,item in expected.items()):raise ContractViolation("stored learning metric columns do not match payload")
         return value
 
+    def list_historical_evaluation_records(self, market: Market) -> tuple[tuple[object, ...], tuple[object, ...]]:
+        """Load all frozen ledgers for the read-only historical evaluation page."""
+        prefix=f"{market.value}:"
+        forecast=tuple(
+            self.get_forecast_outcome(row["forecast_outcome_id"])
+            for row in self._fetchall("SELECT forecast_outcome_id FROM forecast_outcomes WHERE instrument_key LIKE ? ORDER BY generated_at",(prefix+"%",))
+        )
+        strategy=tuple(
+            self.get_strategy_outcome(row["strategy_outcome_id"])
+            for row in self._fetchall("SELECT strategy_outcome_id FROM strategy_outcomes WHERE instrument_key LIKE ? ORDER BY generated_at",(prefix+"%",))
+        )
+        joint=self.list_joint_outcomes(market)
+        hypotheses=tuple(
+            self.get_hypothesis_outcome(row["outcome_id"])
+            for row in self._fetchall("SELECT outcome_id FROM hypothesis_outcomes WHERE instrument_key LIKE ? ORDER BY generated_at",(prefix+"%",))
+        )
+        learning_metrics=tuple(
+            self.get_learning_metric_snapshot(row["snapshot_id"])
+            for row in self._fetchall("SELECT snapshot_id FROM learning_metric_snapshots ORDER BY generated_at")
+        )
+        research_metrics=tuple(
+            self.get_research_metric_snapshot(row["snapshot_id"])
+            for row in self._fetchall("SELECT snapshot_id FROM research_metric_snapshots WHERE market=? ORDER BY generated_at",(market.value,))
+        )
+        return (*forecast,*strategy,*joint,*hypotheses),(*learning_metrics,*research_metrics)
+
     def save_learning_fold(self, run_id: str, fold, *, generated_at: datetime) -> ForecastWriteResult:
         """保存可重跑 OOF 折定义；运行重启后仍使用原冻结窗口和版本选择。"""
         from tradehelper_v2.learning.replay import FoldDefinition
@@ -2250,6 +2278,13 @@ class SQLiteRepository:
             source=row["source"], fetched_at=_parse_datetime(row["fetched_at"]), schema_version=row["schema_version"],
         )
 
+    def search_stock_metadata(self, market: Market, query: str, *, limit: int = 20) -> tuple[StockMetadata, ...]:
+        """本地优先检索；结果按 code 稳定排序，避免每次输入导致 UI 抖动。"""
+        needle = str(query or "").strip().upper()
+        if not needle: return ()
+        rows = self._fetchall("SELECT * FROM stock_metadata WHERE market=? AND (UPPER(code) LIKE ? OR UPPER(name) LIKE ?) ORDER BY code LIMIT ?", (market.value, f"%{needle}%", f"%{needle}%", max(1, min(20, limit))))
+        return tuple(StockMetadata(InstrumentId(row["code"], Market(row["market"]), Exchange(row["exchange"])), row["name"], row["industry"], row["description"], date.fromisoformat(row["listing_date"]) if row["listing_date"] else None, row["source"], _parse_datetime(row["fetched_at"]), row["schema_version"]) for row in rows)
+
     def upsert_news(self, items: Iterable[NewsSnapshot]) -> int:
         materialized = tuple(items)
         if any(not isinstance(item, NewsSnapshot) for item in materialized):
@@ -2381,6 +2416,146 @@ class SQLiteRepository:
             market=Market(row["market"]), currency=row["currency"], cash=Decimal(row["cash"]),
             positions=positions, captured_at=_parse_datetime(row["captured_at"]), schema_version=row["schema_version"],
         )
+
+    # ------------------------------------------------------------------
+    # V2-12 迁移与运行时记录
+    # ------------------------------------------------------------------
+    def _save_v212_record(self, table: str, id_column: str, record_id: str, event_key: str,
+                          payload: object, columns: tuple[str, ...], values: tuple[object, ...],
+                          *, connection: sqlite3.Connection | None = None) -> ForecastWriteResult:
+        """统一写入 V2-12 审计表，重复 payload 幂等，冲突进入 quarantine。"""
+        if connection is None:
+            with self._transaction() as active:
+                return self._save_v212_record(table, id_column, record_id, event_key, payload, columns, values, connection=active)
+        encoded = canonical_json(payload)
+        digest = stable_hash(_without_generated_at(json.loads(encoded)))
+        row = connection.execute(f"SELECT payload_hash FROM {table} WHERE {id_column}=? OR event_key=?", (record_id, event_key)).fetchone()
+        if row is not None:
+            if row["payload_hash"] == digest:
+                return ForecastWriteResult(0, 1, 0)
+            connection.execute("INSERT INTO quarantine_records(record_type,instrument_key,trading_date,reason,payload_json,created_at) VALUES (?,?,?,?,?,?)",
+                               (f"{table}_conflict", None, None, "CONFLICTING_V2_12_RECORD", encoded, utc_iso(datetime.now(timezone.utc))))
+            return ForecastWriteResult(0, 0, 1)
+        if len(values) > len(columns):
+            raise ContractViolation(f"{table} V2-12 column/value mismatch")
+        # 调用方只需提供业务列；审计 hash/payload/schema 列由这里统一补齐。
+        row_values = list(values) + [None] * (len(columns) - len(values))
+        for name, replacement in (("payload_hash", digest), ("payload_json", encoded),
+                                  ("generated_at", utc_iso(datetime.now(timezone.utc))), ("schema_version", 17)):
+            if name in columns:
+                row_values[columns.index(name)] = replacement
+        connection.execute(f"INSERT INTO {table}({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})", tuple(row_values))
+        return ForecastWriteResult(1, 0, 0)
+
+    def save_migration_run(self, run: MigrationRun, *, plan: MigrationPlan | None = None) -> ForecastWriteResult:
+        payload = {"run": run, "plan": plan}
+        preflight = plan.preflight_hash if plan else ""
+        encoded=canonical_json(payload); digest=stable_hash(_without_generated_at(json.loads(encoded)))
+        existing=self._fetchone("SELECT payload_hash FROM legacy_migration_runs WHERE run_id=?",(run.run_id,))
+        if existing is not None:
+            if existing["payload_hash"]==digest: return ForecastWriteResult(0,1,0)
+            # run 状态是迁移生命周期的可追加投影，完成/失败状态推进不能被当作事实冲突。
+            with self._transaction() as connection:
+                connection.execute("UPDATE legacy_migration_runs SET status=?,backup_path=?,reason_codes_json=?,payload_hash=?,payload_json=?,completed_at=?,generated_at=? WHERE run_id=?",(run.status.value,run.backup_path,canonical_json(run.reason_codes),digest,encoded,utc_iso(run.completed_at) if run.completed_at else None,utc_iso(datetime.now(timezone.utc)),run.run_id))
+            return ForecastWriteResult(0,1,0)
+        result = self._save_v212_record("legacy_migration_runs", "run_id", run.run_id, run.run_id, payload,
+                ("run_id","event_key","plan_id","source_path","source_fingerprint","migration_version","status","preflight_hash","backup_path","reason_codes_json","payload_hash","payload_json","started_at","completed_at","generated_at","schema_version"),
+                (run.run_id,run.run_id,run.plan_id,plan.source_path if plan else "",run.source_fingerprint,run.migration_version,run.status.value,preflight,run.backup_path,canonical_json(run.reason_codes),"", "",utc_iso(run.started_at),utc_iso(run.completed_at) if run.completed_at else None,utc_iso(run.started_at)))
+        return result
+
+    def save_migration_item(self, item: MigrationItem) -> ForecastWriteResult:
+        return self._save_v212_record("legacy_migration_items", "item_id", item.item_id, item.item_id, item,
+                ("item_id","event_key","run_id","source_table","source_key","target_kind","status","reason_codes_json","payload_hash","payload_json","created_at","schema_version"),
+                (item.item_id,item.item_id,item.run_id,item.source_table,item.source_key,item.target_kind,item.status.value,canonical_json(item.reason_codes),"","",utc_iso(item.created_at)))
+
+    def get_migration_run(self, run_id: str) -> MigrationRun | None:
+        row = self._fetchone("SELECT payload_json FROM legacy_migration_runs WHERE run_id=?", (run_id,))
+        if row is None: return None
+        payload=json.loads(row["payload_json"])["run"]
+        payload["started_at"]=_parse_datetime(payload["started_at"]); payload["completed_at"]=_parse_datetime(payload["completed_at"]) if payload.get("completed_at") else None
+        return MigrationRun(**payload)
+
+    def find_completed_migration(self, source_fingerprint: str, migration_version: int) -> MigrationRun | None:
+        row=self._fetchone(
+            """SELECT run_id FROM legacy_migration_runs
+               WHERE source_fingerprint=? AND migration_version=?
+                 AND status IN ('completed','completed_with_quarantine')
+               ORDER BY completed_at DESC LIMIT 1""",
+            (source_fingerprint,migration_version),
+        )
+        return None if row is None else self.get_migration_run(row["run_id"])
+
+    def list_migration_items(self, run_id: str) -> tuple[MigrationItem, ...]:
+        rows = self._fetchall("SELECT payload_json FROM legacy_migration_items WHERE run_id=? ORDER BY created_at,item_id", (run_id,))
+        values=[]
+        for row in rows:
+            payload=json.loads(row["payload_json"]); payload["created_at"]=_parse_datetime(payload["created_at"]); values.append(MigrationItem(**payload))
+        return tuple(values)
+
+    def save_legacy_report_archive(self, archive: Mapping[str, object]) -> ForecastWriteResult:
+        created = archive.get("created_at") or datetime.now(timezone.utc)
+        if isinstance(created, str): created = _parse_datetime(created)
+        aid = str(archive["archive_id"])
+        return self._save_v212_record("legacy_report_archives", "archive_id", aid, aid, archive,
+                ("archive_id","event_key","run_id","source_fingerprint","source_id","market","code","title","content","path","rating","created_at","payload_hash","payload_json","schema_version"),
+                (aid,aid,str(archive["run_id"]),str(archive["source_fingerprint"]),str(archive["source_id"]),archive.get("market"),archive.get("code"),archive.get("title"),archive.get("content"),archive.get("path"),archive.get("rating"),utc_iso(created)))
+
+    def save_legacy_evidence_archive(self, archive: Mapping[str, object]) -> ForecastWriteResult:
+        created = archive.get("created_at") or datetime.now(timezone.utc)
+        if isinstance(created, str): created = _parse_datetime(created)
+        aid = str(archive["archive_id"])
+        return self._save_v212_record("legacy_evidence_archives", "archive_id", aid, aid, archive,
+                ("archive_id","event_key","run_id","source_table","source_id","market","code","evidence_kind","reason_codes_json","payload_hash","payload_json","created_at","schema_version"),
+                (aid,aid,str(archive["run_id"]),str(archive["source_table"]),str(archive["source_id"]),archive.get("market"),archive.get("code"),str(archive["evidence_kind"]),canonical_json(archive.get("reason_codes", ())),"","",utc_iso(created)))
+
+    def save_instrument_alias(self, alias: Mapping[str, object]) -> ForecastWriteResult:
+        created = alias.get("created_at") or datetime.now(timezone.utc)
+        if isinstance(created, str): created = _parse_datetime(created)
+        aid = str(alias["alias_id"])
+        return self._save_v212_record("instrument_aliases", "alias_id", aid, aid, alias,
+                ("alias_id","event_key","market","legacy_code","canonical_instrument_key","status","source","created_at","payload_hash","payload_json","schema_version"),
+                (aid,aid,str(alias["market"]),str(alias["legacy_code"]),str(alias["canonical_instrument_key"]),str(alias["status"]),str(alias.get("source","legacy")),utc_iso(created)))
+
+    def save_analysis_run(self, result: AnalysisRunResult, *, report_kind: str, market: str,
+                          instrument_key: str | None, mode: str, history_period: str) -> ForecastWriteResult:
+        payload = {"result": result, "report_kind": report_kind, "market": market, "instrument_key": instrument_key, "mode": mode, "history_period": history_period}
+        encoded=canonical_json(payload); digest=stable_hash(_without_generated_at(json.loads(encoded)))
+        existing=self._fetchone("SELECT payload_hash FROM analysis_runs WHERE run_id=?",(result.run_id,))
+        if existing is not None:
+            if existing["payload_hash"]==digest: return ForecastWriteResult(0,1,0)
+            with self._transaction() as connection:
+                connection.execute("UPDATE analysis_runs SET status=?,deterministic_report_id=?,research_report_id=?,background_task_ids_json=?,source_refs_json=?,reason_codes_json=?,completed_at=?,payload_hash=?,payload_json=? WHERE run_id=?",(result.status.value,result.deterministic_report_id,result.research_report_id,canonical_json(result.background_task_ids),canonical_json(result.source_artifact_refs),canonical_json(result.reason_codes),utc_iso(result.completed_at) if result.completed_at else None,digest,encoded,result.run_id))
+            return ForecastWriteResult(0,1,0)
+        return self._save_v212_record("analysis_runs", "run_id", result.run_id, result.run_id, payload,
+                ("run_id","event_key","command_id","report_kind","market","instrument_key","mode","history_period","status","deterministic_report_id","research_report_id","background_task_ids_json","source_refs_json","reason_codes_json","started_at","completed_at","payload_hash","payload_json","schema_version"),
+                (result.run_id,result.run_id,result.command_id,report_kind,market,instrument_key,mode,history_period,result.status.value,result.deterministic_report_id,result.research_report_id,canonical_json(result.background_task_ids),canonical_json(result.source_artifact_refs),canonical_json(result.reason_codes),utc_iso(result.started_at),utc_iso(result.completed_at) if result.completed_at else None,"",""))
+
+    def get_analysis_run(self, run_id: str) -> AnalysisRunResult | None:
+        row = self._fetchone("SELECT payload_json FROM analysis_runs WHERE run_id=?", (run_id,))
+        if row is None: return None
+        payload=json.loads(row["payload_json"])["result"]
+        payload["started_at"]=_parse_datetime(payload["started_at"]); payload["completed_at"]=_parse_datetime(payload["completed_at"]) if payload.get("completed_at") else None
+        payload["status"]=AnalysisRunStatus(payload["status"])
+        return AnalysisRunResult(**payload)
+
+    def save_report_revision_link(self, link: ReportRevisionLink) -> ForecastWriteResult:
+        base=self.get_report_document(link.base_report_id)
+        revised=self.get_report_document(link.revised_report_id)
+        if base is None or revised is None:
+            raise ContractViolation("report revision must reference stored reports")
+        if report_revision_invariant(base)!=link.invariant_section_hash or report_revision_invariant(revised)!=link.invariant_section_hash:
+            raise ContractViolation("report revision invariant hash mismatch")
+        return self._save_v212_record("report_revision_links", "link_id", link.link_id, link.link_id, link,
+                ("link_id","event_key","base_report_id","revised_report_id","revision_kind","invariant_section_hash","payload_hash","payload_json","created_at","schema_version"),
+                (link.link_id,link.link_id,link.base_report_id,link.revised_report_id,link.revision_kind.value,link.invariant_section_hash,"","",utc_iso(link.created_at)))
+
+    def get_report_revision_link(self, link_id: str) -> ReportRevisionLink | None:
+        row = self._fetchone("SELECT payload_json FROM report_revision_links WHERE link_id=?", (link_id,))
+        if row is None: return None
+        payload=json.loads(row["payload_json"])
+        if "value" in payload: payload=payload["value"]
+        payload["created_at"]=_parse_datetime(payload["created_at"])
+        return ReportRevisionLink(**payload)
 
     def migration_preflight(self, source_path: Path | str, as_of: datetime) -> MigrationPreflight:
         source = Path(source_path)

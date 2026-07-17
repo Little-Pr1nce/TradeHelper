@@ -130,9 +130,11 @@ class ExchangeTradingCalendar:
         raise TradingCalendarUnavailable("no completed exchange session was found")
 
     def _exchange(self, exchange: Exchange) -> str:
-        if exchange is Exchange.XSHG: return "XSHG"
-        if exchange in {Exchange.XSHE, Exchange.XBSE}: return "XSHE"
-        if exchange in {Exchange.XNYS, Exchange.XNAS}: return "XNYS"
+        # exchange_calendars exposes the mainland session calendar as XSHG.
+        # Shenzhen and Beijing use the same trading-day/session window for the
+        # decisions modeled here; instrument market rules remain exchange-specific.
+        if exchange in {Exchange.XSHG, Exchange.XSHE, Exchange.XBSE}: return "XSHG"
+        if exchange in {Exchange.XNYS, Exchange.XNAS, Exchange.UNKNOWN}: return "XNYS"
         raise TradingCalendarUnavailable("unknown exchange has no session calendar")
 
     def session_window(self, market: Market, exchange: Exchange, session_date: date) -> DecisionSession:

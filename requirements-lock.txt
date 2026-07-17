@@ -1,0 +1,21 @@
+# V2-12 controlled runtime set. Regenerate deliberately and review the diff.
+akshare==1.18.64
+baostock==0.9.2
+exchange-calendars==4.13.2
+flet==0.85.1
+jaraco.context==6.1.2
+jaraco.functools==4.5.0
+jaraco.text==4.3.0
+markdown-it-py==4.2.0
+mplfinance==0.12.10b0
+numpy==2.4.6
+openai==2.38.0
+pandas==3.0.3
+reportlab==4.5.1
+requests==2.34.2
+scikit-learn==1.9.0
+scipy==1.18.0
+tickflow==0.1.22
+torch==2.12.0
+transformers==5.9.0
+yfinance==1.4.0

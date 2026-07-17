@@ -52,6 +52,6 @@ def test_ux09_migration_16_restarts(tmp_path):
     repo = SQLiteRepository(path); repo.close()
     repo = SQLiteRepository(path)
     try:
-        assert repo._connection.execute("select max(version) from schema_migrations").fetchone()[0] == 16
+        assert repo._connection.execute("select max(version) from schema_migrations").fetchone()[0] == 17
     finally:
         repo.close()

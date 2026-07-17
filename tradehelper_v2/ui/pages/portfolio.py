@@ -13,7 +13,7 @@ from ..components.report_view import report_view
 class PortfolioPage:
     """Tab3 portfolio workbench with immutable account/watchlist edits."""
 
-    def __init__(self, editor=None, lookup_port=None, analysis_port=None, export_port=None, evaluation_port=None):
+    def __init__(self, editor=None, lookup_port=None, analysis_port=None, export_port=None, evaluation_port=None, account_loader=None, watchlist_loader=None):
         self.document = None
         self.account = None
         self.watchlist_snapshot = None
@@ -22,6 +22,10 @@ class PortfolioPage:
         self.analysis_port = analysis_port
         self.export_port = export_port
         self.evaluation_port = evaluation_port
+        self.account_loader = account_loader
+        self.watchlist_loader = watchlist_loader
+        self.analysis_mode = "eod"
+        self.history_period = "3m"
         self.progress = None
         self.error = None
         self.evaluation_view = None
@@ -156,7 +160,7 @@ class PortfolioPage:
             self.error = "组合分析服务尚未配置"; self._update(); return
         method = getattr(self.analysis_port, "start_portfolio", self.analysis_port)
         try:
-            result = method({"account": self.account, "watchlist": self.watchlist_snapshot}, on_progress=self._on_progress, on_complete=self.set_document, on_error=self._on_error)
+            result = method({"market":self.account.market.value,"mode":self.analysis_mode,"history_period":self.history_period,"account": self.account, "watchlist": self.watchlist_snapshot}, on_progress=self._on_progress, on_complete=self.set_document, on_error=self._on_error)
             if inspect.isawaitable(result): result = await result
             if hasattr(result, "sections"): self.set_document(result)
             elif isinstance(result, str): self.running_task_id = result
@@ -252,6 +256,18 @@ class PortfolioPage:
         return ft.Column([toolbar, evaluation_charts(self.evaluation_view), *tables], expand=True, scroll=ft.ScrollMode.AUTO)
 
     def _input_content(self):
+        selected_market=self.account.market.value if self.account else "US"
+        market=ft.Dropdown(label="市场",value=selected_market,options=[ft.dropdown.Option("US","美股"),ft.dropdown.Option("A","A股")],width=120)
+        mode=ft.Dropdown(label="分析模式",value=self.analysis_mode,options=[ft.dropdown.Option("pre","盘前"),ft.dropdown.Option("intraday","盘中"),ft.dropdown.Option("eod","盘后")],width=140)
+        period=ft.Dropdown(label="回看周期",value=self.history_period,options=[ft.dropdown.Option("1m","1个月"),ft.dropdown.Option("3m","3个月"),ft.dropdown.Option("6m","6个月"),ft.dropdown.Option("1y","1年")],width=130)
+        def change_market(event):
+            selected=Market(event.control.value)
+            self.account=self.account_loader(selected) if self.account_loader else None
+            self.watchlist_snapshot=self.watchlist_loader(selected) if self.watchlist_loader else None
+            self.document=None; self._update()
+        market.on_select=change_market
+        mode.on_select=lambda e:setattr(self,"analysis_mode",e.control.value)
+        period.on_select=lambda e:setattr(self,"history_period",e.control.value)
         tabs = ft.Tabs(
             content=ft.Column(
                 [
@@ -267,7 +283,7 @@ class PortfolioPage:
             selected_index=0,
             expand=True,
         )
-        controls = [ft.Text("我的持仓", theme_style=ft.TextThemeStyle.HEADLINE_SMALL)]
+        controls = [ft.Text("我的持仓", theme_style=ft.TextThemeStyle.HEADLINE_SMALL),ft.Row([market,mode,period],wrap=True)]
         if self.error: controls.append(ft.Text(self.error, color=ft.Colors.RED_700))
         controls.extend([ft.Row([ft.Button("开始组合分析", icon=ft.Icons.PLAY_ARROW, on_click=self._start), ft.Button("取消", icon=ft.Icons.CANCEL_OUTLINED, on_click=self._cancel, disabled=self.running_task_id is None)]), tabs])
         if self.progress: controls.insert(-1, progress_panel(self.progress))

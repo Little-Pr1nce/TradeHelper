@@ -1,0 +1,2 @@
+# TradeHelper 2.0 production runtime dependencies (Python 3.12).
+-r requirements-lock.txt

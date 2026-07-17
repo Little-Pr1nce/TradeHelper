@@ -299,3 +299,14 @@ class HistoricalEvaluationService:
             (calibration_chart, timeline, cumulative, drawdown),
             tables, _GLOSSARY, warnings, refs, built_at,
         )
+
+
+class RepositoryHistoricalEvaluationService:
+    def __init__(self, repository, *, clock=lambda: datetime.now(timezone.utc)):
+        self.repository=repository
+        self.clock=clock
+        self.builder=HistoricalEvaluationService()
+
+    def load(self, query: HistoricalEvaluationQuery):
+        outcomes,metrics=self.repository.list_historical_evaluation_records(query.market)
+        return self.builder.build(query,outcomes=outcomes,metrics=metrics,built_at=self.clock())

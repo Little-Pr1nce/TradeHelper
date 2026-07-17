@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Mapping
@@ -98,4 +99,15 @@ class V2Settings:
             key: (str(self.work_dir) if key == "work_dir" else getattr(self, key))
             for key in _SETTING_KEYS
         }
-        config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 原子替换避免断电留下半个 JSON；密钥配置文件仅允许当前用户读取。
+        temporary = config_path.with_suffix(config_path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        temporary.replace(config_path)
+        try:
+            os.chmod(config_path, 0o600)
+        except OSError:
+            pass

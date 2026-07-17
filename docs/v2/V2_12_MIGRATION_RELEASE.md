@@ -1,6 +1,6 @@
 # TradeHelper V2-12 迁移、端到端与发布精确设计
 
-> 状态：设计已冻结，待实现。本文是 TradeHelper 2.0 最后一个开发阶段的规范性合同，优先级高于 `V2_REFACTOR_PLAN.md` 中的概念示例。V2-12 只负责把 V2-1 至 V2-11 已完成并复审的层接成正式桌面应用、可信迁移本机 V1 数据、执行完整端到端验收并发布 macOS/Windows 产物。不得连接券商自动下单，不把 Web 部署纳入 2.0 发布门槛，也不得借迁移之名把不满足 V2 证据合同的旧记录写入正式学习账。
+> 状态：代码完成并本机复审（2.0.0）；Windows 产物验收待对应 runner。本文是 TradeHelper 2.0 最后一个开发阶段的规范性合同，优先级高于 `V2_REFACTOR_PLAN.md` 中的概念示例。V2-12 已把 V2-1 至 V2-11 的层接成正式桌面应用，完成只读 V1 迁移审计、端到端离线验收、真实 Provider/LLM 验证和 macOS 包内 smoke。不得连接券商自动下单，不把 Web 部署纳入 2.0 发布门槛，也不得借迁移之名把不满足 V2 证据合同的旧记录写入正式学习账。
 
 ## 1. 最终目标
 
@@ -761,5 +761,7 @@ V2-12 以及 TradeHelper 2.0 只有同时满足以下条件才算完成：
 8. FinBERT、HTML/PDF、交易日历和动态依赖在打包产物中可用。
 9. V2 全量、真实 Provider、真实 LLM、性能和视觉验收全部通过。
 10. README/设计/计划/能力清单更新为“TradeHelper 2.0 已完成并复审”。
+
+当前本机证据：RL00-RL79 验收 `91 passed`；V2/项目全量 `819 passed, 4 skipped`；3 条真实 Provider 与 1 条真实 LLM 测试显式开启后全部通过；真实 V1 数据库迁移 19,112 项且源库未改变；macOS 包内 runtime smoke 通过。Flet 内嵌 framework 的 PyInstaller 临时签名仍有警告，本机可运行不等于已完成 Developer ID 签名或公证。Windows spec、bat 与 CI 已统一，但第 7 条中的 Windows 本地和 GitHub Windows 产物启动必须在对应 runner 真实执行，因此在该证据产生前不宣称跨平台发布门槛全部完成。
 
 V2-12 完成后不自动开始券商自动下单、Web 发布或 2.1 新功能；这些必须另立设计和风险评审。

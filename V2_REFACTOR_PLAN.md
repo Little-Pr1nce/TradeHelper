@@ -1085,7 +1085,7 @@ venv/bin/python -m pytest tests/ -q
 | V2-9 学习层 | 已完成并复审 | 精确合同见 `docs/v2/V2_9_LEARNING.md`；已实现到期验证、三本账、六层归因、purged OOF、股票绑定自优化、候选生命周期、migration 13/14 和 LE00-LE59，止步于学习层 |
 | V2-10 LLM 假设层 | 已完成并复审 | 精确合同见 `docs/v2/V2_10_LLM_HYPOTHESES.md`；冻结事实 manifest、严格 JSON 五类假设、确定性四态验证、注册候选桥接、独立 outcome/metric 账、migration 15、强类型恢复、LL00-LL49 与双市场失败降级均已通过；未进入 V2-11。 |
 | V2-11 报告/UI | 已完成并复审 | 精确合同见 `docs/v2/V2_11_REPORT_UI.md`；确定性 PresentationInput/ReportDocument、Tab1/Tab3、历史评估、进度、历史快照/反馈/比较/归档、导出、migration 16、UX00-UX59 和双市场 Golden Cases 已通过，严格止步于本阶段 |
-| V2-12 迁移/端到端/发布 | 设计已冻结，待实现 | 精确合同见 `docs/v2/V2_12_MIGRATION_RELEASE.md`；production composition、V1 可信迁移与证据隔离、Tab1/Tab3 双市场三时段、V1 退出、migration 17、macOS/Windows 发布和 RL00-RL79 已冻结 |
+| V2-12 迁移/端到端/发布 | 代码完成，本机复审通过；待 Windows 产物验收 | 精确合同见 `docs/v2/V2_12_MIGRATION_RELEASE.md`；migration 17、只读 fingerprint/备份/事务迁移、旧证据隔离、唯一 production composition、双市场应用编排、FinBERT、后台 revision、V1 退出、RL00-RL79、真实 Provider/LLM 和 macOS 包内 smoke 已通过；Windows spec/CI 已就绪，实际产物须在 Windows runner 验收 |
 
 ### 2026-07-15 V2-6 设计完成：风控层（待实现）
 
@@ -1173,4 +1173,8 @@ V2-12 是 TradeHelper 2.0 的最后一个既定开发阶段，精确合同见 [d
 
 实施拆为八批：运行时合同与 migration 17；V1 可信迁移与旧证据隔离；双市场 lookup、FinBERT 和 production container；Tab1 全链；Tab3 全链；LLM/学习后台与失败恢复；V1 运行面退出和跨平台打包；最终 12 格、联网、性能、视觉与安装包验收。V1 设置、真实账户、持仓、关注列表和旧报告可受控迁移；旧行情、预测、策略、回测参数和学习结果只能归档或重新获取，不能污染 V2 正式事实与三本账。
 
-RL00-RL79 已冻结为一编号一行为的验收矩阵。当前状态仅为“设计已冻结，待实现”；在 RL00-RL79、A股/美股 × 盘前/盘中/盘后 × Tab1/Tab3、真实 Provider、真实 LLM、macOS/Windows 打包产物和 V1 退出全部通过前，不得把 TradeHelper 2.0 标记为发布完成。
+RL00-RL79 已按一编号一行为落地，阶段验收 `91 passed`；V2 与项目全量均为 `819 passed, 4 skipped`。默认跳过的 3 条真实 Provider 测试和 1 条真实 LLM 测试已分别显式开启并全部通过。本机真实 V1 数据库迁移 19,112 项，重复执行计划一致，源库 SHA-256 与 mtime 未改变；macOS 严格包内 runtime smoke 已通过。Flet 内嵌 framework 的 PyInstaller 临时签名仍有警告，因此 Developer ID 签名和公证不计为已完成。Windows 本地 bat 与 GitHub Actions 使用同一 spec/smoke，但实际 Windows 产物仍须由 Windows runner 验收。
+
+## 21. V2-12 代码完成并本机复审：TradeHelper 2.0
+
+V2-12 的生产实现已按冻结规范完成：`main.py -> RuntimeContainer -> V2 application ports -> PresentationInput -> ReportDocument -> Flet/Markdown/HTML/PDF` 已形成唯一生产路径。V1 数据只读预检、SHA-256/mtime 复核、备份、事务回滚、quarantine 和 migration 17 审计表均已实现；旧行情、预测、策略、回测参数和 LLM 只留 archive，不进入 V2 正式事实或三本账。V1 源码已从当前工作树退出，并由 `v1.0-final-before-v2` 标签保留。版本固定为 2.0.0；只有 Windows 真实产物验收尚需对应平台执行，后续自动下单、Web 发布和 V2.1 必须另立设计。

@@ -2,9 +2,10 @@ name: Build Windows EXE
 
 on:
   push:
-    branches: [main]
+    branches: [main, V2.0]
+    tags: ['V2.0*']
   pull_request:
-    branches: [main]
+    branches: [main, V2.0]
   workflow_dispatch:   # 允许手动触发
 
 jobs:
@@ -29,7 +30,8 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-runtime.txt
+          pip install -r requirements-dev.txt
           # Windows CPU 版 torch，减小打包体积
           pip uninstall torch torchvision -y
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
@@ -48,7 +50,9 @@ jobs:
           python -c "import mplfinance; print('mplfinance OK')"
 
       - name: 准备 FinBERT 模型
-        run: python scripts/prepare_model.py
+        run: |
+          python scripts/prepare_model.py
+          python scripts/write_release_manifest.py
 
       - name: PyInstaller 打包（详细日志）
         run: |
@@ -70,6 +74,8 @@ jobs:
         shell: pwsh
         run: |
           $env:TRADEHELPER_SMOKE_TEST = "1"
+          $env:TRADEHELPER_REQUIRE_FINBERT = "1"
+          $env:TRADEHELPER_REQUIRE_MANIFEST = "1"
           $process = Start-Process -FilePath "dist/win/TradeHelper/TradeHelper.exe" -Wait -PassThru
           if ($process.ExitCode -ne 0) {
             throw "Packaged runtime smoke test failed with exit code $($process.ExitCode)"

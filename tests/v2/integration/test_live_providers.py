@@ -31,12 +31,11 @@ def _settings() -> V2Settings:
             raise ValueError("live settings must contain a JSON object")
         return V2Settings.from_mapping(payload)
     if os.environ.get("TRADEHELPER_LIVE_USE_V1_SETTINGS") == "1":
-        # Test-only bridge: production V2 code never imports or depends on V1.
-        from config.settings import Settings
-
-        legacy = Settings.init(Settings.default_config_path())
+        # Read legacy JSON as migration input; never import V1 Python code.
+        legacy_path = V2Settings.default_path().with_name("config.json")
+        legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
         return V2Settings.from_mapping({
-            name: legacy.get(name)
+            name: legacy.get(name, "")
             for name in (
                 "work_dir", "stock_token_us", "stock_token_a", "news_token_us", "news_token_a",
                 "finbert_model_path",
@@ -45,7 +44,7 @@ def _settings() -> V2Settings:
     return V2Settings.load()
 
 
-def test_g27_real_v2_provider_composition(tmp_path) -> None:
+def test_RL77_a_and_us_real_provider_composition(tmp_path) -> None:
     settings = _settings()
     missing = [name for name in ("stock_token_us", "stock_token_a", "news_token_us") if not getattr(settings, name)]
     if missing:

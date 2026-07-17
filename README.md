@@ -31,7 +31,7 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-12 迁移、端到端与发布规范：[docs/v2/V2_12_MIGRATION_RELEASE.md](./docs/v2/V2_12_MIGRATION_RELEASE.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 至 V2-11 已完成并复审。V2-12 是 TradeHelper 2.0 最后一个开发阶段，迁移、production 端到端接线、V1 退出和跨平台发布的精确设计已经冻结，当前待按该规范实施。
+V2-0 至 V2-11 已完成并复审；V2-12 的代码实现、本机迁移、双市场端到端、真实 Provider/LLM 和 macOS 包内运行验收已通过。Windows 使用同一 spec 和严格 smoke，仍须由 Windows 本地或 GitHub Actions runner 完成最终产物验收后，才能宣称 2.0 跨平台发布门槛全部通过。版本为 2.0.0，不包含自动下单、Web 发布或 V2.1 功能。
 
 ## 一以贯之的系统目标
 
@@ -70,7 +70,7 @@ V2-0 至 V2-11 已完成并复审。V2-12 是 TradeHelper 2.0 最后一个开发
 - 数据层未稳定前，不改预测、策略、报告或 UI。
 - 不再依赖“看日志和看完整报告”验证功能正确性。
 - 新功能必须能通过对应层级测试单独验证。
-- V2 新代码优先放入独立 `tradehelper_v2/` 包。V1 代码作为参考实现、算法来源和回归对照，不作为 V2 主链路的直接运行依赖。
+- V2 生产代码只位于 `tradehelper_v2/` 包。V1 源码已退出当前工作树，可通过 Git 标签 `v1.0-final-before-v2` 追溯；归档文档和只读迁移 reader 继续保留。
 
 ## 文档关系
 
@@ -102,8 +102,14 @@ V2-0 至 V2-11 已完成并复审。V2-12 是 TradeHelper 2.0 最后一个开发
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-runtime.txt
 python main.py
+```
+
+开发环境使用：
+
+```bash
+pip install -r requirements-dev.txt
 ```
 
 完整测试：
@@ -123,6 +129,8 @@ V2-9 已完成并复审：LE00-LE59 已逐号映射为 60 个独立行为测试�
 V2-10 已完成并二次深审：研究事实只能来自注册命名空间和同市场冻结 artifact，NewsSnapshot、FundamentalSnapshot、策略保护条件和无账户金额的风控事实均已进入受限 manifest；Tab3 按持仓优先稳定分片并限制模型只能回答当前分片标的。严格 JSON Schema、response revision、跨响应业务去重、止损取消拒绝、负数参数边界、股票绑定 outcome、真实维度切片、V2-9 maturity/forecast/promotion 复盘和 migration 15 引用闭合均已补齐。LL00-LL49 保持一编号一行为，真实 Provider 与真实 LLM 冒烟均已显式执行通过。
 
 V2-11 已完成并复审：`PresentationInput -> ReportDocument -> Flet/Markdown/HTML/PDF` 作为唯一确定性展示链路；报告快照/反馈/导出/关注列表由 migration 16 持久化并可重启强类型恢复。Tab1/Tab3 全宽阅读、三本账和 LLM 独立评估、持仓/关注列表快照编辑、逐股进度、历史筛选/比较/软归档、设置能力检查以及 UX00-UX59 与双市场 Golden Cases 已实现。阶段专项 `90 passed`，V2 全量 `714 passed, 4 skipped`，项目全量 `974 passed, 4 skipped`；默认关闭的 3 条真实数据 Provider 和 1 条真实 LLM 测试均已另行显式启用并全部通过。实现严格停止在 V2-11。
+
+V2-12 已完成代码修复和本机复审：migration 17、只读 fingerprint/备份/事务迁移、旧证据 archive 隔离、真实账户 A/US 快照、双市场 lookup、惰性 FinBERT、唯一 RuntimeContainer、Tab1/Tab3 application ports、后台研究 revision、V1 源码退出和严格发布 smoke 已实现。RL00-RL79 一编号一行为验收为 `91 passed`，V2/项目全量均为 `819 passed, 4 skipped`；默认跳过的 3 条真实 Provider 测试显式开启后 `3 passed`，真实 LLM 测试显式开启后 `1 passed`。本机 V1 数据库迁移了 19,112 项且源库 fingerprint/mtime 不变；macOS 包内运行 smoke 已通过。当前 macOS 产物适合本机运行，但 Flet 内嵌 framework 仍有 PyInstaller 临时签名警告，尚未完成 Developer ID 签名与公证。Windows spec、bat 和 CI 已统一，但 Windows 产物仍须在真实 Windows runner 上完成最终验收。
 
 ## 历史资料
 
