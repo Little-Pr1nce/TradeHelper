@@ -1,11 +1,11 @@
 """LL40--LL46：LLM 独立到期账。"""
 from types import SimpleNamespace
-from tradehelper_v2.contracts import HypothesisKind, HypothesisValidationStatus
-from tradehelper_v2.research.outcomes import forecast_outcome
+from contracts import HypothesisKind, HypothesisValidationStatus
+from research.outcomes import forecast_outcome
 
 def _candidate_event(instrument,now,decision):
-    from tradehelper_v2.contracts import CandidateEligibility, HypothesisKind, PromotionEvent, stable_hash
-    from tradehelper_v2.research.bridge import CandidateBridge
+    from contracts import CandidateEligibility, HypothesisKind, PromotionEvent, stable_hash
+    from research.bridge import CandidateBridge
     hypothesis=SimpleNamespace(hypothesis_id="candidate-h",business_key="candidate-b",response_id="r",context_id="c",kind=HypothesisKind.MODEL_CONFIGURATION,payload=(("scope","stock"),("registered_model_family","analog")))
     validation=SimpleNamespace(candidate_eligibility=CandidateEligibility.ELIGIBLE_FOR_OOF)
     _,candidate=CandidateBridge().bridge(hypothesis,validation,market=instrument.market,scope_key=instrument.stable_key,base_version="base",search_space_hash="a"*64,created_at=now)
@@ -16,10 +16,10 @@ def _candidate_event(instrument,now,decision):
 
 def test_ll40_only_confirmed_pattern_is_issued(us_instrument,now):
     from test_learning_smoke import _forecast
-    from tradehelper_v2.learning.maturity import MaturityResolver
-    from tradehelper_v2.contracts import AdjustmentMode, CanonicalBar
+    from learning.maturity import MaturityResolver
+    from contracts import AdjustmentMode, CanonicalBar
     issued=_forecast(us_instrument,now); bar=CanonicalBar(us_instrument,issued.target_session_date,100,103,99,102,100,AdjustmentMode.FRONT_ADJUSTED,"fixture",now); maturity=MaturityResolver().resolve(issued,(bar,),evaluated_at=now)
-    from tradehelper_v2.learning.engine import LearningEngine
+    from learning.engine import LearningEngine
     forecast=LearningEngine().evaluate_forecast(issued,(bar,),evaluated_at=now)
     hypothesis=SimpleNamespace(hypothesis_id="h",instrument=us_instrument,payload=(("expected_direction","bullish"),("horizons",(1,))),kind=HypothesisKind.FORECAST_PATTERN)
     validation=SimpleNamespace(hypothesis_id="h",status=HypothesisValidationStatus.CONFIRMED)
@@ -30,8 +30,8 @@ def test_ll41_unconfirmed_pattern_does_not_get_credit():
     assert HypothesisValidationStatus.PENDING is not HypothesisValidationStatus.CONFIRMED
 
 def test_failed_candidate_is_matured_but_not_counted_as_improved(us_instrument,now):
-    from tradehelper_v2.contracts import PromotionDecision
-    from tradehelper_v2.research.outcomes import candidate_outcome,metric_snapshot
+    from contracts import PromotionDecision
+    from research.outcomes import candidate_outcome,metric_snapshot
     hypothesis=SimpleNamespace(hypothesis_id="h",instrument=us_instrument,kind=HypothesisKind.MODEL_CONFIGURATION)
     validation=SimpleNamespace(hypothesis_id="h",status=HypothesisValidationStatus.CONFIRMED)
     candidate,event=_candidate_event(us_instrument,now,PromotionDecision.REJECT)
@@ -40,8 +40,8 @@ def test_failed_candidate_is_matured_but_not_counted_as_improved(us_instrument,n
     assert dict(snapshot.metrics)["candidate_oof_improved_count"]==0
 
 def test_candidate_metrics_count_each_candidate_once(us_instrument,now):
-    from tradehelper_v2.contracts import PromotionDecision
-    from tradehelper_v2.research.outcomes import candidate_outcome,metric_snapshot
+    from contracts import PromotionDecision
+    from research.outcomes import candidate_outcome,metric_snapshot
     hypothesis=SimpleNamespace(hypothesis_id="h",instrument=us_instrument,kind=HypothesisKind.MODEL_CONFIGURATION)
     validation=SimpleNamespace(hypothesis_id="h",status=HypothesisValidationStatus.CONFIRMED)
     candidate,event=_candidate_event(us_instrument,now,PromotionDecision.PROMOTE_TO_CHALLENGER)

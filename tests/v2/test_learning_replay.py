@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from learning_replay_helpers import linked_full_chain_runner
-from tradehelper_v2.contracts import ContractViolation, EvidenceOrigin, Market, OutcomeStatus, stable_hash
-from tradehelper_v2.learning.replay import FoldDefinition, ReplayAccountPolicy, WalkForwardReplayer, validate_folds
+from contracts import ContractViolation, EvidenceOrigin, Market, OutcomeStatus, stable_hash
+from learning.replay import FoldDefinition, ReplayAccountPolicy, WalkForwardReplayer, validate_folds
 
 
 def _fold(index, training_keys=()):

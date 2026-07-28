@@ -2,8 +2,8 @@ from datetime import date
 
 import pytest
 
-from tradehelper_v2.contracts import Market
-from tradehelper_v2.data.calendar import StaticTradingCalendar, TradingCalendarUnavailable
+from contracts import Market
+from data.calendar import StaticTradingCalendar, TradingCalendarUnavailable
 
 
 def test_g33_calendar_never_falls_back_to_weekdays() -> None:

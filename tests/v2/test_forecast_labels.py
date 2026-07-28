@@ -1,7 +1,7 @@
 from datetime import date
 
-from tradehelper_v2.contracts import ForecastDirection
-from tradehelper_v2.forecast.labels import direction_label, flat_band, target_session_date
+from contracts import ForecastDirection
+from forecast.labels import direction_label, flat_band, target_session_date
 
 
 def test_fc01_target_sessions_use_calendar(calendar, us_instrument, a_instrument) -> None:

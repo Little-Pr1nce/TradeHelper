@@ -3,17 +3,17 @@ from decimal import Decimal
 
 from portfolio_helpers import correlation_for, portfolio_batch, portfolio_batch_many, rebuild_batch
 from strategy_helpers import position
-from tradehelper_v2.contracts import (
+from contracts import (
     AllocationStatus, ExecutionLevel, Market, PlanAction, PortfolioRole, canonical_json,
 )
-from tradehelper_v2.portfolio import PortfolioDecisionEngine
+from portfolio import PortfolioDecisionEngine
 
 
 def _replacement_case(us_instrument, now):
     second = type(us_instrument).from_code("MSFT", Market.US, "XNAS")
     third = type(us_instrument).from_code("NVDA", Market.US, "XNAS")
     instruments = (us_instrument, second, third)
-    batch = portfolio_batch_many(instruments, positions=(position(us_instrument, shares="10", cost="80"),),
+    batch = portfolio_batch_many(instruments, positions=(position(us_instrument, shares="10", cost="105"),),
                                  cash=Decimal("500"))
     batch = rebuild_batch(batch, correlation_snapshot=correlation_for(instruments))
     return batch, PortfolioDecisionEngine().decide(batch, now).aggressive

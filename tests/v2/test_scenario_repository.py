@@ -3,9 +3,9 @@ import json
 
 import pytest
 
-from tradehelper_v2.contracts import ContractViolation
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.scenario import ScenarioPlanner
+from contracts import ContractViolation
+from data.repository import SQLiteRepository
+from scenario import ScenarioPlanner
 from test_scenario_planner import NOW, _forecast, _request
 
 

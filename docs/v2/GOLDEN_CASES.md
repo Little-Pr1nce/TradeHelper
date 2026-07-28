@@ -25,7 +25,7 @@
 core services strategies backtest report ui alpha indicators utils data
 ```
 
-`tradehelper_v2/data/compatibility.py` 是唯一语法位置例外，但 V2-0/V2-1 默认测试要求该文件不导入 V1；启用前必须在计划中登记白名单。
+`data/compatibility.py` 是唯一语法位置例外，但 V2-0/V2-1 默认测试要求该文件不导入 V1；启用前必须在计划中登记白名单。
 
 ### G01 合同确定性
 

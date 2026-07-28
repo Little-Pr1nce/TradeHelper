@@ -5,15 +5,15 @@ from datetime import datetime
 from decimal import Decimal
 
 from strategy_helpers import NOW, strategy_input
-from tradehelper_v2.contracts import (
+from contracts import (
     AccountSnapshot, DataCapabilities, DataQualityReport, EvidenceStatus, FreshnessStatus,
     DecisionMode, Market, MarketState, PlanEvidenceSnapshot, PositionAvailability, PositionSnapshot,
     QualityAction, QualityStatus, RiskPolicy, RiskProfile, RiskRequest, ValuationPrice,
     ValuationPriceKind, stable_hash,
 )
-from tradehelper_v2.risk import freeze_account_valuation
-from tradehelper_v2.risk.market_rules import default_market_rules
-from tradehelper_v2.strategies import StrategyEngine
+from risk import freeze_account_valuation
+from risk.market_rules import default_market_rules
+from strategies import StrategyEngine
 
 
 def quality(*, status=QualityStatus.OK, action=QualityAction.NORMAL, multiplier=1.0, block=False):

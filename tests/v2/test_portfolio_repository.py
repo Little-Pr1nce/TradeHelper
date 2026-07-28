@@ -5,14 +5,14 @@ import pytest
 
 from portfolio_helpers import portfolio_batch
 from strategy_helpers import position
-from tradehelper_v2.contracts import ContractViolation
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.portfolio import PortfolioDecisionEngine
+from contracts import ContractViolation
+from data.repository import SQLiteRepository
+from portfolio import PortfolioDecisionEngine
 
 
 def test_po48_migration_atomic_idempotent_quarantine_and_restart(tmp_path, us_instrument, now):
     path = tmp_path / "portfolio.sqlite"
-    batch = portfolio_batch(us_instrument, position=position(us_instrument))
+    batch = portfolio_batch(us_instrument, position=position(us_instrument, cost="80"))
     first_bundle = PortfolioDecisionEngine().decide(batch, now)
     later_bundle = PortfolioDecisionEngine().decide(batch, now + timedelta(minutes=1))
     repository = SQLiteRepository(path)

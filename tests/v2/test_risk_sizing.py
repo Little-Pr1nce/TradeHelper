@@ -1,7 +1,7 @@
 from decimal import Decimal
 
-from tradehelper_v2.risk.market_rules import default_market_rules
-from tradehelper_v2.risk.sizing import friction_reserve, round_lot_down
+from risk.market_rules import default_market_rules
+from risk.sizing import friction_reserve, round_lot_down
 
 
 def test_rk14_lot_rounding_never_forces_capacity(now, a_instrument):

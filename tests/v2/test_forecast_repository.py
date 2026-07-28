@@ -3,14 +3,14 @@ from datetime import date, timedelta
 from hashlib import sha256
 import sqlite3
 
-from tradehelper_v2.contracts import (
+from contracts import (
     ForecastAvailability, ForecastModelVersion, ForecastResult, ForecastScope, ModelFamily,
     ModelLifecycle, ModelSpec, ValidationStatus, stable_hash,
 )
-from tradehelper_v2.data.migrations.schema import apply_schema
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.forecast.models import fit_model
-from tradehelper_v2.forecast.registry import ForecastRegistry
+from data.migrations.schema import apply_schema
+from data.repository import SQLiteRepository
+from forecast.models import fit_model
+from forecast.registry import ForecastRegistry
 from tests.v2.forecast_helpers import synthetic_samples
 
 
@@ -84,3 +84,53 @@ def test_fc15_champion_and_evaluations_survive_restart(tmp_path, us_instrument, 
     evaluations = reopened.list_forecast_model_evaluations(version.version)
     assert evaluations[0]["payload"] == {"brier": 0.4, "samples": 80}
     reopened.close()
+
+
+def test_latest_oof_validation_verdict_survives_restart(tmp_path, us_instrument, now) -> None:
+    path = tmp_path / "forecast.db"
+    repository = SQLiteRepository(path)
+    first_hash = stable_hash("first")
+    latest_hash = stable_hash("latest")
+    repository.save_forecast_validation_summary(
+        market=us_instrument.market, scope_key=us_instrument.stable_key, horizon=5,
+        status=ValidationStatus.CALIBRATION_FAILED, reason="selection calibration failed",
+        data_hash=first_hash,
+        created_at=now,
+    )
+    repository.save_forecast_validation_summary(
+        market=us_instrument.market, scope_key=us_instrument.stable_key, horizon=5,
+        status=ValidationStatus.EVALUATED_NOT_BETTER, reason="candidate did not beat baseline",
+        data_hash=latest_hash,
+        created_at=now + timedelta(seconds=1),
+    )
+    repository.close()
+
+    reopened = SQLiteRepository(path)
+    try:
+        assert reopened.list_latest_forecast_validations() == ({
+            "market": "US", "scope_key": us_instrument.stable_key, "horizon": 5,
+            "status": "evaluated_not_better", "reason": "candidate did not beat baseline",
+            "data_hash": latest_hash, "created_at": now + timedelta(seconds=1),
+        },)
+    finally:
+        reopened.close()
+
+
+def test_candidate_oof_metrics_do_not_require_a_fake_model_version(tmp_path, us_instrument, now) -> None:
+    repository = SQLiteRepository(tmp_path / "forecast.db")
+    data_hash = stable_hash("candidate-training")
+    try:
+        result = repository.save_forecast_candidate_evaluation(
+            market=us_instrument.market, scope=ForecastScope.STOCK,
+            scope_key=us_instrument.stable_key, horizon=1,
+            spec_id="logistic-tech-c0.1", phase="selection", data_hash=data_hash,
+            payload={"candidate": {"brier": 0.42}, "baseline": {"brier": 0.44}},
+            created_at=now,
+        )
+        assert result.inserted == 1
+        assert repository.get_forecast_model_version("logistic-tech-c0.1") is None
+        assert repository.list_forecast_candidate_evaluations(
+            market=us_instrument.market, scope_key=us_instrument.stable_key, horizon=1,
+        )[0]["payload"]["candidate"]["brier"] == 0.42
+    finally:
+        repository.close()

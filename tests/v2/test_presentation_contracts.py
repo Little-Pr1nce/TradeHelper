@@ -5,9 +5,10 @@ from datetime import timedelta
 import pytest
 
 from presentation_helpers import single_presentation
-from tradehelper_v2.contracts import ContractViolation
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.presentation.report_builder import SingleStockReportBuilder
+from contracts import ContractViolation
+from data.repository import SQLiteRepository
+from data.migrations.schema import SCHEMA_VERSION
+from presentation.report_builder import SingleStockReportBuilder
 
 
 def _input(instrument, now):
@@ -52,6 +53,6 @@ def test_ux09_migration_16_restarts(tmp_path):
     repo = SQLiteRepository(path); repo.close()
     repo = SQLiteRepository(path)
     try:
-        assert repo._connection.execute("select max(version) from schema_migrations").fetchone()[0] == 17
+        assert repo._connection.execute("select max(version) from schema_migrations").fetchone()[0] == SCHEMA_VERSION
     finally:
         repo.close()

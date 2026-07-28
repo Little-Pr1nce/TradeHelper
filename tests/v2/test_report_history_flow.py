@@ -1,9 +1,9 @@
 """UX50--UX52：冻结历史筛选、追加评分与安全比较。"""
 from datetime import timedelta
 import pytest
-from tradehelper_v2.application.history import ReportHistoryService
-from tradehelper_v2.contracts import ReportFeedback,ReportHistoryQuery,stable_hash
-from tradehelper_v2.data.repository import SQLiteRepository
+from application.history import ReportHistoryService
+from contracts import ReportFeedback,ReportHistoryQuery,stable_hash
+from data.repository import SQLiteRepository
 from test_presentation_contracts import _document,_input
 
 def _feedback(document, rating, when):

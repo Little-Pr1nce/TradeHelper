@@ -4,11 +4,11 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from risk_helpers import request_for
-from tradehelper_v2.contracts import DecisionMode, ExecutionPolicy, IntentBuildStatus, Market, stable_hash
-from tradehelper_v2.contracts.scenario import DecisionSession
-from tradehelper_v2.data.calendar import StaticTradingCalendar
-from tradehelper_v2.execution import OrderIntentFactory
-from tradehelper_v2.risk import RiskOfficer
+from contracts import DecisionMode, ExecutionPolicy, IntentBuildStatus, Market, stable_hash
+from contracts.scenario import DecisionSession
+from data.calendar import StaticTradingCalendar
+from execution import OrderIntentFactory
+from risk import RiskOfficer
 
 
 def _plans(request, bundle):

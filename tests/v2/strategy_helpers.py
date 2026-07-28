@@ -5,13 +5,13 @@ from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 
-from tradehelper_v2.contracts import (
+from contracts import (
     DecisionMode, FeatureEvidenceMode, FeatureSnapshot, FeatureStatus, FeatureValue,
     PositionSnapshot, StrategyInput, TradingSession, stable_hash,
 )
-from tradehelper_v2.scenario import ScenarioPlanner
-from tradehelper_v2.strategies.registry import default_specs
-from tradehelper_v2.contracts.scenario import TradingScenario
+from scenario import ScenarioPlanner
+from strategies.registry import default_specs
+from contracts.scenario import TradingScenario
 
 from test_scenario_planner import NOW, _forecast, _mode_request, _quote, _request
 

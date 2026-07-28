@@ -5,19 +5,21 @@ from pathlib import Path
 
 import pytest
 
-from tradehelper_v2.config.settings import V2Settings
-from tradehelper_v2.contracts import (
+from config.settings import V2Settings
+from contracts import (
     DecisionMode,
     Exchange,
     InstrumentId,
     Market,
     RiskPolicy,
     SingleStockAnalysisCommand,
+    ValidationStatus,
     stable_hash,
 )
-from tradehelper_v2.contracts.portfolio import PortfolioPolicy
-from tradehelper_v2.runtime import build_runtime_container
-from tradehelper_v2.strategies.registry import default_specs
+from data.repository import SQLiteRepository
+from contracts.portfolio import PortfolioPolicy
+from runtime import build_runtime_container
+from strategies.registry import default_specs
 
 
 def _container(tmp_path):
@@ -26,8 +28,8 @@ def _container(tmp_path):
 
 def test_RL00_main_production_path_imports_only_v2():
     source = Path("main.py").read_text(encoding="utf-8")
-    assert "tradehelper_v2" in source
-    assert all(f"from {name}" not in source for name in ("core", "data", "services", "strategies", "ui"))
+    assert all(f"from {name}" in source for name in ("runtime", "data", "ui"))
+    assert all(f"from {name}" not in source for name in ("alpha", "backtest", "core", "report", "services"))
 
 
 def test_RL01_runtime_container_builds_all_frozen_layers(tmp_path):
@@ -43,7 +45,7 @@ def test_RL01_runtime_container_builds_all_frozen_layers(tmp_path):
 
 
 def test_RL02_startup_order_is_settings_schema_migration_then_ui():
-    source = Path("tradehelper_v2/runtime/lifecycle.py").read_text(encoding="utf-8")
+    source = Path("runtime/lifecycle.py").read_text(encoding="utf-8")
     source = source[source.index("def start_runtime"):]
     assert source.index("V2Settings.load") < source.index("ensure_work_dir")
     assert source.index("build_runtime_container") < source.index("find_completed_migration")
@@ -89,8 +91,8 @@ def test_RL06_missing_real_account_is_not_synthesized(tmp_path):
 
 
 def test_RL07_runtime_and_application_do_not_import_v1_business_modules():
-    forbidden=("alpha", "backtest", "core", "data", "services", "strategies", "ui")
-    for root in (Path("tradehelper_v2/runtime"), Path("tradehelper_v2/application")):
+    forbidden=("alpha", "backtest", "core", "report", "services")
+    for root in (Path("runtime"), Path("application")):
         for path in root.rglob("*.py"):
             source=path.read_text(encoding="utf-8",errors="ignore")
             assert all(f"from {name}." not in source and f"import {name}." not in source for name in forbidden)
@@ -115,3 +117,24 @@ def test_RL09_migration_17_is_idempotent_across_restart(tmp_path):
         assert tuple(rows)==(17,1)
     finally:
         second.close()
+
+
+def test_runtime_restores_latest_forecast_validation_reason(tmp_path):
+    settings = V2Settings.from_mapping({"work_dir": str(tmp_path)})
+    repository = SQLiteRepository(settings.database_path)
+    instrument = InstrumentId("AAPL", Market.US, Exchange.XNAS)
+    repository.save_forecast_validation_summary(
+        market=Market.US, scope_key=instrument.stable_key, horizon=3,
+        status=ValidationStatus.CALIBRATION_FAILED,
+        reason="confirmation calibration failed", data_hash=stable_hash("training"),
+        created_at=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+    repository.close()
+
+    container = build_runtime_container(settings)
+    try:
+        assert container.forecast_registry.last_validation(
+            market=Market.US, scope_key=instrument.stable_key, horizon=3,
+        ) == (ValidationStatus.CALIBRATION_FAILED, "confirmation calibration failed")
+    finally:
+        container.close()

@@ -1,9 +1,9 @@
 """V2-7 EX30--EX39：成交成本、流动性和 Decimal 保守量化。"""
 from decimal import Decimal
 
-from tradehelper_v2.contracts import ExecutionEvidenceGrade, ExecutionPolicy, LiquidityEvidence, OrderSide, stable_hash
-from tradehelper_v2.execution.costs import CostModel
-from tradehelper_v2.risk.market_rules import default_market_rules
+from contracts import ExecutionEvidenceGrade, ExecutionPolicy, LiquidityEvidence, OrderSide, stable_hash
+from execution.costs import CostModel
+from risk.market_rules import default_market_rules
 
 
 def _liquidity(now, volume, volatility=Decimal("0.20")):

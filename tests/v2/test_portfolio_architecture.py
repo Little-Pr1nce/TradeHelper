@@ -4,8 +4,8 @@ from pathlib import Path
 from time import perf_counter
 
 from portfolio_helpers import portfolio_batch, portfolio_batch_many
-from tradehelper_v2.contracts import InstrumentId, Market
-from tradehelper_v2.portfolio import PortfolioDecisionEngine
+from contracts import InstrumentId, Market
+from portfolio import PortfolioDecisionEngine
 
 
 def test_po49_dual_market_architecture_and_500_candidate_performance(
@@ -16,9 +16,9 @@ def test_po49_dual_market_architecture_and_500_candidate_performance(
     assert us.market is Market.US and china.market is Market.A
     assert us.account_hash != china.account_hash
 
-    portfolio_dir = Path(__file__).resolve().parents[2] / "tradehelper_v2" / "portfolio"
-    forbidden = ("services", "tradehelper_v2.ui", "tradehelper_v2.report",
-                 "tradehelper_v2.learning", "tradehelper_v2.data.providers")
+    portfolio_dir = Path(__file__).resolve().parents[2] / "portfolio"
+    forbidden = ("services", "ui", "report",
+                 "learning", "data.providers")
     for path in portfolio_dir.glob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         imports = [node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]

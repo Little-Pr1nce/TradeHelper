@@ -1,7 +1,7 @@
 """LE20-LE27：概率预测事件指标和校准汇总。"""
 import pytest
-from tradehelper_v2.contracts import DirectionProbabilities, ForecastDirection
-from tradehelper_v2.learning.metrics import expected_ece, forecast_event_metrics, strategy_summary
+from contracts import DirectionProbabilities, ForecastDirection
+from learning.metrics import expected_ece, forecast_event_metrics, strategy_summary
 
 def test_forecast_event_metrics_use_three_class_brier_log_loss_and_interval():
     values=forecast_event_metrics(DirectionProbabilities(.7,.2,.1),ForecastDirection.BULLISH,-.02,.01,.04,.02)

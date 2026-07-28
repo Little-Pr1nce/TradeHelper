@@ -1,7 +1,7 @@
 """LL30--LL39：研究只能创建受控 V2-9 candidate。"""
 from types import SimpleNamespace
-from tradehelper_v2.contracts import CandidateEligibility, CandidateLifecycle, HypothesisKind, HypothesisValidationStatus
-from tradehelper_v2.research.bridge import CandidateBridge
+from contracts import CandidateEligibility, CandidateLifecycle, HypothesisKind, HypothesisValidationStatus
+from research.bridge import CandidateBridge
 
 def test_ll30_registered_model_creates_candidate(us_instrument,now):
     hypothesis=SimpleNamespace(hypothesis_id="h",kind=HypothesisKind.MODEL_CONFIGURATION,payload=(("registered_model_family","analog"),))

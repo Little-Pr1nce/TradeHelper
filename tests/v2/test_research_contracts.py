@@ -2,7 +2,7 @@
 from dataclasses import replace
 from datetime import timedelta
 import pytest
-from tradehelper_v2.contracts import ContractViolation, ResearchFact, ResearchScope, stable_hash
+from contracts import ContractViolation, ResearchFact, ResearchScope, stable_hash
 
 def _fact(instrument, now, *, key="feature.closed.rsi_14", value=55.0, status="available"):
     identity={"instrument":instrument,"key":key,"value":value,"status":status,"available_at":now,"source_refs":("fixture",),"source_payload_hash":None}

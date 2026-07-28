@@ -10,14 +10,14 @@ from tests.v2.test_v212_production_e2e import (
     _container, test_portfolio_real_chain_all_markets_and_modes,
     test_single_stock_real_chain_all_markets_and_modes,
 )
-from tradehelper_v2.application.analysis import AnalysisApplication
-from tradehelper_v2.config.settings import V2Settings
-from tradehelper_v2.contracts import (
+from application.analysis import AnalysisApplication
+from config.settings import V2Settings
+from contracts import (
     AccountSnapshot, AnalysisTaskProgress, DecisionMode, InstrumentId, Market,
     WatchlistSnapshot, stable_hash,
 )
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.release.smoke import _fixture
+from data.repository import SQLiteRepository
+from release.smoke import _fixture
 
 
 def test_RL70_tab1_tab3_market_and_mode_matrix_runs_all_twelve_cells(tmp_path):
@@ -86,8 +86,12 @@ def test_RL74_concurrent_repository_reads_and_serialized_writes_do_not_lock(tmp_
 
 def test_RL75_v1_business_directories_have_exited_the_v2_runtime_surface():
     source=Path("tradehelper.spec").read_text(encoding="utf-8")
-    assert all(f'"{name}"' in source for name in ("alpha","backtest","core","data","services","strategies","ui"))
-    assert not any(f"from {name}" in Path("main.py").read_text(encoding="utf-8") for name in ("alpha","backtest","core","data","services","strategies","ui"))
+    assert all(f'"{name}"' in source for name in ("alpha","backtest","core","services"))
+    assert all(f'"{name}"' not in source for name in ("config","data","strategies","ui"))
+    assert not any(
+        f"from {name}" in Path("main.py").read_text(encoding="utf-8")
+        for name in ("alpha","backtest","core","report","services")
+    )
 
 
 def test_RL76_dependency_locks_are_pinned_for_clean_python_312_install():

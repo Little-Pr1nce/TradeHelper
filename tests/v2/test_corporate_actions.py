@@ -1,7 +1,7 @@
 from datetime import date
 
-from tradehelper_v2.contracts import CanonicalBar
-from tradehelper_v2.data.repository import SQLiteRepository
+from contracts import CanonicalBar
+from data.repository import SQLiteRepository
 
 
 def test_daily_bar_records_adjustment_version_and_never_silently_replaces_it(tmp_path, us_instrument, now) -> None:

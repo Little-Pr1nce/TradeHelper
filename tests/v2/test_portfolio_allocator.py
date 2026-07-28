@@ -3,12 +3,12 @@ from decimal import Decimal
 
 from portfolio_helpers import portfolio_batch, portfolio_batch_many, rebuild_batch
 from strategy_helpers import position
-from tradehelper_v2.contracts import (
+from contracts import (
     AllocationStatus, AvailabilitySource, HoldingRiskSnapshot, HoldingRiskStatus,
     Market, PlanAction, PositionAvailability, RiskProfile, stable_hash,
 )
-from tradehelper_v2.portfolio import PortfolioDecisionEngine
-from tradehelper_v2.risk.sizing import cash_required, planned_loss
+from portfolio import PortfolioDecisionEngine
+from risk.sizing import cash_required, planned_loss
 
 
 def _profile(batch, now, profile=RiskProfile.CONSERVATIVE):

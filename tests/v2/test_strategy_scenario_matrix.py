@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from tradehelper_v2.contracts import (
+from contracts import (
     ConditionExpression,
     ConditionOperand,
     ConditionOperator,
@@ -20,10 +20,10 @@ from tradehelper_v2.contracts import (
     canonical_json,
     stable_hash,
 )
-from tradehelper_v2.strategies import StrategyEngine
-from tradehelper_v2.strategies.conditions import evaluate
-from tradehelper_v2.strategies.registry import default_specs
-from tradehelper_v2.strategies.templates.common import Proposal, always_false, compare, feature, level
+from strategies import StrategyEngine
+from strategies.conditions import evaluate
+from strategies.registry import default_specs
+from strategies.templates.common import Proposal, always_false, compare, feature, level
 
 from strategy_helpers import NOW, position, strategy_input
 
@@ -97,6 +97,7 @@ def test_sp07_no_champion_still_has_explicit_observation(us_instrument):
     assert bundle.entry_or_add.plans
     assert all(plan.readiness is PlanReadiness.OBSERVATION_ONLY for plan in bundle.entry_or_add.plans)
     assert "SCENARIO_OBSERVATION_ONLY" in bundle.entry_or_add.plans[0].reason_codes
+    assert any(plan.family is not StrategyFamily.OBSERVATION for plan in bundle.entry_or_add.plans)
 
 
 def test_sp08_ma120_touch_and_reclaim_is_an_event_plan(us_instrument):
@@ -145,6 +146,27 @@ def test_sp11_missing_high_evidence_does_not_fake_profit_lock(us_instrument):
     watch = next(plan for plan in bundle.entry_or_add.plans if plan.action is PlanAction.WATCH)
     assert {"current.retreat_from_session_high", "closed.high_distance_20"} <= set(watch.missing_conditions)
     assert "SESSION_OHLC_REQUIRED" in watch.reason_codes
+
+
+def test_profit_lock_is_absent_before_high_water_mark_reaches_profit_floor(us_instrument):
+    bundle = StrategyEngine().build(
+        strategy_input(us_instrument, position=position(us_instrument, cost="110"))
+    )
+    assert not any(
+        plan.family is StrategyFamily.PROFIT_LOCK
+        for plan in bundle.reduce_or_exit.plans
+    )
+
+
+def test_profit_lock_trigger_has_no_contradictory_activation_price(us_instrument):
+    bundle = StrategyEngine().build(
+        strategy_input(us_instrument, position=position(us_instrument, cost="80"))
+    )
+    plan = next(
+        plan for plan in bundle.reduce_or_exit.plans
+        if plan.family is StrategyFamily.PROFIT_LOCK
+    )
+    assert plan.trigger_condition.operator is not ConditionOperator.ALL
 
 
 def test_sp16_conditional_take_profit_is_explicitly_unquantified():

@@ -2,9 +2,9 @@
 from datetime import timedelta
 import json
 import pytest
-from tradehelper_v2.contracts import ContractViolation, DecisionMode, FeatureEvidenceMode, FeatureSnapshot, FeatureStatus, FeatureValue, FundamentalSnapshot, FundamentalValue, Market, NewsSnapshot, QualityStatus, ResearchFact, ResearchScope, stable_hash
-from tradehelper_v2.research.context import MAX_NEWS_ITEMS_PER_INSTRUMENT, ResearchContextBuilder
-from tradehelper_v2.research.prompt import build_prompt_chunks
+from contracts import ContractViolation, DecisionMode, FeatureEvidenceMode, FeatureSnapshot, FeatureStatus, FeatureValue, FundamentalSnapshot, FundamentalValue, Market, NewsSnapshot, QualityStatus, ResearchFact, ResearchScope, stable_hash
+from research.context import MAX_NEWS_ITEMS_PER_INSTRUMENT, ResearchContextBuilder
+from research.prompt import build_prompt_chunks
 
 def _fact(instrument, now):
     payload={"instrument":instrument,"key":"feature.closed.rsi_14","value":50.0,"status":"available","available_at":now,"source_refs":("fixture",),"source_payload_hash":None}
@@ -36,7 +36,7 @@ def test_context_artifact_references_must_be_frozen(us_instrument,now):
         builder.build_context(scope=ResearchScope.SINGLE_STOCK,market=Market.US,mode="eod",cutoff_at=now,manifest=manifest,instrument_roles=((us_instrument,"subject"),),forecast_event_keys=("foreign-forecast",),generated_at=now)
 
 def test_portfolio_prompt_is_stably_chunked_and_fact_bounded(now):
-    from tradehelper_v2.contracts import Exchange, InstrumentId
+    from contracts import Exchange, InstrumentId
     instruments=tuple(InstrumentId(f"T{i:02d}",Market.US,Exchange.XNAS) for i in range(11))
     global_payload={"instrument":None,"key":"portfolio.bundle.market","value":"US","status":"available","available_at":now,"source_refs":("portfolio",),"source_payload_hash":"a"*64}
     global_fact=ResearchFact(stable_hash(global_payload),None,"portfolio.bundle.market","US","text",None,"available",now,("portfolio",),"a"*64)
@@ -48,6 +48,10 @@ def test_portfolio_prompt_is_stably_chunked_and_fact_bounded(now):
     assert tuple(len(item[0]) for item in chunks)==(10,1)
     assert chunks==build_prompt_chunks(context)
     assert all(sum(item["fact_id"]==global_fact.fact_id for item in json.loads(chunk[1])["facts"])==1 for chunk in chunks)
+    payload=json.loads(chunks[0][1])
+    assert payload["challenge_reference_catalog"]["fact_source_ref_type"]=="artifact"
+    system_schema=next(item for item in payload["output_schema"]["properties"]["hypotheses"]["items"]["oneOf"] if item["properties"]["kind"].get("const")=="system_challenge")
+    assert set(system_schema["properties"]["payload"]["properties"]["challenged_artifact_type"]["enum"])=={"forecast","scenario","strategy","risk","portfolio","learning","artifact"}
 
 
 def test_prompt_redacts_account_segment_without_trailing_dot(us_instrument,now):
@@ -110,7 +114,7 @@ def test_news_and_fundamental_snapshots_are_projected_with_sources_and_limits(us
 
 def test_strategy_projection_keeps_plan_protection_ids(us_instrument):
     from strategy_helpers import strategy_input
-    from tradehelper_v2.strategies import StrategyEngine
+    from strategies import StrategyEngine
     bundle=StrategyEngine().build(strategy_input(us_instrument))
     facts=ResearchContextBuilder().project_upstream_facts(strategy_bundles=(bundle,))
     keys={item.key for item in facts}

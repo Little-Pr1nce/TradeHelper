@@ -1,8 +1,8 @@
 from datetime import date, timedelta
 
-from tradehelper_v2.contracts import DataCapabilities, DataQualityIssue, Market, QualitySeverity
-from tradehelper_v2.contracts.enums import DecisionMode, FreshnessStatus, QualityStatus
-from tradehelper_v2.data.quality import _finalize, evaluate_data_quality
+from contracts import DataCapabilities, DataQualityIssue, Market, QualitySeverity
+from contracts.enums import DecisionMode, FreshnessStatus, QualityStatus
+from data.quality import _finalize, evaluate_data_quality
 
 
 def test_g13_price_jump_is_warning_not_ohlc_failure(us_instrument, bar_factory, now, calendar) -> None:
@@ -41,7 +41,7 @@ def test_g42_quality_score_rules(now) -> None:
 
 
 def test_g43_portfolio_quality_isolated(us_instrument, quote_factory, bar_factory, now) -> None:
-    from tradehelper_v2.contracts import InstrumentId
+    from contracts import InstrumentId
     aapl = evaluate_data_quality([bar_factory(us_instrument, date(2026, 7, 9))], market=Market.US, mode=DecisionMode.INTRADAY, as_of=now, quote=quote_factory(us_instrument), listing_date=date(2000, 1, 1))
     mu = InstrumentId.from_code("MU", Market.US, "XNAS")
     stale = evaluate_data_quality([bar_factory(mu, date(2026, 7, 9))], market=Market.US, mode=DecisionMode.INTRADAY, as_of=now, quote=quote_factory(mu, observed_at=now - timedelta(minutes=16)), listing_date=date(2000, 1, 1))
@@ -50,7 +50,7 @@ def test_g43_portfolio_quality_isolated(us_instrument, quote_factory, bar_factor
 
 
 def test_g30_quote_freshness_boundaries(us_instrument, quote_factory, now) -> None:
-    from tradehelper_v2.data.quality import assess_quote_freshness
+    from data.quality import assess_quote_freshness
     assert assess_quote_freshness(quote_factory(us_instrument, observed_at=now - timedelta(minutes=15)), DecisionMode.INTRADAY, now).freshness_status.value == "fresh"
     assert assess_quote_freshness(quote_factory(us_instrument, observed_at=now - timedelta(minutes=15, seconds=1)), DecisionMode.INTRADAY, now).freshness_status.value == "stale"
     assert assess_quote_freshness(quote_factory(us_instrument, observed_at=now - timedelta(minutes=45)), DecisionMode.PRE, now).freshness_status.value == "fresh"

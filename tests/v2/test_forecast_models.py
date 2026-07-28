@@ -3,13 +3,13 @@ from datetime import date, timedelta
 
 import pytest
 
-from tradehelper_v2.contracts import (
+from contracts import (
     DecisionMode, FeatureEvidenceMode, FeatureSnapshot, FeatureStatus, FeatureValue,
     ForecastDirection, ForecastScope, ForecastTrainingSample, ModelFamily, ModelSpec, stable_hash,
 )
-from tradehelper_v2.forecast.feature_sets import TECHNICAL_CORE_V1
-from tradehelper_v2.forecast.models import InsufficientRegimeSamples, fit_calibrated_model, fit_model, model_from_artifact, predict_model
-from tradehelper_v2.forecast.trainer import default_candidate_specs
+from forecast.feature_sets import TECHNICAL_CORE_V1
+from forecast.models import fit_calibrated_model, fit_model, model_from_artifact, predict_model
+from forecast.trainer import default_candidate_specs
 from tests.v2.forecast_helpers import synthetic_samples
 
 
@@ -80,5 +80,6 @@ def test_fc06_regime_analog_filters_to_same_technical_state(us_instrument) -> No
         replace(value, value=0.1 if value.name == "closed.ma_distance_20" else 0.3 if value.name == "closed.realized_vol_20" else value.value)
         for value in adjusted[0].feature_snapshot.values
     )
-    with pytest.raises(InsufficientRegimeSamples):
-        predict_model(trained, replace(adjusted[0].feature_snapshot, values=current_values))
+    probabilities, interval = predict_model(trained, replace(adjusted[0].feature_snapshot, values=current_values))
+    assert probabilities.bullish + probabilities.neutral + probabilities.bearish == pytest.approx(1.0)
+    assert interval.p10 <= interval.p50 <= interval.p90

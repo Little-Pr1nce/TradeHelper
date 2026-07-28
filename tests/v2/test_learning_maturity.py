@@ -3,8 +3,8 @@ from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
-from tradehelper_v2.contracts import AdjustmentMode, CanonicalBar, ForecastDirection
-from tradehelper_v2.learning import MaturityResolver
+from contracts import AdjustmentMode, CanonicalBar, ForecastDirection
+from learning import MaturityResolver
 from test_learning_smoke import _forecast
 
 def test_le11_target_session_not_finished_stays_pending(us_instrument,now):

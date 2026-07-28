@@ -1,7 +1,7 @@
 from decimal import Decimal
 
-from tradehelper_v2.contracts import DecisionMode, FreshnessStatus, MarketEligibility, MarketState, PlanAction, TradingSession
-from tradehelper_v2.risk.market_rules import default_market_rules, precheck
+from contracts import DecisionMode, FreshnessStatus, MarketEligibility, MarketState, PlanAction, TradingSession
+from risk.market_rules import default_market_rules, precheck
 
 
 def test_rk27_us_does_not_have_a_lot_or_limit(now, us_instrument):

@@ -5,11 +5,11 @@ from datetime import date
 from types import SimpleNamespace
 import pytest
 from test_research_parser import _context_response
-from tradehelper_v2.contracts import CandidateEligibility,ContractViolation,HypothesisKind,HypothesisOutcome,HypothesisOutcomeStatus,HypothesisValidationStatus,stable_hash
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.research.bridge import CandidateBridge
-from tradehelper_v2.research.parser import StrictHypothesisParser
-from tradehelper_v2.research.validator import DeterministicHypothesisValidator
+from contracts import CandidateEligibility,ContractViolation,HypothesisKind,HypothesisOutcome,HypothesisOutcomeStatus,HypothesisValidationStatus,stable_hash
+from data.repository import SQLiteRepository
+from research.bridge import CandidateBridge
+from research.parser import StrictHypothesisParser
+from research.validator import DeterministicHypothesisValidator
 
 def test_response_revision_is_idempotent_and_conflicts_are_quarantined(tmp_path,us_instrument,now):
     _,response,_=_context_response(us_instrument,now); path=Path(tmp_path)/"research.sqlite"; repo=SQLiteRepository(path)

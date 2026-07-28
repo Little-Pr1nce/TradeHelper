@@ -11,7 +11,7 @@
 5. 如果 V2 采用不同实现，也必须保留同等或更强的业务效果。
 6. V2-0/V2-1 的精确实现以 [docs/v2/CONTRACTS.md](./v2/CONTRACTS.md)、[docs/v2/POLICIES.md](./v2/POLICIES.md) 和 [docs/v2/GOLDEN_CASES.md](./v2/GOLDEN_CASES.md) 为准；本清单只说明能力来源和迁移状态。
 
-“V2 目标位置”默认指 `tradehelper_v2/` 包下的对应模块；例如 `contracts/market_data.py` 表示 `tradehelper_v2/contracts/market_data.py` 或等效的 V2 合同模块。
+“V2 目标位置”默认指项目根目录下的对应职责模块；例如 `contracts/market_data.py` 表示正式合同模块。
 
 V2 迁移原则是“吸收 V1 的能力，不直接依赖 V1 的耦合代码”。V1 位置用于定位参考实现、业务经验和回归样本；V2 实现应通过清晰合同重新编写。若短期必须借用外部 I/O client，只能通过临时 compatibility shim，并要在阶段状态中写明退出条件。
 

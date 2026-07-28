@@ -20,7 +20,7 @@ V2-2 必须做到：
 允许依赖：
 
 ```text
-tradehelper_v2.features -> contracts + V2 data repository/calendar + Python/NumPy
+tradehelper.features -> contracts + V2 data repository/calendar + Python/NumPy
 ```
 
 禁止：
@@ -38,13 +38,13 @@ V1 代码只用于核对公式和回归案例；V2 必须按本文件重新实�
 V2-2 建议只新增下列职责文件，避免再次形成巨型模块：
 
 ```text
-tradehelper_v2/contracts/analysis.py
-tradehelper_v2/features/__init__.py
-tradehelper_v2/features/technical.py
-tradehelper_v2/features/news.py
-tradehelper_v2/features/fundamentals.py
-tradehelper_v2/features/snapshot.py
-tradehelper_v2/features/store.py
+contracts/analysis.py
+features/__init__.py
+features/technical.py
+features/news.py
+features/fundamentals.py
+features/snapshot.py
+features/store.py
 ```
 
 不要创建 V2-3 以后目录的空占位实现。市场/行业上下文暂由 `FeatureInputs.context` 接收可选事实；V2-1 尚无权威指数和行业序列时必须保持缺失，不在本阶段新增数据源。
@@ -357,7 +357,7 @@ SPCX式新股只有18根bar时仍生成快照，但长期特征不足；零成�
 
 ### F12 架构边界
 
-扫描 `tradehelper_v2/features`，禁止V1业务import、网络调用、LLM、预测、策略和UI依赖。
+扫描 `features`，禁止V1业务import、网络调用、LLM、预测、策略和UI依赖。
 
 ### F13 性能
 

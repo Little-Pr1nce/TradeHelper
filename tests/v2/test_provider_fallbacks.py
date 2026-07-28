@@ -2,13 +2,13 @@ from datetime import date, datetime, timedelta, timezone
 import sys
 from types import SimpleNamespace
 
-from tradehelper_v2.contracts import DailyBarsRequest, FreshnessStatus, FundamentalSnapshot, FundamentalValue, InstrumentId, ProviderResult, ProviderStatus, StockMetadata
-from tradehelper_v2.contracts.enums import DecisionMode, Market, TradingSession
-from tradehelper_v2.data import DataProviders, DataRefreshService
-from tradehelper_v2.data.cache import DataCache
-from tradehelper_v2.data.composition import _AkshareTransport, _TickFlowTransport
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.config.settings import V2Settings
+from contracts import DailyBarsRequest, FreshnessStatus, FundamentalSnapshot, FundamentalValue, InstrumentId, ProviderResult, ProviderStatus, StockMetadata
+from contracts.enums import DecisionMode, Market, TradingSession
+from data import DataProviders, DataRefreshService
+from data.cache import DataCache
+from data.composition import _AkshareTransport, _TickFlowTransport
+from data.repository import SQLiteRepository
+from config.settings import V2Settings
 
 
 def test_tickflow_daily_buffers_exclusive_start_boundary(tmp_path) -> None:
@@ -413,8 +413,27 @@ def test_completed_daily_bars_refresh_only_missing_tail(tmp_path, us_instrument,
     repo.close()
 
 
+def test_longer_history_request_refetches_missing_cache_prefix(tmp_path, us_instrument, bar_factory, now, calendar) -> None:
+    calls: list[tuple[date, date]] = []
+    repo = SQLiteRepository(tmp_path / "tradehelper_v2.db")
+    repo.upsert_daily_bars(tuple(bar_factory(us_instrument, date(2026, 7, day)) for day in (8, 9)))
+
+    def nasdaq(_, start, end):
+        calls.append((start, end))
+        return ProviderResult.success(
+            tuple(bar_factory(us_instrument, date(2026, 7, day)) for day in (1, 2, 6, 7, 8, 9)),
+            "nasdaq", now,
+        )
+
+    service = DataRefreshService(DataProviders(nasdaq_daily=nasdaq), calendar, DataCache(), repo)
+    result = service.refresh_daily_bars(us_instrument, date(2026, 7, 1), date(2026, 7, 9), None, now)
+    assert calls == [(date(2026, 7, 1), date(2026, 7, 9))]
+    assert [bar.trading_date for bar in result.value or ()] == [date(2026, 7, day) for day in (1, 2, 6, 7, 8, 9)]
+    repo.close()
+
+
 def test_refresh_persists_news_and_fundamentals_point_in_time(tmp_path, us_instrument, now, calendar) -> None:
-    from tradehelper_v2.contracts import FundamentalSnapshot, FundamentalValue, NewsSnapshot
+    from contracts import FundamentalSnapshot, FundamentalValue, NewsSnapshot
     repo = SQLiteRepository(tmp_path / "tradehelper_v2.db")
     def news(_):
         item = NewsSnapshot(us_instrument, "AAPL fixture", "finnhub", now, now, now, None, False, None, None, None)
@@ -460,7 +479,7 @@ def test_daily_batch_uses_nasdaq_for_all_us_instruments(us_instrument, bar_facto
 
 
 def test_daily_ingress_quarantines_pre_listing_and_non_session_bars(tmp_path, us_instrument, bar_factory, now) -> None:
-    from tradehelper_v2.data.calendar import StaticTradingCalendar
+    from data.calendar import StaticTradingCalendar
     calendar = StaticTradingCalendar((date(2026, 7, 9),), completed_sessions=(date(2026, 7, 9),))
     repo = SQLiteRepository(tmp_path / "tradehelper_v2.db")
     def tickflow(_, __, ___):

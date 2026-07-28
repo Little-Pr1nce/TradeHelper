@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from tradehelper_v2.contracts import (
+from contracts import (
     EntryPosture,
     ForecastAvailability,
     ForecastScope,
@@ -12,7 +12,7 @@ from tradehelper_v2.contracts import (
     ScenarioStatus,
     StrategyFamily,
 )
-from tradehelper_v2.scenario import ScenarioPlanner
+from scenario import ScenarioPlanner
 from test_scenario_planner import _forecast, _request
 
 
@@ -43,7 +43,7 @@ def test_sc07_cross_stock_and_baseline_forecasts_are_observational(us_instrument
     assert scenario.forecast_support is ForecastSupportLevel.OBSERVATIONAL
     assert scenario.status is ScenarioStatus.OBSERVATION_ONLY
     assert scenario.entry_posture is EntryPosture.OBSERVATION_ONLY
-    assert StrategyFamily.TREND_CONTINUATION in scenario.blocked_strategy_families
+    assert StrategyFamily.TREND_CONTINUATION in scenario.allowed_strategy_families
 
 
 def test_sc08_insufficient_samples_still_emit_observation_scenario(us_instrument):

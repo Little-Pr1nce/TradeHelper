@@ -2,11 +2,11 @@ import ast
 import json
 from pathlib import Path
 
-from tradehelper_v2.contracts import canonical_json
-from tradehelper_v2.scenario import ScenarioPlanner
+from contracts import canonical_json
+from scenario import ScenarioPlanner
 from test_scenario_planner import _forecast, _request
 
-ROOT=Path(__file__).parents[2] / "tradehelper_v2" / "scenario"
+ROOT=Path(__file__).parents[2] / "scenario"
 def test_sc20_scenario_layer_has_no_strategy_or_v1_imports():
     forbidden={"core","services","strategies","risk","execution","portfolio","learning","report","ui","openai"}
     found=[]

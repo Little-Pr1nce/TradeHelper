@@ -5,9 +5,9 @@ from decimal import Decimal
 import pytest
 
 from execution_helpers import intent_for
-from tradehelper_v2.contracts import ExecutionEvent, ExecutionPolicy, EventGranularity, TradingStatus
-from tradehelper_v2.contracts.market_data import ContractViolation
-from tradehelper_v2.execution import TriggerEngine
+from contracts import ExecutionEvent, ExecutionPolicy, EventGranularity, TradingStatus
+from contracts.market_data import ContractViolation
+from execution import TriggerEngine
 
 
 def event(instrument, now, name, price, *, available=None):

@@ -5,14 +5,14 @@ from pathlib import Path
 from decimal import Decimal
 
 from risk_helpers import request_for
-from tradehelper_v2.contracts import (
+from contracts import (
     DecisionMode, EventGranularity, ExecutionEvent, ExecutionPolicy, ExecutionState,
     LiquidityEvidence, TradingStatus, stable_hash,
 )
-from tradehelper_v2.risk import RiskOfficer
-from tradehelper_v2.execution import HistoricalFillSimulator, OrderIntentFactory
-from tradehelper_v2.execution.simulator import HistoricalSimulationRequest
-from tradehelper_v2.data.repository import SQLiteRepository
+from risk import RiskOfficer
+from execution import HistoricalFillSimulator, OrderIntentFactory
+from execution.simulator import HistoricalSimulationRequest
+from data.repository import SQLiteRepository
 
 
 def test_execution_build_and_replay_share_one_intent(tmp_path, us_instrument, calendar, now):

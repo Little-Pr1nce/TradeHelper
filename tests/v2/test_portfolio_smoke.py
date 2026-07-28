@@ -4,9 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from portfolio_helpers import portfolio_batch
-from tradehelper_v2.contracts import ExecutionPolicy, RiskProfile
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.portfolio import PortfolioDecisionEngine, PortfolioOrderAssembler
+from contracts import ExecutionPolicy, RiskProfile
+from data.repository import SQLiteRepository
+from portfolio import PortfolioDecisionEngine, PortfolioOrderAssembler
 
 
 def test_portfolio_engine_keeps_all_upstream_decisions_for_both_markets(us_instrument, a_instrument, now):

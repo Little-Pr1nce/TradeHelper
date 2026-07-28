@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from tradehelper_v2.risk import RiskOfficer
+from risk import RiskOfficer
 from risk_helpers import request_for
 
 

@@ -10,15 +10,15 @@ import pytest
 from portfolio_helpers import portfolio_batch, portfolio_batch_many, rebuild_batch, correlation_for
 from strategy_helpers import position
 from tests.v2.test_v212_production_e2e import _container
-from tradehelper_v2.application.analysis import RuntimeAnalysisPipeline
-from tradehelper_v2.contracts import (
+from application.analysis import RuntimeAnalysisPipeline
+from contracts import (
     AnalysisRunStatus, AnalysisStage, DailyBarsRequest, DecisionMode, InstrumentId,
     Market, PlanAction, PortfolioAnalysisCommand, ProviderStatus, stable_hash,
 )
-from tradehelper_v2.contracts.providers import ProviderResult
-from tradehelper_v2.data.cache import DataCache
-from tradehelper_v2.data.service import DataProviders, DataRefreshService
-from tradehelper_v2.portfolio import PortfolioDecisionEngine
+from contracts.providers import ProviderResult
+from data.cache import DataCache
+from data.service import DataProviders, DataRefreshService
+from portfolio import PortfolioDecisionEngine
 
 
 def _command(account,watch,now,mode=DecisionMode.EOD):
@@ -83,7 +83,7 @@ def test_RL44_protective_exit_is_ranked_before_new_risk(us_instrument,now):
 
 def test_RL45_replacement_is_research_only_and_requires_reanalysis(us_instrument,now):
     second=InstrumentId.from_code("MSFT",Market.US,"XNAS"); third=InstrumentId.from_code("NVDA",Market.US,"XNAS")
-    batch=portfolio_batch_many((us_instrument,second,third),positions=(position(us_instrument),),cash=Decimal("500"))
+    batch=portfolio_batch_many((us_instrument,second,third),positions=(position(us_instrument,cost="105"),),cash=Decimal("500"))
     batch=rebuild_batch(batch,correlation_snapshot=correlation_for((us_instrument,second,third)))
     replacements=PortfolioDecisionEngine().decide(batch,now).aggressive.replacement_candidates
     assert replacements and all(item.reanalysis_required for item in replacements)
@@ -131,5 +131,5 @@ def test_RL48_tab1_and_tab3_share_cache_but_each_refreshes_facts(tmp_path):
 
 
 def test_RL49_portfolio_chain_never_constructs_simulated_one_hundred_thousand_capital():
-    source=Path("tradehelper_v2/application/analysis.py").read_text(encoding="utf-8")
+    source=Path("application/analysis.py").read_text(encoding="utf-8")
     assert "100000" not in source and "initial_capital" not in source

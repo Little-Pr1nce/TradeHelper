@@ -1,8 +1,8 @@
 from datetime import date, timedelta
 
-from tradehelper_v2.contracts import InstrumentId, Market
-from tradehelper_v2.data.quality import effective_start_date, evaluate_data_quality
-from tradehelper_v2.contracts.enums import DecisionMode
+from contracts import InstrumentId, Market
+from data.quality import effective_start_date, evaluate_data_quality
+from contracts.enums import DecisionMode
 
 
 def test_g40_ipo_window_clips_and_old_bars_are_blocked(us_instrument, bar_factory, now) -> None:

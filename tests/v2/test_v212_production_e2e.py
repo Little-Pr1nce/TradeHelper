@@ -1,22 +1,22 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import exchange_calendars as xc
 import pytest
 
-from tradehelper_v2.application.analysis import RuntimeAnalysisPipeline
-from tradehelper_v2.config.settings import V2Settings
-from tradehelper_v2.contracts import (
+from application.analysis import RuntimeAnalysisPipeline
+from config.settings import V2Settings
+from contracts import (
     AccountSnapshot, AdjustmentMode, AnalysisTaskProgress, CanonicalBar, DecisionMode, Exchange,
-    FreshnessStatus, InstrumentId, Market, PortfolioAnalysisCommand,
+    ForecastScope, FreshnessStatus, InstrumentId, Market, NewsSnapshot, PortfolioAnalysisCommand,
     PositionSnapshot, ProviderStatus, QuoteSnapshot, ReportKind,
     SingleStockAnalysisCommand, StockMetadata, TradingSession,
     WatchlistSnapshot, stable_hash,
 )
-from tradehelper_v2.contracts.providers import ProviderResult
-from tradehelper_v2.runtime.container import build_runtime_container
+from contracts.providers import ProviderResult
+from runtime.container import build_runtime_container
 
 
 def _as_of(market, mode):
@@ -82,6 +82,18 @@ class _FrozenData:
         return ProviderResult.failure(ProviderStatus.EMPTY, args[-1])
 
 
+class _DelayedVisibleNewsData(_FrozenData):
+    """A fact first becomes visible while the live refresh request is running."""
+
+    def refresh_news(self, instrument, _mode, as_of):
+        visible_at = as_of + timedelta(seconds=30)
+        value = NewsSnapshot(
+            instrument, "Earnings update", "fixture", as_of - timedelta(hours=1),
+            visible_at, visible_at, "Public information", False, "neutral", .5, .9,
+        )
+        return ProviderResult.success((value,), "fixture", visible_at)
+
+
 def _container(tmp_path, market, mode):
     now = _as_of(market, mode)
     instruments = (_instrument(market), _instrument(market, True))
@@ -143,6 +155,19 @@ def test_production_application_runs_off_ui_thread_with_typed_progress(tmp_path)
         container.close()
 
 
+def test_live_refresh_advances_decision_cutoff_to_newly_visible_fact(tmp_path):
+    container, account, _, now, instruments = _container(tmp_path, Market.US, DecisionMode.EOD)
+    container.data_refresh = _DelayedVisibleNewsData(instruments, now)
+    container.finbert = type("Finbert", (), {"enrich": staticmethod(tuple)})()
+    identity={"instrument":instruments[0],"mode":DecisionMode.EOD,"history":"6m","requested_at":now,"account":stable_hash(account),"force_refresh":False}
+    command=SingleStockAnalysisCommand(stable_hash(identity),instruments[0],DecisionMode.EOD,"6m",now,stable_hash(account))
+    try:
+        document=RuntimeAnalysisPipeline(container).single_stock(command)
+        assert document.as_of == now + timedelta(seconds=30)
+    finally:
+        container.close()
+
+
 def test_background_learning_records_four_horizons_idempotently(tmp_path):
     container, account, _, now, instruments = _container(tmp_path, Market.US, DecisionMode.EOD)
     identity={"instrument":instruments[0],"mode":DecisionMode.EOD,"history":"6m","requested_at":now,"account":stable_hash(account),"force_refresh":False}
@@ -155,5 +180,82 @@ def test_background_learning_records_four_horizons_idempotently(tmp_path):
         task=container.background_learning.submit(instruments[0],container.data_refresh.values[instruments[0]],listing_date=date(1980,1,1))
         container.background_learning.result(task,timeout=10)
         assert len(container.repository.list_forecast_outcomes(instruments[0]))==4
+    finally:
+        container.close()
+
+
+def test_production_risk_receives_plan_evidence_projection(tmp_path):
+    container, account, _, now, instruments = _container(tmp_path, Market.US, DecisionMode.EOD)
+    identity={"instrument":instruments[0],"mode":DecisionMode.EOD,"history":"6m","requested_at":now,"account":stable_hash(account),"force_refresh":False}
+    command=SingleStockAnalysisCommand(stable_hash(identity),instruments[0],DecisionMode.EOD,"6m",now,stable_hash(account))
+    try:
+        RuntimeAnalysisPipeline(container).single_stock(command)
+        evidence_count = container.repository._connection.execute(
+            "SELECT COUNT(*) FROM plan_evidence_snapshots"
+        ).fetchone()[0]
+        payloads = container.repository._connection.execute(
+            "SELECT payload_json FROM risk_decision_bundles"
+        ).fetchall()
+        assert evidence_count > 0
+        assert payloads and all('"evidence_hash"' in row[0] for row in payloads)
+    finally:
+        container.close()
+
+
+def test_portfolio_candidates_keep_the_same_plan_evidence(tmp_path):
+    container, account, watch, now, _ = _container(tmp_path, Market.US, DecisionMode.EOD)
+    identity={"market":Market.US,"mode":DecisionMode.EOD,"history":"6m","requested_at":now,"account":stable_hash(account),"watchlist":watch.watchlist_id,"force_refresh":False}
+    command=PortfolioAnalysisCommand(stable_hash(identity),Market.US,DecisionMode.EOD,"6m",now,stable_hash(account),watch.watchlist_id)
+    captured = {}
+    original = container.portfolio_engine.decide
+
+    def decide(batch, generated_at):
+        captured["batch"] = batch
+        return original(batch, generated_at)
+
+    container.portfolio_engine.decide = decide
+    try:
+        RuntimeAnalysisPipeline(container).portfolio(command)
+        candidates = captured["batch"].candidates
+        assert candidates and all(item.plan_evidence is not None for item in candidates)
+        assert all(item.plan_evidence.instrument == item.trade_plan.instrument for item in candidates)
+    finally:
+        container.close()
+
+
+def test_persisted_forecast_oof_metrics_are_visible_in_next_report(tmp_path):
+    container, account, _, now, instruments = _container(tmp_path, Market.US, DecisionMode.EOD)
+    instrument = instruments[0]
+    payload = {
+        "instrument_key": instrument.stable_key,
+        "horizon": 1,
+        "spec_id": "fixture-candidate",
+        "feature_set_id": "tech",
+        "status": "evaluated_not_better",
+        "candidate": {
+            "brier": .59, "log_loss": 1.02, "ece": .08,
+            "interval_coverage": .78, "accuracy": .57, "sample_count": 80,
+        },
+        "baseline": {
+            "brier": .61, "log_loss": 1.05, "ece": .09,
+            "interval_coverage": .80, "accuracy": .55, "sample_count": 80,
+        },
+    }
+    container.repository.save_forecast_candidate_evaluation(
+        market=Market.US, scope=ForecastScope.STOCK,
+        scope_key=instrument.stable_key, horizon=1,
+        spec_id="fixture-candidate", phase="confirmation", data_hash="a" * 64,
+        payload=payload, created_at=now - timedelta(seconds=1),
+    )
+    identity={"instrument":instrument,"mode":DecisionMode.EOD,"history":"6m","requested_at":now,"account":stable_hash(account),"force_refresh":False}
+    command=SingleStockAnalysisCommand(stable_hash(identity),instrument,DecisionMode.EOD,"6m",now,stable_hash(account))
+    try:
+        document = RuntimeAnalysisPipeline(container).single_stock(command)
+        forecast_section = next(item for item in document.sections if item.section_id == "forecast")
+        table = forecast_section.blocks[0].payload
+        one_day = next(row for row in table.rows if row.cells[0] == "未来 1 个交易日")
+        assert "80 条未见历史样本" in one_day.cells[7]
+        assert "方向正确率 55.0%" in one_day.cells[7]
+        assert "概率误差 0.61" in one_day.cells[7]
     finally:
         container.close()

@@ -4,12 +4,12 @@ from types import SimpleNamespace
 
 from portfolio_helpers import portfolio_batch, portfolio_batch_many
 from strategy_helpers import position
-from tradehelper_v2.contracts import (
+from contracts import (
     DecisionDisposition, EvidenceStatus, ExecutionLevel, Market, MarketEligibility,
     PlanAction, PortfolioRole,
 )
-from tradehelper_v2.portfolio import PortfolioDecisionEngine, rank_entries, rank_holdings
-from tradehelper_v2.portfolio.ranking import rank_components
+from portfolio import PortfolioDecisionEngine, rank_entries, rank_holdings
+from portfolio.ranking import rank_components
 
 
 def _candidate(identifier, *, level=ExecutionLevel.B, disposition=DecisionDisposition.CONDITIONALLY_APPROVED,

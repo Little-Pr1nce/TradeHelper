@@ -85,7 +85,7 @@ point-in-time 历史事实
 ## 4. 代码组织
 
 ```text
-tradehelper_v2/
+
   contracts/
     learning.py          # 不可变结果、账本、候选、生命周期合同
   learning/

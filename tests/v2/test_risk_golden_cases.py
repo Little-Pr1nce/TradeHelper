@@ -9,7 +9,7 @@ import pytest
 
 from risk_helpers import NOW, evidence_for, quality, request_for
 from strategy_helpers import position, strategy_input
-from tradehelper_v2.contracts import (
+from contracts import (
     AccountSnapshot, AvailabilitySource, ContractViolation, DataQualityReport,
     DecisionDisposition, DecisionMode, EvidenceStatus, ExecutionLevel, FreshnessStatus,
     InstrumentClassification, InstrumentId, Market, MarketEligibility, MarketState,
@@ -17,11 +17,11 @@ from tradehelper_v2.contracts import (
     QualityStatus, RiskPolicy, RiskProfile, RiskRequest, StrategyFamily, TakeProfitMode,
     TradingSession, ValuationPrice, ValuationPriceKind, canonical_json,
 )
-from tradehelper_v2.risk import RiskOfficer, freeze_account_valuation
-from tradehelper_v2.risk.market_rules import default_market_rules, precheck
-from tradehelper_v2.risk.sizing import entry_capacity_detail, planned_loss
-from tradehelper_v2.strategies import StrategyEngine
-from tradehelper_v2.strategies.templates.common import Proposal, compare, feature, level
+from risk import RiskOfficer, freeze_account_valuation
+from risk.market_rules import default_market_rules, precheck
+from risk.sizing import entry_capacity_detail, planned_loss
+from strategies import StrategyEngine
+from strategies.templates.common import Proposal, compare, feature, level
 
 
 RANGE = {1: "neutral", 3: "neutral", 5: "neutral", 10: "neutral"}
@@ -381,7 +381,7 @@ def test_rk34_exit_priority_preserves_demoted_entry(monkeypatch, us_instrument):
     original = engine._proposal
 
     # Use the frozen V2-5 conflict fixture shape, with the actual condition enum.
-    from tradehelper_v2.contracts import ConditionOperator
+    from contracts import ConditionOperator
 
     def forced_proposal(context, spec):
         if spec.family is StrategyFamily.SUPPORT_REBOUND:

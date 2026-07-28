@@ -1,6 +1,6 @@
-from tradehelper_v2.config.settings import V2Settings
-from tradehelper_v2.data import DataProviders, DataRefreshService
-from tradehelper_v2.data.cache import DataCache
+from config.settings import V2Settings
+from data import DataProviders, DataRefreshService
+from data.cache import DataCache
 
 
 def test_g63_data_layer_does_not_require_llm_settings(tmp_path, us_instrument, now, calendar) -> None:

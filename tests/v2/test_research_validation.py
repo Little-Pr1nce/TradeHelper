@@ -1,7 +1,7 @@
 """LL20--LL29：四状态必须由冻结事实决定。"""
 from types import SimpleNamespace
-from tradehelper_v2.contracts import CandidateEligibility, HypothesisKind, HypothesisValidationStatus
-from tradehelper_v2.research.validator import DeterministicHypothesisValidator
+from contracts import CandidateEligibility, HypothesisKind, HypothesisValidationStatus
+from research.validator import DeterministicHypothesisValidator
 
 def _hypothesis(context, fact, *, payload):
     return SimpleNamespace(hypothesis_id="h",context_id=context.context_id,evidence_refs=(fact.fact_id,),payload=tuple(payload.items()),kind=HypothesisKind.FORECAST_PATTERN)
@@ -23,8 +23,8 @@ def test_ll23_crossing_is_pending(us_instrument,now):
 
 def test_predicate_cannot_hide_a_stale_fact_outside_evidence(us_instrument,now):
     from research_helpers import context_response, fact, forecast_item, response_json
-    from tradehelper_v2.contracts import ContractViolation
-    from tradehelper_v2.research.parser import StrictHypothesisParser
+    from contracts import ContractViolation
+    from research.parser import StrictHypothesisParser
     import pytest
     good=fact(us_instrument,now)
     stale=fact(us_instrument,now,key="feature.closed.hidden",value=None,status="stale")

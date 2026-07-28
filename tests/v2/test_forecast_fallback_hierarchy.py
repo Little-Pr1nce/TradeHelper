@@ -1,11 +1,11 @@
 from datetime import date
 from hashlib import sha256
 
-from tradehelper_v2.contracts import (
+from contracts import (
     ForecastModelVersion, ForecastScope, ModelFamily, ModelLifecycle, ModelSpec, ValidationStatus, stable_hash,
 )
-from tradehelper_v2.forecast.models import fit_model
-from tradehelper_v2.forecast.registry import ForecastRegistry
+from forecast.models import fit_model
+from forecast.registry import ForecastRegistry
 from tests.v2.forecast_helpers import synthetic_samples
 
 

@@ -1,9 +1,9 @@
 from dataclasses import replace
 from datetime import timedelta
 import pytest
-from tradehelper_v2.contracts import ContractViolation, DecisionMode, ScenarioFactKind, ScenarioFactUpdate
+from contracts import ContractViolation, DecisionMode, ScenarioFactKind, ScenarioFactUpdate
 from test_scenario_planner import NOW, _forecast, _mode_request, _quote, _request, _snapshot
-from tradehelper_v2.scenario import ScenarioPlanner
+from scenario import ScenarioPlanner
 
 def test_sc00_identity_is_stable_and_policy_sensitive(us_instrument):
     request=_request(us_instrument,[_forecast(us_instrument,h) for h in (1,3,5,10)])

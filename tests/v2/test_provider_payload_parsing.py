@@ -2,15 +2,15 @@ from datetime import date, datetime, timezone
 import json
 from pathlib import Path
 
-from tradehelper_v2.contracts import InstrumentId, Market
-from tradehelper_v2.data.providers import (
+from contracts import InstrumentId, Market
+from data.providers import (
     parse_baostock_listing_date, parse_finnhub_fundamentals, parse_finnhub_metadata,
     parse_finnhub_news, parse_nasdaq_bars, parse_nasdaq_quote, parse_tickflow_bars, parse_tickflow_metadata, parse_tickflow_quote,
     parse_yfinance_bars, parse_yfinance_quote,
 )
-from tradehelper_v2.data.providers.adapters import TickFlowAdapter
-from tradehelper_v2.data.providers.base import RetryingClient
-from tradehelper_v2.contracts.enums import ProviderStatus
+from data.providers.adapters import TickFlowAdapter
+from data.providers.base import RetryingClient
+from contracts.enums import ProviderStatus
 
 
 def test_g26_fixture_shapes_parse_offline_for_both_markets(a_instrument, us_instrument, now) -> None:
@@ -32,7 +32,7 @@ def test_g26_fixture_shapes_parse_offline_for_both_markets(a_instrument, us_inst
 
 def test_nasdaq_real_nested_quote_shape_and_et_timestamp(us_instrument, now) -> None:
     payload = json.loads((Path(__file__).parent / "fixtures" / "providers" / "nasdaq_price_only.json").read_text(encoding="utf-8"))
-    from tradehelper_v2.data.providers import parse_nasdaq_quote
+    from data.providers import parse_nasdaq_quote
 
     quote = parse_nasdaq_quote(payload, us_instrument, "pre", now)
     assert quote.price == 217.5 and quote.prev_close == 210.0
@@ -102,6 +102,26 @@ def test_tickflow_adapter_enforces_batch_and_round_limits(us_instrument, now) ->
     batch = adapter.quotes(instruments, "regular")
     assert len(calls) == 10 and all(len(item) <= 5 for item in calls)
     assert batch.failures[instruments[-1]].value == "rate_limited"
+
+
+def test_tickflow_single_quote_preserves_provider_attempts(us_instrument, now) -> None:
+    calls = []
+
+    def quotes(symbols):
+        calls.append(symbols)
+        return [{"last_price": 217, "timestamp": now.isoformat()}]
+
+    adapter = TickFlowAdapter(
+        lambda *_: [],
+        quotes,
+        lambda *_: {"name": "fixture"},
+        lambda: now,
+    )
+    result = adapter.quote(us_instrument, "regular")
+
+    assert result.status is ProviderStatus.OK
+    assert calls == [[f"{us_instrument.code}.US"]]
+    assert result.attempts and result.attempts[0].provider == "tickflow"
 
 
 def test_provider_retry_uses_injected_backoff_without_sleep(now) -> None:

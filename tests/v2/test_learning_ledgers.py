@@ -4,9 +4,9 @@ from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 
-from tradehelper_v2.contracts import Market, OutcomeStatus
-from tradehelper_v2.learning.joint import time_weighted_return
-from tradehelper_v2.learning.ledgers import joint_ledger, strategy_ledger
+from contracts import Market, OutcomeStatus
+from learning.joint import time_weighted_return
+from learning.ledgers import joint_ledger, strategy_ledger
 
 from test_learning_golden_cases import _joint, _strategy_row
 

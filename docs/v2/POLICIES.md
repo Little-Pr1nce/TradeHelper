@@ -8,7 +8,7 @@
 
 V2-0 完成条件：
 
-- `tradehelper_v2/` 与 `tests/v2/` 可导入。
+- `` 与 `tests/v2/` 可导入。
 - 冻结时钟、假交易日历、脚本化 Provider 和 A股/美股 fixture 可复用。
 - 架构边界测试能发现 V2 对 V1 业务模块的非法 import。
 - 性能基线只测本地确定性计算。
@@ -31,7 +31,7 @@ V2-1 完成条件：
 contracts -> Python 标准库
 config    -> Python 标准库
 data      -> contracts + config + 第三方数据 SDK
-tests/v2  -> tradehelper_v2 + 测试库
+tests/v2  -> tradehelper + 测试库
 ```
 
 禁止：
@@ -41,7 +41,7 @@ tests/v2  -> tradehelper_v2 + 测试库
 - V2 主链 import V1 的 `core`、`services`、`strategies`、`backtest`、`report`、`ui`、`alpha`、`indicators`、`utils` 或 `data` 业务模块。
 - 通过动态 import、`sys.path` 修改或复制 V1 巨型函数规避边界测试。
 
-唯一例外是 `tradehelper_v2/data/compatibility.py`。V2-0/V2-1 默认不使用该例外；如确需启用，必须列出允许的单个外部 I/O 客户端、替换目标、删除日期和对应测试，且不得把 V1 返回对象泄漏到 V2 合同之外。
+唯一例外是 `data/compatibility.py`。V2-0/V2-1 默认不使用该例外；如确需启用，必须列出允许的单个外部 I/O 客户端、替换目标、删除日期和对应测试，且不得把 V1 返回对象泄漏到 V2 合同之外。
 
 ## 3. 数据源路由
 

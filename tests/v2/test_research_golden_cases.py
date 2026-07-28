@@ -6,16 +6,16 @@ from types import SimpleNamespace
 import pytest
 
 from research_helpers import context_response, fact, forecast_item, response_json
-from tradehelper_v2.contracts import (CandidateEligibility, ContractViolation, Exchange, HypothesisKind, HypothesisOutcomeStatus, HypothesisValidationStatus, InstrumentId, InvocationStatus, Market, RawResearchResponse, ResearchRunStatus, ResearchScope, stable_hash)
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.research.bridge import CandidateBridge
-from tradehelper_v2.research.client import LLMResearchRequest, OpenAICompatibleResearchClient, ResearchClientCapabilities
-from tradehelper_v2.research.context import ResearchContextBuilder
-from tradehelper_v2.research.engine import ResearchEngine
-from tradehelper_v2.research.parser import StrictHypothesisParser
-from tradehelper_v2.research.prompt import build_prompt
-from tradehelper_v2.research.registry import ResearchMappingRegistry
-from tradehelper_v2.research.validator import DeterministicHypothesisValidator
+from contracts import (CandidateEligibility, ContractViolation, Exchange, HypothesisKind, HypothesisOutcomeStatus, HypothesisValidationStatus, InstrumentId, InvocationStatus, Market, RawResearchResponse, ResearchRunStatus, ResearchScope, stable_hash)
+from data.repository import SQLiteRepository
+from research.bridge import CandidateBridge
+from research.client import LLMResearchRequest, OpenAICompatibleResearchClient, ResearchClientCapabilities
+from research.context import ResearchContextBuilder
+from research.engine import ResearchEngine
+from research.parser import StrictHypothesisParser
+from research.prompt import build_prompt
+from research.registry import ResearchMappingRegistry
+from research.validator import DeterministicHypothesisValidator
 
 
 def test_ll02_fact_identity_changes_with_source_and_time(us_instrument,now):
@@ -143,7 +143,7 @@ def test_ll16_response_revision_is_append_only(us_instrument,now,tmp_path):
     _,response,_=context_response(us_instrument,now); repo=SQLiteRepository(tmp_path/"r.sqlite")
     content='{"revision":2}'
     identity={"request":response.request_id,"context":response.context_id,"revision":2,"provider":response.provider_name,"model":response.model_name,"content_hash":stable_hash(content),"finish":"stop","status":InvocationStatus.SUCCEEDED,"prompt_version":response.prompt_version,"prompt_hash":response.prompt_hash}
-    from tradehelper_v2.contracts import RawResearchResponse
+    from contracts import RawResearchResponse
     revision=RawResearchResponse(stable_hash(identity),response.request_id,response.context_id,2,response.provider_name,response.model_name,content,stable_hash(content),"stop",InvocationStatus.SUCCEEDED,now,response.prompt_version,response.prompt_hash)
     try:
         assert repo.save_research_response(response).inserted == 1 and repo.save_research_response(response).idempotent == 1
@@ -214,9 +214,9 @@ def test_stop_cancellation_override_is_rejected(us_instrument,now):
     assert result.candidate_eligibility is CandidateEligibility.REJECTED
 
 def test_negative_strategy_parameter_space_keeps_ordered_bounds(monkeypatch):
-    from tradehelper_v2.contracts import PlanAction, ScenarioState, StrategyFamily, StrategySpec
-    from tradehelper_v2.research.registry import default_research_registry
-    import tradehelper_v2.strategies.registry as strategy_registry
+    from contracts import PlanAction, ScenarioState, StrategyFamily, StrategySpec
+    from research.registry import default_research_registry
+    import strategies.registry as strategy_registry
     parameters={"signed_threshold":-10.0}
     spec=StrategySpec(
         "negative_parameter_v1","1",StrategyFamily.OBSERVATION,"both",(PlanAction.WATCH,),
@@ -256,30 +256,30 @@ def test_ll39_promotion_fields_are_schema_rejected(us_instrument,now):
     with pytest.raises(ContractViolation): StrictHypothesisParser().parse(content=response_json(context,[item]),context=context,response=response)
 
 def test_unconfirmed_outcome_is_not_direction_credit(us_instrument,now):
-    from tradehelper_v2.research.outcomes import _not_applicable
+    from research.outcomes import _not_applicable
     h=SimpleNamespace(hypothesis_id="h",instrument=us_instrument); v=SimpleNamespace(status=HypothesisValidationStatus.REFUTED)
     assert _not_applicable(h,v,"e",now).direction_correct is None
 
 def test_ll43_system_challenge_is_not_scored_as_direction(us_instrument,now):
-    from tradehelper_v2.research.outcomes import _not_applicable
+    from research.outcomes import _not_applicable
     h=SimpleNamespace(hypothesis_id="h",instrument=us_instrument); v=SimpleNamespace(status=HypothesisValidationStatus.CONFIRMED)
     assert _not_applicable(h,v,"e",now).status is HypothesisOutcomeStatus.NOT_APPLICABLE
 
 def test_ll42_direction_outcome_uses_maturity_and_forecast_only(us_instrument,now):
     from test_learning_smoke import _forecast
-    from tradehelper_v2.contracts import AdjustmentMode, CanonicalBar
-    from tradehelper_v2.learning.maturity import MaturityResolver
-    from tradehelper_v2.research.outcomes import forecast_outcome
+    from contracts import AdjustmentMode, CanonicalBar
+    from learning.maturity import MaturityResolver
+    from research.outcomes import forecast_outcome
     issued=_forecast(us_instrument,now); bars=(CanonicalBar(us_instrument,issued.target_session_date,100,103,99,102,1,AdjustmentMode.FRONT_ADJUSTED,"fixture",now),); maturity=MaturityResolver().resolve(issued,bars,evaluated_at=now)
-    from tradehelper_v2.learning.engine import LearningEngine
+    from learning.engine import LearningEngine
     forecast=LearningEngine().evaluate_forecast(issued,bars,evaluated_at=now)
     h=SimpleNamespace(hypothesis_id="h",business_key="b",instrument=us_instrument,payload=(("expected_direction","bullish"),("horizons",(1,))),kind=HypothesisKind.FORECAST_PATTERN); v=SimpleNamespace(status=HypothesisValidationStatus.CONFIRMED)
     assert forecast_outcome(hypothesis=h,validation=v,observation_event_key="e",maturity=maturity,forecast=forecast,evaluated_at=now).linked_maturity_evidence_id == maturity.evidence_id
 
 def test_ll44_candidate_effect_requires_linked_candidate(us_instrument,now):
     from test_research_outcomes import _candidate_event
-    from tradehelper_v2.contracts import PromotionDecision
-    from tradehelper_v2.research.outcomes import candidate_outcome
+    from contracts import PromotionDecision
+    from research.outcomes import candidate_outcome
     h=SimpleNamespace(hypothesis_id="h",instrument=us_instrument,kind=HypothesisKind.MODEL_CONFIGURATION); v=SimpleNamespace(status=HypothesisValidationStatus.CONFIRMED)
     candidate,event=_candidate_event(us_instrument,now,PromotionDecision.PROMOTE_TO_CHALLENGER)
     outcome=candidate_outcome(hypothesis=h,validation=v,observation_event_key="e",candidate=candidate,promotion_events=(event,),evaluated_at=now)
@@ -287,17 +287,17 @@ def test_ll44_candidate_effect_requires_linked_candidate(us_instrument,now):
 
 def test_ll45_duplicate_outcome_is_superseded(us_instrument,now):
     from test_learning_smoke import _forecast
-    from tradehelper_v2.contracts import AdjustmentMode, CanonicalBar
-    from tradehelper_v2.learning.maturity import MaturityResolver
-    from tradehelper_v2.research.outcomes import forecast_outcome
+    from contracts import AdjustmentMode, CanonicalBar
+    from learning.maturity import MaturityResolver
+    from research.outcomes import forecast_outcome
     issued=_forecast(us_instrument,now); bars=(CanonicalBar(us_instrument,issued.target_session_date,100,103,99,102,1,AdjustmentMode.FRONT_ADJUSTED,"fixture",now),); maturity=MaturityResolver().resolve(issued,bars,evaluated_at=now)
-    from tradehelper_v2.learning.engine import LearningEngine
+    from learning.engine import LearningEngine
     forecast=LearningEngine().evaluate_forecast(issued,bars,evaluated_at=now)
     h=SimpleNamespace(hypothesis_id="h",business_key="b",instrument=us_instrument,payload=(("expected_direction","bullish"),("horizons",(1,))),kind=HypothesisKind.FORECAST_PATTERN); v=SimpleNamespace(status=HypothesisValidationStatus.CONFIRMED)
     assert forecast_outcome(hypothesis=h,validation=v,observation_event_key="e",maturity=maturity,forecast=forecast,evaluated_at=now,seen_business_events=(("b",us_instrument.stable_key,forecast.origin_session_date,forecast.horizon),)).status is HypothesisOutcomeStatus.SUPERSEDED
 
 def test_ll46_metrics_dimensions_keep_model_slices_separate(us_instrument,now):
-    from tradehelper_v2.research.outcomes import metric_snapshot
+    from research.outcomes import metric_snapshot
     hypotheses=(
         SimpleNamespace(hypothesis_id="one",instrument=us_instrument,kind=HypothesisKind.MODEL_CONFIGURATION,payload=(("registered_model_family","analog"),)),
         SimpleNamespace(hypothesis_id="two",instrument=us_instrument,kind=HypothesisKind.MODEL_CONFIGURATION,payload=(("registered_model_family","ensemble"),)),
@@ -309,8 +309,8 @@ def test_ll46_metrics_dimensions_keep_model_slices_separate(us_instrument,now):
     assert one.snapshot_id != two.snapshot_id
 
 def test_metric_dimensions_reuse_hypothesis_membership_and_filter_outcome_horizon(us_instrument,now):
-    from tradehelper_v2.contracts import HypothesisOutcomeStatus
-    from tradehelper_v2.research.outcomes import metric_snapshot
+    from contracts import HypothesisOutcomeStatus
+    from research.outcomes import metric_snapshot
     hypothesis=SimpleNamespace(
         hypothesis_id="one",instrument=us_instrument,
         kind=HypothesisKind.MODEL_CONFIGURATION,
@@ -334,8 +334,8 @@ def test_metric_dimensions_reuse_hypothesis_membership_and_filter_outcome_horizo
 
 def test_candidate_outcome_rejects_forecast_pattern(us_instrument,now):
     from test_research_outcomes import _candidate_event
-    from tradehelper_v2.contracts import PromotionDecision
-    from tradehelper_v2.research.outcomes import candidate_outcome
+    from contracts import PromotionDecision
+    from research.outcomes import candidate_outcome
     candidate,event=_candidate_event(us_instrument,now,PromotionDecision.PROMOTE_TO_CHALLENGER)
     hypothesis=SimpleNamespace(hypothesis_id="h",instrument=us_instrument,kind=HypothesisKind.FORECAST_PATTERN)
     with pytest.raises(ValueError):
@@ -345,7 +345,7 @@ def test_candidate_outcome_rejects_forecast_pattern(us_instrument,now):
         )
 
 def test_portfolio_hypothesis_cannot_create_instrumentless_outcome(now):
-    from tradehelper_v2.research.outcomes import _not_applicable
+    from research.outcomes import _not_applicable
     hypothesis=SimpleNamespace(hypothesis_id="h",instrument=None)
     with pytest.raises(ValueError):
         _not_applicable(hypothesis,SimpleNamespace(status=HypothesisValidationStatus.PENDING),"e",now)

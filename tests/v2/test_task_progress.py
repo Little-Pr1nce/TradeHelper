@@ -1,8 +1,8 @@
 """UX30--UX34：首事件、单调进度、限频和取消。"""
 from datetime import timedelta
 import pytest
-from tradehelper_v2.application.tasks import AnalysisTaskCoordinator
-from tradehelper_v2.contracts import AnalysisStage,TaskStatus
+from application.tasks import AnalysisTaskCoordinator
+from contracts import AnalysisStage,TaskStatus
 def test_ux30_first_event_is_immediate(now):
  c=AnalysisTaskCoordinator(lambda:now); assert c.start("x").elapsed_seconds<.25
 def test_ux31_progress_never_regresses(now):
@@ -17,7 +17,7 @@ def test_ux34_background_task_does_not_block_foreground(now):
  c=AnalysisTaskCoordinator(lambda:now);background=c.start("background",background=True); foreground=c.start("foreground",background=False)
  assert background.background and not foreground.background and foreground.status is TaskStatus.QUEUED
 def test_progress_panel_uses_human_stage_and_visual_bar(now):
- from tradehelper_v2.ui.components.progress_panel import progress_panel
+ from ui.components.progress_panel import progress_panel
  progress=AnalysisTaskCoordinator(lambda:now).start("visual",total_units=10)
  control=progress_panel(progress)
  assert control.controls[0].controls[0].value.startswith("校验输入") and control.controls[1].value==0

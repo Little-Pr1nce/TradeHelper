@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from tradehelper_v2.features.technical import closed_features
+from features.technical import closed_features
 
 from feature_helpers import bars
 

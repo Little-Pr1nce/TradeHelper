@@ -7,17 +7,17 @@ from itertools import combinations
 
 from risk_helpers import NOW, quality, request_for
 from strategy_helpers import strategy_input
-from tradehelper_v2.contracts import (
+from contracts import (
     AccountSnapshot, CorrelationPair, CorrelationStatus, DecisionMode, FreshnessStatus,
     InstrumentReturnRisk, Market, PortfolioCandidate,
     PortfolioCorrelationSnapshot, PortfolioInputBatch, PortfolioPolicy,
     PortfolioRole, RiskPolicy, RiskRequest, ValuationPrice, ValuationPriceKind,
     stable_hash,
 )
-from tradehelper_v2.portfolio import build_holding_risks
-from tradehelper_v2.risk import RiskOfficer, freeze_account_valuation
-from tradehelper_v2.risk.market_rules import default_market_rules
-from tradehelper_v2.strategies import StrategyEngine
+from portfolio import build_holding_risks
+from risk import RiskOfficer, freeze_account_valuation
+from risk.market_rules import default_market_rules
+from strategies import StrategyEngine
 
 
 def portfolio_batch(instrument, *, position=None, cash=Decimal("10000"), valuation_price=Decimal("100"), availability=None):

@@ -1,5 +1,5 @@
-from tradehelper_v2.contracts import PlanAction
-from tradehelper_v2.strategies import StrategyEngine
+from contracts import PlanAction
+from strategies import StrategyEngine
 from strategy_helpers import strategy_input
 
 

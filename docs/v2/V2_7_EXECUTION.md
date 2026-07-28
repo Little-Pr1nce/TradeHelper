@@ -62,7 +62,7 @@ V2-8 后续可以传入更小的最终组合股数，但只能通过 `OrderInten
 ## 4. 代码位置
 
 ```text
-tradehelper_v2/
+
   contracts/
     execution.py             # V2-7 枚举和不可变合同
   execution/

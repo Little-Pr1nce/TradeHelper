@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tradehelper_v2.features import FeatureBuilder
+from features import FeatureBuilder
 
 from feature_helpers import bars, calendar, inputs
 

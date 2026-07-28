@@ -3,21 +3,27 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from time import perf_counter, sleep
+from types import SimpleNamespace
 
 import pytest
 
 from tests.v2.test_v212_production_e2e import test_background_learning_records_four_horizons_idempotently
-from tradehelper_v2.application.analysis import AnalysisApplication
-from tradehelper_v2.application.background import BackgroundResearchService
-from tradehelper_v2.config.settings import V2Settings
-from tradehelper_v2.contracts import (
-    AccountSnapshot, AnalysisRunStatus, DecisionMode, Exchange, InstrumentId, Market,
-    ReportDocument, ReportSection, SingleStockAnalysisCommand, stable_hash,
+from application.analysis import AnalysisApplication, RuntimeAnalysisPipeline
+from application.background import BackgroundLearningService, BackgroundResearchService
+from config.settings import V2Settings
+from contracts import (
+    AccountSnapshot, AdjustmentMode, AnalysisRunStatus, CanonicalBar, DecisionMode,
+    Exchange, InstrumentId, Market,
+    ReportDocument, ReportSection, ResearchRunStatus, SingleStockAnalysisCommand, stable_hash,
 )
-from tradehelper_v2.contracts.runtime import report_revision_invariant
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.release.smoke import _fixture
-from tradehelper_v2.runtime import build_runtime_container
+from contracts.runtime import report_revision_invariant
+from data.repository import SQLiteRepository
+from release.smoke import _fixture
+from runtime import build_runtime_container
+from presentation.report_builder import PortfolioReportBuilder
+from learning import LearningEngine, MaturityResolver
+from presentation_helpers import portfolio_presentation
+from test_learning_smoke import _forecast
 
 
 def _rebuild(base, *, sections=None, summary=None):
@@ -128,3 +134,96 @@ def test_RL59_completed_command_retry_reuses_report_and_does_not_reissue(tmp_pat
         assert first.report_id==second.report_id and pipeline.calls==1
         assert repo._connection.execute("SELECT COUNT(*) FROM report_snapshots").fetchone()[0]==1
     finally: repo.close()
+
+
+def test_background_learning_uses_new_revision_for_later_forecasts_in_same_batch(
+    us_instrument, now,
+):
+    forecast = _forecast(us_instrument, now)
+    old_bar = CanonicalBar(
+        us_instrument,
+        forecast.target_session_date,
+        100,
+        102,
+        99,
+        101,
+        1000,
+        AdjustmentMode.FRONT_ADJUSTED,
+        "fixture-old",
+        now,
+    )
+    prior = MaturityResolver().resolve(forecast, (old_bar,), evaluated_at=now)
+    bar = CanonicalBar(
+        us_instrument,
+        forecast.target_session_date,
+        100,
+        103,
+        99,
+        102,
+        1000,
+        AdjustmentMode.FRONT_ADJUSTED,
+        "fixture",
+        now,
+    )
+
+    class Repository:
+        def __init__(self):
+            self.saved_evidence = []
+            self.saved_outcomes = []
+
+        def list_active_maturity_evidence(self, _instrument):
+            return (prior,)
+
+        def list_forecast_results(self, _instrument):
+            return (forecast, forecast)
+
+        def save_maturity_evidence(self, evidence):
+            self.saved_evidence.append(evidence)
+
+        def save_forecast_outcome(self, outcome):
+            self.saved_outcomes.append(outcome)
+
+    repository = Repository()
+    with ThreadPoolExecutor(1) as executor:
+        service = BackgroundLearningService(
+            repository,
+            LearningEngine(),
+            executor,
+            clock=lambda: now,
+        )
+        task_id = service.submit(us_instrument, (bar,))
+        assert service.result(task_id, 2) == 1
+
+    assert len(repository.saved_evidence) == 1
+    assert repository.saved_evidence[0].revision == 2
+    assert len(repository.saved_outcomes) == 1
+
+
+def test_portfolio_research_uses_stable_chunks_and_returns_visible_empty_result(now, calendar):
+    analysis_at=now.replace(hour=14)
+    instruments=tuple(InstrumentId.from_code(code,Market.US) for code in (
+        "AAPL","AMD","AVGO","FCX","GLW","LITE","MU","NVDA","SNDK","SPCX","WDC",
+    ))
+    presentation=portfolio_presentation(instruments,now=analysis_at,calendar=calendar)
+    base=PortfolioReportBuilder().build(presentation)
+    calls=[]
+    class Engine:
+        def run_chunks(self, **values):
+            calls.append(values["invocations"])
+            return {
+                "status":ResearchRunStatus.COMPLETED,"reason":None,"responses":(),
+                "hypotheses":(),"validations":(),"links":(),"candidates":(),
+                "attempted_chunks":2,"completed_chunks":2,"failure_reasons":(),
+            }
+    container=SimpleNamespace(
+        settings=SimpleNamespace(llm_base_url="https://example.invalid",llm_api_key="test",llm_model="fixture"),
+        research_engine=Engine(),repository=SimpleNamespace(save_research_result=lambda *args,**kwargs:None),
+    )
+    pipeline=RuntimeAnalysisPipeline(container)
+    pipeline._research_inputs[base.report_id]=presentation
+    revised=pipeline._research_revision(base)
+    assert len(calls)==1 and [len(item[0]) for item in calls[0]]==[10,1]
+    assert "实际调用 2 个分片，成功 2 个" in next(section for section in revised.sections if section.section_id=="research").blocks[0].payload.rows[0].cells[1]
+    table=next(section for section in revised.sections if section.section_id=="research").blocks[0].payload
+    assert "调用完成" in table.rows[0].cells[1]
+    assert "没有提出" in table.rows[0].cells[1]

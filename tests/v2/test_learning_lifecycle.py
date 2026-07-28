@@ -3,7 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from tradehelper_v2.contracts import (
+from contracts import (
     CandidateKind,
     CandidateLifecycle,
     CandidateScope,
@@ -14,10 +14,10 @@ from tradehelper_v2.contracts import (
     PromotionEvent,
     stable_hash,
 )
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.learning.lifecycle import next_lifecycle
-from tradehelper_v2.learning.optimizer import validate_candidate_parameters
-from tradehelper_v2.learning.optimizer import forecast_promotion_decision, strategy_promotion_decision
+from data.repository import SQLiteRepository
+from learning.lifecycle import next_lifecycle
+from learning.optimizer import validate_candidate_parameters
+from learning.optimizer import forecast_promotion_decision, strategy_promotion_decision
 
 def test_candidate_space_rejects_unknown_or_out_of_bound_fields():
     space={'threshold':{'minimum':Decimal('0.1'),'maximum':Decimal('0.5'),'step':Decimal('0.1')}}
@@ -33,6 +33,33 @@ def test_lifecycle_requires_shadow_before_champion_and_preserves_drift():
 def test_promotion_keeps_calibration_and_drawdown_guardrails():
     assert forecast_promotion_decision(paired_brier_improvement=.01,log_loss_ratio=1.03,ece=.1,baseline_ece=.1,interval_coverage=.8,confirmation_samples=25,direction_classes=('up','down'))=='reject'
     assert strategy_promotion_decision(filled_oof_samples=30,fold_excess_returns=(.01,.02,.01),mean_net_return=.01,bootstrap_lower_80=0,baseline_return=.1,candidate_return=.09,drawdown_reduction=.3,sharpe_improvement=.2)=='promote_to_challenger'
+
+
+def test_bull_market_strategy_can_advance_by_preserving_return_and_reducing_risk():
+    """A defensive strategy need not beat buy-and-hold in every bull-market fold."""
+    assert strategy_promotion_decision(
+        filled_oof_samples=48,
+        fold_excess_returns=(-0.03, -0.01, 0.01),
+        mean_net_return=0.18,
+        bootstrap_lower_80=0.002,
+        baseline_return=0.22,
+        candidate_return=0.18,
+        drawdown_reduction=0.42,
+        sharpe_improvement=0.31,
+    ) == "promote_to_challenger"
+
+
+def test_return_retention_alone_cannot_hide_uncontrolled_drawdown():
+    assert strategy_promotion_decision(
+        filled_oof_samples=48,
+        fold_excess_returns=(-0.03, -0.01, 0.01),
+        mean_net_return=0.18,
+        bootstrap_lower_80=0.002,
+        baseline_return=0.22,
+        candidate_return=0.18,
+        drawdown_reduction=0.05,
+        sharpe_improvement=0.04,
+    ) == "reject"
 
 
 def _candidate(instrument, now, parameter_hash, lifecycle):

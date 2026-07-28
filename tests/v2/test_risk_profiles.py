@@ -1,5 +1,5 @@
-from tradehelper_v2.contracts import RiskProfile
-from tradehelper_v2.risk import RiskOfficer
+from contracts import RiskProfile
+from risk import RiskOfficer
 from risk_helpers import request_for
 
 

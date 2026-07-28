@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from tradehelper_v2.contracts import DataCapabilities, DataQualityIssue, DataQualityReport, FundamentalSnapshot, FundamentalValue, ProviderStatus, QualityAction, QualitySeverity, QualityStatus
-from tradehelper_v2.data.providers import parse_finnhub_fundamentals
-from tradehelper_v2.features import FeatureBuilder
+from contracts import DataCapabilities, DataQualityIssue, DataQualityReport, FundamentalSnapshot, FundamentalValue, ProviderStatus, QualityAction, QualitySeverity, QualityStatus
+from data.providers import parse_finnhub_fundamentals
+from features import FeatureBuilder
 
 from feature_helpers import bars, calendar, inputs
 

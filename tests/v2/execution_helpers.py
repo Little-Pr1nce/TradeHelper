@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from tradehelper_v2.contracts import (
+from contracts import (
     ConditionEvaluation, ConditionExpression, ConditionOperand, ConditionOperator,
     ConditionResult, EvidenceRequirement, IntentState, OrderIntent, OrderSide,
     OrderStyle, OperandKind, PlanAction,

@@ -1,5 +1,5 @@
 import time
-from tradehelper_v2.scenario import ScenarioPlanner
+from scenario import ScenarioPlanner
 from test_scenario_planner import _forecast, _request
 
 def test_sc21_planner_is_pure_memory_fast(us_instrument):

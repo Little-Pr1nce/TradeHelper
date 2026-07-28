@@ -4,8 +4,8 @@ from datetime import timedelta
 
 import pytest
 
-from tradehelper_v2.contracts import ContractViolation, StockMetadata, WatchlistSnapshot, stable_hash
-from tradehelper_v2.data.repository import SQLiteRepository
+from contracts import ContractViolation, StockMetadata, WatchlistSnapshot, stable_hash
+from data.repository import SQLiteRepository
 from presentation_helpers import rebuild_single
 from test_presentation_contracts import _input
 
@@ -32,7 +32,7 @@ def test_ux06_watchlist_is_immutable_and_latest_recovers(us_instrument, now, tmp
 
 
 def test_ux07_chart_hash_is_stable():
-    from tradehelper_v2.contracts import ChartKind, ChartSpec, stable_hash
+    from contracts import ChartKind, ChartSpec, stable_hash
     chart = ChartSpec("chart", ChartKind.CALIBRATION, "校准", "预测置信度", "实际发生频率", (("模型", (("0.5", .4),)),), (("0.5", .5),), 1, ("a", "b"), "解释")
     assert chart.content_hash == stable_hash({"kind": chart.chart_kind, "title": "校准", "x": "预测置信度", "y": "实际发生频率", "series": chart.series, "baseline": chart.baseline, "samples": 1, "range": ("a", "b"), "interpretation": "解释", "empty": None})
 

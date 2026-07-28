@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import json
 
-from tradehelper_v2.contracts import InvocationStatus, ResearchFact, ResearchScope, RawResearchResponse, stable_hash
-from tradehelper_v2.research.context import ResearchContextBuilder
+from contracts import InvocationStatus, ResearchFact, ResearchScope, RawResearchResponse, stable_hash
+from research.context import ResearchContextBuilder
 
 
 def fact(instrument, now, *, key="feature.closed.rsi_14", value=60.0, status="available", source_refs=("fixture",), source_hash=None, available_at=None):

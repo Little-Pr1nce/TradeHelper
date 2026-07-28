@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from tradehelper_v2.contracts import AccountSnapshot, ContractViolation, Market, PositionSnapshot, value_account
+from contracts import AccountSnapshot, ContractViolation, Market, PositionSnapshot, value_account
 
 
 def test_g60_zero_accounts_never_create_fake_capital(now) -> None:

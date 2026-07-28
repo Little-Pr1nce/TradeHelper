@@ -72,7 +72,7 @@ Tab3 的生产主链固定为：
 只新增以下主模块，避免把组合逻辑散落到 risk、execution 或 UI：
 
 ```text
-tradehelper_v2/
+
   contracts/
     portfolio.py          # V2-8 不可变合同、枚举、原因代码
   portfolio/

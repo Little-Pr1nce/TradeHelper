@@ -1,11 +1,11 @@
 from dataclasses import replace
 from datetime import date, timedelta
 
-from tradehelper_v2.contracts import DailyBarsRequest, FundamentalSnapshot, FundamentalValue, InstrumentId, Market, ProviderResult, ProviderStatus, QuoteBatch
-from tradehelper_v2.data import DataProviders, DataRefreshService, DailyBarDriftMonitor
-from tradehelper_v2.data.cache import DataCache
-from tradehelper_v2.data.rate_limit import InMemoryFinnhubRateBudget, SQLiteDailyRateBudget
-from tradehelper_v2.data.repository import SQLiteRepository
+from contracts import DailyBarsRequest, FundamentalSnapshot, FundamentalValue, InstrumentId, Market, ProviderResult, ProviderStatus, QuoteBatch
+from data import DataProviders, DataRefreshService, DailyBarDriftMonitor
+from data.cache import DataCache
+from data.rate_limit import InMemoryFinnhubRateBudget, SQLiteDailyRateBudget
+from data.repository import SQLiteRepository
 
 
 def test_g28_a_daily_budget_is_persistent_and_due_work_resumes(tmp_path, a_instrument, bar_factory, now, calendar) -> None:

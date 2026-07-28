@@ -25,8 +25,8 @@ V2-3 不负责：
 允许新增的主要边界：
 
 ```text
-tradehelper_v2/contracts/forecast.py
-tradehelper_v2/forecast/
+contracts/forecast.py
+forecast/
   labels.py
   feature_sets.py
   preprocessing.py
@@ -35,8 +35,8 @@ tradehelper_v2/forecast/
   trainer.py
   registry.py
   engine.py
-tradehelper_v2/data/migrations/schema.py       # migration 6
-tradehelper_v2/data/repository.py              # 预测版本/评估/结果存储
+data/migrations/schema.py       # migration 6
+data/repository.py              # 预测版本/评估/结果存储
 tests/v2/test_forecast_*.py
 ```
 
@@ -737,7 +737,7 @@ tests/v2/test_forecast_performance.py
 tests/v2/forecast_helpers.py
 ```
 
-架构边界测试必须禁止 `tradehelper_v2/forecast` 导入 V1 `core/forecast_engine.py`、策略、回测、LLM、UI 和报告模块。模型测试不得联网。
+架构边界测试必须禁止 `forecast` 导入 V1 `core/forecast_engine.py`、策略、回测、LLM、UI 和报告模块。模型测试不得联网。
 
 ## 15. 实施顺序
 

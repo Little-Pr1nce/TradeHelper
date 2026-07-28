@@ -4,10 +4,10 @@ import hashlib
 from pathlib import Path
 import sqlite3
 
-from tradehelper_v2.config.settings import V2Settings
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.migration import LegacyReader, MigrationExecutor, MigrationPlanner
-from tradehelper_v2.runtime.lifecycle import start_runtime
+from config.settings import V2Settings
+from data.repository import SQLiteRepository
+from migration import LegacyReader, MigrationExecutor, MigrationPlanner
+from runtime.lifecycle import start_runtime
 
 
 def _source(tmp_path):

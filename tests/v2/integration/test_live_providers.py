@@ -10,12 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from tradehelper_v2.config.settings import V2Settings
-from tradehelper_v2.contracts import InstrumentId, Market, ProviderStatus
-from tradehelper_v2.contracts.enums import DecisionMode
-from tradehelper_v2.data.composition import build_data_refresh_service
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.features.fundamentals import fundamental_features
+from config.settings import V2Settings
+from contracts import InstrumentId, Market, ProviderStatus
+from contracts.enums import DecisionMode
+from data.composition import build_data_refresh_service
+from data.repository import SQLiteRepository
+from features.fundamentals import fundamental_features
 
 
 if os.environ.get("TRADEHELPER_LIVE_TESTS") != "1":

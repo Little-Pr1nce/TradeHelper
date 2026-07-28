@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 import math
 
-from tradehelper_v2.contracts import (
+from contracts import (
     DecisionMode,
     FeatureEvidenceMode,
     FeatureSnapshot,
@@ -14,7 +14,7 @@ from tradehelper_v2.contracts import (
     ForecastTrainingSample,
     stable_hash,
 )
-from tradehelper_v2.forecast.feature_sets import FUNDAMENTALS_V1, NEWS_V1, TECHNICAL_CORE_V1
+from forecast.feature_sets import FUNDAMENTALS_V1, NEWS_V1, TECHNICAL_CORE_V1
 
 
 UTC = timezone.utc

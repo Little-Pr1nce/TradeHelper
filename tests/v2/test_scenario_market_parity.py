@@ -1,5 +1,5 @@
-from tradehelper_v2.contracts import HorizonAlignment, ScenarioBias, ScenarioState
-from tradehelper_v2.scenario import ScenarioPlanner
+from contracts import HorizonAlignment, ScenarioBias, ScenarioState
+from scenario import ScenarioPlanner
 from test_scenario_planner import _forecast, _request
 
 def test_sc18_market_independent_aggregation(a_instrument, us_instrument):

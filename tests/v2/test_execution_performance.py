@@ -2,9 +2,9 @@
 from time import perf_counter
 
 from risk_helpers import request_for
-from tradehelper_v2.contracts import ExecutionPolicy
-from tradehelper_v2.execution import OrderIntentFactory
-from tradehelper_v2.risk import RiskOfficer
+from contracts import ExecutionPolicy
+from execution import OrderIntentFactory
+from risk import RiskOfficer
 
 
 def test_order_intent_factory_stays_in_memory_and_fast(us_instrument, calendar, now):

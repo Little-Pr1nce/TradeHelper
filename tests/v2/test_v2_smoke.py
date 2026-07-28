@@ -1,6 +1,6 @@
 from datetime import date
 
-from tradehelper_v2.contracts import InstrumentId, Market, canonical_json, stable_hash
+from contracts import InstrumentId, Market, canonical_json, stable_hash
 
 
 def test_g01_contract_determinism() -> None:

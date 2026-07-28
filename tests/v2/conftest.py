@@ -4,11 +4,11 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from tradehelper_v2.contracts import (
+from contracts import (
     AdjustmentMode, CanonicalBar, FreshnessStatus, InstrumentId, Market,
     QuoteSnapshot, TradingSession,
 )
-from tradehelper_v2.data.calendar import StaticTradingCalendar
+from data.calendar import StaticTradingCalendar
 
 NOW = datetime(2026, 7, 10, 16, 0, tzinfo=timezone.utc)
 

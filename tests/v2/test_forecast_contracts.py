@@ -3,7 +3,7 @@ from datetime import date
 
 import pytest
 
-from tradehelper_v2.contracts import (
+from contracts import (
     AdjustmentMode, CanonicalBar, ContractViolation, DecisionMode, DirectionProbabilities,
     FeatureEvidenceMode, FeatureSnapshot, FeatureStatus, FeatureValue, ForecastRequest,
     ForecastAvailability, ForecastResult, ForecastScope, ModelFamily, ModelLifecycle,

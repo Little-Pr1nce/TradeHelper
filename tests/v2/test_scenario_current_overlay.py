@@ -2,7 +2,7 @@ from datetime import timedelta
 
 import pytest
 
-from tradehelper_v2.contracts import (
+from contracts import (
     CurrentPriceState,
     DecisionMode,
     EntryPosture,
@@ -15,8 +15,8 @@ from tradehelper_v2.contracts import (
     StrategyFamily,
     TradingSession,
 )
-from tradehelper_v2.scenario import ScenarioPlanner, build_fact_updates
-from tradehelper_v2.contracts.scenario import REGISTERED_NEWS_FEATURES
+from scenario import ScenarioPlanner, build_fact_updates
+from contracts.scenario import REGISTERED_NEWS_FEATURES
 from test_scenario_planner import NOW, _forecast, _mode_request, _quote, _request
 
 

@@ -1,4 +1,4 @@
-from tradehelper_v2.strategies import StrategyEngine
+from strategies import StrategyEngine
 from strategy_helpers import strategy_input
 
 

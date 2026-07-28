@@ -4,9 +4,9 @@ from datetime import timedelta
 
 import pytest
 
-from tradehelper_v2.contracts import CanonicalBar, ContractViolation, FeatureEvidenceMode, FreshnessStatus, NewsSnapshot, ProviderStatus
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.features import FeatureBuilder
+from contracts import CanonicalBar, ContractViolation, FeatureEvidenceMode, FreshnessStatus, NewsSnapshot, ProviderStatus
+from data.repository import SQLiteRepository
+from features import FeatureBuilder
 
 from feature_helpers import bars, calendar, inputs
 

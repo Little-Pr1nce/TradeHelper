@@ -3,7 +3,7 @@ from datetime import date, timedelta
 
 import pytest
 
-from tradehelper_v2.contracts import (
+from contracts import (
     AdjustmentMode,
     CanonicalBar,
     DataCapabilities,
@@ -13,11 +13,11 @@ from tradehelper_v2.contracts import (
     QualityAction,
     QualityStatus,
 )
-from tradehelper_v2.data.calendar import StaticTradingCalendar
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.features.snapshot import FeatureBuilder
-from tradehelper_v2.forecast.engine import ForecastEngine
-from tradehelper_v2.forecast.registry import ForecastRegistry
+from data.calendar import StaticTradingCalendar
+from data.repository import SQLiteRepository
+from features.snapshot import FeatureBuilder
+from forecast.engine import ForecastEngine
+from forecast.registry import ForecastRegistry
 from tests.v2.forecast_helpers import synthetic_samples
 from feature_helpers import bars, calendar as feature_calendar, inputs
 

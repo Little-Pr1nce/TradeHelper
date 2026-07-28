@@ -1,5 +1,5 @@
-from tradehelper_v2.contracts import ForecastScope
-from tradehelper_v2.forecast.registry import ForecastRegistry
+from contracts import ForecastScope
+from forecast.registry import ForecastRegistry
 
 
 def test_fc13_registry_is_horizon_isolated(us_instrument) -> None:

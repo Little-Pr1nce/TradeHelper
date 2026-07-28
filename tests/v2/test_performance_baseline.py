@@ -2,8 +2,8 @@ from datetime import date, timedelta
 from time import perf_counter
 
 from conftest import make_bar
-from tradehelper_v2.contracts import FundamentalSnapshot, FundamentalValue, NewsSnapshot, ProviderStatus
-from tradehelper_v2.features import FeatureBuilder
+from contracts import FundamentalSnapshot, FundamentalValue, NewsSnapshot, ProviderStatus
+from features import FeatureBuilder
 
 from feature_helpers import bars as feature_bars, calendar as feature_calendar, inputs as feature_inputs
 

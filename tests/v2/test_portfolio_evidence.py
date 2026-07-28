@@ -6,8 +6,8 @@ from decimal import Decimal
 from conftest import make_bar
 from portfolio_helpers import correlation_for, portfolio_batch, portfolio_batch_many, rebuild_batch
 from strategy_helpers import position
-from tradehelper_v2.contracts import CorrelationStatus, Market, RiskProfile
-from tradehelper_v2.portfolio import (
+from contracts import CorrelationStatus, Market, RiskProfile
+from portfolio import (
     PortfolioDecisionEngine, build_correlation_snapshot, build_portfolio_risk_snapshot,
 )
 
@@ -96,3 +96,33 @@ def test_po43_equity_weights_and_hhi_recompute_from_one_frozen_valuation(us_inst
     assert snapshot.invested_pct == Decimal("0.5")
     assert snapshot.weights_by_instrument == ((us_instrument, Decimal("0.5")),)
     assert snapshot.hhi == Decimal("0.25")
+
+
+def test_portfolio_weights_absorb_only_decimal_division_residual(us_instrument, now):
+    other = type(us_instrument).from_code("MSFT", Market.US, "XNAS")
+    positions = (
+        position(us_instrument, shares="1", cost="1"),
+        position(other, shares="1", cost="1"),
+    )
+    batch = portfolio_batch_many(
+        (us_instrument, other),
+        positions=positions,
+        cash=Decimal("1"),
+        valuation_prices={
+            us_instrument: Decimal("1"),
+            other: Decimal("1"),
+        },
+    )
+    snapshot = build_portfolio_risk_snapshot(
+        valuation=batch.valuation,
+        holding_risks=batch.holding_risks,
+        correlation_snapshot=batch.correlation_snapshot,
+        policy=batch.portfolio_policy,
+        calculated_at=now,
+    )
+
+    assert snapshot.invested_pct == Decimal("2") / Decimal("3")
+    assert sum(
+        (weight for _, weight in snapshot.weights_by_instrument),
+        Decimal("0"),
+    ) == snapshot.invested_pct

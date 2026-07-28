@@ -4,8 +4,8 @@ from decimal import Decimal
 
 import pytest
 
-from tradehelper_v2.contracts import ContractViolation, RiskAdjustment, RiskPolicy, ValuationPrice, ValuationPriceKind, FreshnessStatus
-from tradehelper_v2.risk import RiskOfficer
+from contracts import ContractViolation, RiskAdjustment, RiskPolicy, ValuationPrice, ValuationPriceKind, FreshnessStatus
+from risk import RiskOfficer
 from risk_helpers import request_for
 
 

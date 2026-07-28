@@ -7,11 +7,11 @@ import pytest
 
 from portfolio_helpers import empty_portfolio_batch, portfolio_batch, rebuild_batch
 from strategy_helpers import position
-from tradehelper_v2.contracts import (
+from contracts import (
     ContractViolation, Market, PORTFOLIO_REASON_CODES, PortfolioDecisionBundle,
     PortfolioInputBatch, PortfolioPolicy, stable_hash,
 )
-from tradehelper_v2.portfolio import PortfolioDecisionEngine
+from portfolio import PortfolioDecisionEngine
 
 
 def test_po00_contract_decimal_enum_hash_and_reason_registry(us_instrument, now):

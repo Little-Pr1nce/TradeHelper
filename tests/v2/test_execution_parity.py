@@ -1,8 +1,8 @@
 """V2-7 EX06：当前与历史消费者必须引用同一业务 OrderIntent。"""
 from risk_helpers import request_for
-from tradehelper_v2.contracts import ExecutionPolicy
-from tradehelper_v2.execution import OrderIntentFactory
-from tradehelper_v2.risk import RiskOfficer
+from contracts import ExecutionPolicy
+from execution import OrderIntentFactory
+from risk import RiskOfficer
 
 
 def test_same_plan_decision_and_requested_shares_produce_same_intent(us_instrument, calendar, now):

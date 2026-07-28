@@ -102,7 +102,7 @@ V2-10 不重新获取未来 K 线，不另写一套回测，也不使用当前�
 ## 4. 代码组织
 
 ```text
-tradehelper_v2/
+
   contracts/
     research.py          # 不可变研究合同、枚举、原因代码
   research/

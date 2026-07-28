@@ -3,9 +3,9 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from tradehelper_v2.contracts import DecisionMode, DecisionSession, Exchange, Market, TradingSession
-from tradehelper_v2.data.calendar import StaticTradingCalendar, TradingCalendarUnavailable
-from tradehelper_v2.scenario import ScenarioPlanner
+from contracts import DecisionMode, DecisionSession, Exchange, Market, TradingSession
+from data.calendar import StaticTradingCalendar, TradingCalendarUnavailable
+from scenario import ScenarioPlanner
 from test_scenario_planner import _forecast, _mode_request, _quote, _request
 
 def test_sc15_injected_session_window_preserves_breaks_and_next_session():

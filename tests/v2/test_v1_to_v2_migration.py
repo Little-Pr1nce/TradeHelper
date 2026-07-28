@@ -6,12 +6,12 @@ import sqlite3
 
 import pytest
 
-from tradehelper_v2.config.settings import V2Settings
-from tradehelper_v2.contracts import Market
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.migration import LegacyReader, MigrationExecutor, MigrationPlanner
-from tradehelper_v2.migration.config import merge_empty_settings
-from tradehelper_v2.migration.executor import MigrationExecutionError
+from config.settings import V2Settings
+from contracts import Market
+from data.repository import SQLiteRepository
+from migration import LegacyReader, MigrationExecutor, MigrationPlanner
+from migration.config import merge_empty_settings
+from migration.executor import MigrationExecutionError
 
 
 def _source(tmp_path):
@@ -112,6 +112,23 @@ def test_RL18_same_source_fingerprint_does_not_duplicate_writes(tmp_path):
         assert repo._connection.execute("SELECT COUNT(*) FROM account_positions").fetchone()[0]==2
     finally:
         repo.close()
+
+
+def test_migrated_watchlist_survives_repository_restart(tmp_path):
+    target=tmp_path/"v2.db"
+    repo,_,_=_execute(_source(tmp_path),target)
+    repo.close()
+    reopened=SQLiteRepository(target)
+    try:
+        watch=reopened.latest_watchlist_snapshot(Market.US)
+        assert watch is not None
+        assert tuple(item.code for item in watch.instruments)==("AMD",)
+        assert reopened._connection.execute(
+            "SELECT schema_version FROM watchlist_snapshots WHERE watchlist_id=?",
+            (watch.watchlist_id,),
+        ).fetchone()[0]==1
+    finally:
+        reopened.close()
 
 
 def test_RL19_failed_migration_rolls_back_business_rows_and_preserves_v1(tmp_path,monkeypatch):

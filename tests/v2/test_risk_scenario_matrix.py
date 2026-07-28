@@ -1,7 +1,7 @@
 from decimal import Decimal
 
-from tradehelper_v2.contracts import PositionSnapshot
-from tradehelper_v2.risk import RiskOfficer
+from contracts import PositionSnapshot
+from risk import RiskOfficer
 from risk_helpers import NOW, request_for
 
 

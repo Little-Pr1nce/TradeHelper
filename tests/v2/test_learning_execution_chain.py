@@ -9,7 +9,7 @@ import pytest
 from execution_helpers import intent_for
 from risk_helpers import request_for
 from test_fill_simulator import _event, _liquidity
-from tradehelper_v2.contracts import (
+from contracts import (
     AllocationStatus,
     ContractViolation,
     EvidenceOrigin,
@@ -25,11 +25,11 @@ from tradehelper_v2.contracts import (
     TradingStatus,
     stable_hash,
 )
-from tradehelper_v2.execution import HistoricalFillSimulator, OrderIntentFactory
-from tradehelper_v2.execution.simulator import HistoricalSimulationRequest
-from tradehelper_v2.learning import EquityPoint, replay_joint, strategy_outcome
-from tradehelper_v2.risk import RiskOfficer
-from tradehelper_v2.risk.market_rules import default_market_rules
+from execution import HistoricalFillSimulator, OrderIntentFactory
+from execution.simulator import HistoricalSimulationRequest
+from learning import EquityPoint, replay_joint, strategy_outcome
+from risk import RiskOfficer
+from risk.market_rules import default_market_rules
 
 
 def _plans(request, bundle):

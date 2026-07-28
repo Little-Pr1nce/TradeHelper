@@ -10,22 +10,22 @@ from test_scenario_planner import _forecast, _request
 from datetime import timedelta
 from decimal import Decimal
 
-from tradehelper_v2.contracts import (
+from contracts import (
     AccountSnapshot, DirectionProbabilities, EvidenceOrigin, ExecutionPolicy, ForecastDirection,
     ForecastOutcome, ForecastScope, LearningEvidenceGrade, OutcomeStatus,
     RiskPolicy, RiskRequest, StockMetadata, ValuationPrice, ValuationPriceKind,
     WatchlistSnapshot, FreshnessStatus, stable_hash,
 )
-from tradehelper_v2.execution import OrderIntentFactory
-from tradehelper_v2.data.calendar import StaticTradingCalendar
-from tradehelper_v2.portfolio import PortfolioDecisionEngine
-from tradehelper_v2.presentation.inputs import portfolio_input, single_stock_input
-from tradehelper_v2.presentation.report_builder import SingleStockReportBuilder
-from tradehelper_v2.risk import RiskOfficer, freeze_account_valuation
-from tradehelper_v2.risk.market_rules import default_market_rules
-from tradehelper_v2.research.parser import StrictHypothesisParser
-from tradehelper_v2.research.validator import DeterministicHypothesisValidator
-from tradehelper_v2.strategies import StrategyEngine
+from execution import OrderIntentFactory
+from data.calendar import StaticTradingCalendar
+from portfolio import PortfolioDecisionEngine
+from presentation.inputs import portfolio_input, single_stock_input
+from presentation.report_builder import SingleStockReportBuilder
+from risk import RiskOfficer, freeze_account_valuation
+from risk.market_rules import default_market_rules
+from research.parser import StrictHypothesisParser
+from research.validator import DeterministicHypothesisValidator
+from strategies import StrategyEngine
 
 from research_helpers import context_response, fact, forecast_item, response_json
 

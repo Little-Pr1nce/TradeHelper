@@ -1,8 +1,8 @@
 """LE45-LE49：反事实必须成对，缺失不能以零替代。"""
 from decimal import Decimal
 import pytest
-from tradehelper_v2.contracts import ContractViolation
-from tradehelper_v2.learning.attribution import CounterfactualObservation, execution_contribution, forecast_contribution, portfolio_contribution, risk_contribution, scenario_contribution, strategy_contribution
+from contracts import ContractViolation
+from learning.attribution import CounterfactualObservation, execution_contribution, forecast_contribution, portfolio_contribution, risk_contribution, scenario_contribution, strategy_contribution
 
 def _observation(value, *, path="a"*64):
     return CounterfactualObservation(value,("event",),path,"fees-v1","b"*64,"policy-v1")

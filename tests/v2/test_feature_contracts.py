@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tradehelper_v2.contracts import ContractViolation, DecisionMode, FeatureInputs, FundamentalSnapshot, FundamentalValue, NewsSnapshot, ProviderStatus
-from tradehelper_v2.features import FeatureBuilder
+from contracts import ContractViolation, DecisionMode, FeatureInputs, FundamentalSnapshot, FundamentalValue, NewsSnapshot, ProviderStatus
+from features import FeatureBuilder
 
 from feature_helpers import bars, calendar, inputs
 

@@ -7,20 +7,20 @@
 V2-0/V2-1 只允许实现：
 
 ```text
-tradehelper_v2/contracts/
-tradehelper_v2/config/
-tradehelper_v2/data/
+contracts/
+config/
+data/
 tests/v2/ 中对应测试与 fixture
 ```
 
 不得提前实现预测、情景、策略、风控、成交仿真、组合决策、学习、LLM、报告或 UI。可以为后续合同保留文档，不得创建无行为的占位业务类。
 
-V2 数据层必须可以在完全不导入 V1 业务模块的情况下运行。V1 外部 I/O 客户端若确实临时复用，只能由 `tradehelper_v2/data/compatibility.py` 单点导入，并在 `V2_REFACTOR_PLAN.md` 记录退出条件。V2-0/V2-1 默认目标是重新实现适配器，不启用 shim。
+V2 数据层必须可以在完全不导入 V1 业务模块的情况下运行。V1 外部 I/O 客户端若确实临时复用，只能由 `data/compatibility.py` 单点导入，并在 `V2_REFACTOR_PLAN.md` 记录退出条件。V2-0/V2-1 默认目标是重新实现适配器，不启用 shim。
 
 当前阶段建议文件边界固定为：
 
 ```text
-tradehelper_v2/
+
   contracts/
     enums.py
     market_data.py

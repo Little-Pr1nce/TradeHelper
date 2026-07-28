@@ -3,8 +3,8 @@ from hashlib import sha256
 from pathlib import Path
 import sqlite3
 
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.data.migrations.schema import SCHEMA_VERSION, apply_schema, schema_checksum, schema_v2_checksum, schema_v3_checksum, schema_v4_checksum, schema_v5_checksum, schema_v6_checksum, schema_v7_checksum, schema_v8_checksum, schema_v9_checksum, schema_v10_checksum, schema_v11_checksum, schema_v12_checksum, schema_v13_checksum, schema_v14_checksum, schema_v15_checksum, schema_v16_checksum
+from data.repository import SQLiteRepository
+from data.migrations.schema import SCHEMA_VERSION, apply_schema, schema_checksum, schema_v2_checksum, schema_v3_checksum, schema_v4_checksum, schema_v5_checksum, schema_v6_checksum, schema_v7_checksum, schema_v8_checksum, schema_v9_checksum, schema_v10_checksum, schema_v11_checksum, schema_v12_checksum, schema_v13_checksum, schema_v14_checksum, schema_v15_checksum, schema_v16_checksum, schema_v17_checksum, schema_v18_checksum, schema_v19_checksum
 
 
 def test_g53_v1_database_remains_untouched(tmp_path, now) -> None:
@@ -37,6 +37,9 @@ def test_g54_schema_migrations_are_idempotent(tmp_path) -> None:
     assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=14").fetchone()[0] == 1
     assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=15").fetchone()[0] == 1
     assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=16").fetchone()[0] == 1
+    assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=17").fetchone()[0] == 1
+    assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=18").fetchone()[0] == 1
+    assert connection.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=19").fetchone()[0] == 1
     assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == SCHEMA_VERSION
     assert schema_checksum() == schema_checksum()
     assert schema_v2_checksum() == schema_v2_checksum()
@@ -54,6 +57,9 @@ def test_g54_schema_migrations_are_idempotent(tmp_path) -> None:
     assert schema_v14_checksum() == schema_v14_checksum()
     assert schema_v15_checksum() == schema_v15_checksum()
     assert schema_v16_checksum() == schema_v16_checksum()
+    assert schema_v17_checksum() == schema_v17_checksum()
+    assert schema_v18_checksum() == schema_v18_checksum()
+    assert schema_v19_checksum() == schema_v19_checksum()
     expected_tables = {
         "order_intents", "order_intent_build_records", "trigger_evaluations",
         "execution_runs", "fill_evidence",
@@ -62,6 +68,8 @@ def test_g54_schema_migrations_are_idempotent(tmp_path) -> None:
         "research_contexts", "llm_research_invocations", "research_hypotheses", "hypothesis_validations",
         "hypothesis_candidate_links", "hypothesis_outcomes", "research_metric_snapshots",
         "watchlist_snapshots", "watchlist_snapshot_members", "report_snapshots", "report_feedback", "report_exports",
+        "forecast_validation_summaries",
+        "forecast_candidate_evaluations",
     }
     actual_tables = {
         row[0] for row in connection.execute(
@@ -69,6 +77,27 @@ def test_g54_schema_migrations_are_idempotent(tmp_path) -> None:
         )
     }
     assert expected_tables <= actual_tables
+    connection.close()
+
+
+def test_schema_v18_repairs_migrated_watchlist_object_version(tmp_path) -> None:
+    path = tmp_path / "tradehelper_v2.db"
+    repo = SQLiteRepository(path)
+    try:
+        repo._connection.execute(
+            "INSERT INTO watchlist_snapshots VALUES(?,?,?,?,?,?,?)",
+            ("legacy-watch", "legacy-watch", "US", "hash", "{}", "2026-07-17T00:00:00Z", 17),
+        )
+        repo._connection.execute("DELETE FROM schema_migrations WHERE version=18")
+        repo._connection.commit()
+    finally:
+        repo.close()
+
+    connection = sqlite3.connect(path)
+    apply_schema(connection)
+    assert connection.execute(
+        "SELECT schema_version FROM watchlist_snapshots WHERE watchlist_id='legacy-watch'"
+    ).fetchone()[0] == 1
     connection.close()
 
 

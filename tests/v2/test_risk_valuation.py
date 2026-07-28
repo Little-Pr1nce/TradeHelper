@@ -1,7 +1,7 @@
 from decimal import Decimal
 
-from tradehelper_v2.contracts import AccountSnapshot, Market, PositionSnapshot, ValuationPrice, ValuationPriceKind, FreshnessStatus
-from tradehelper_v2.risk import freeze_account_valuation
+from contracts import AccountSnapshot, Market, PositionSnapshot, ValuationPrice, ValuationPriceKind, FreshnessStatus
+from risk import freeze_account_valuation
 
 
 def test_rk03_missing_position_price_stays_incomplete(us_instrument, now):

@@ -1,8 +1,8 @@
 """Linked audit fixtures for the fixed V2-3 -> V2-8 OOF replay chain."""
 from types import SimpleNamespace
 
-from tradehelper_v2.contracts import EvidenceOrigin
-from tradehelper_v2.learning.replay import FullChainFoldRunner
+from contracts import EvidenceOrigin
+from learning.replay import FullChainFoldRunner
 
 
 def linked_full_chain_runner(seen=None, *, corrupt_scenario=False):

@@ -7,12 +7,12 @@ from datetime import datetime,timezone
 
 import pytest
 
-from tradehelper_v2.config.settings import V2Settings
-from tradehelper_v2.contracts import InstrumentId,InvocationStatus,Market,ResearchScope,stable_hash
-from tradehelper_v2.research.client import LLMResearchRequest,OpenAICompatibleResearchClient,ResearchClientCapabilities
-from tradehelper_v2.research.context import ResearchContextBuilder
-from tradehelper_v2.research.parser import StrictHypothesisParser
-from tradehelper_v2.research.prompt import PROMPT_VERSION,build_prompt
+from config.settings import V2Settings
+from contracts import InstrumentId,InvocationStatus,Market,ResearchScope,stable_hash
+from research.client import LLMResearchRequest,OpenAICompatibleResearchClient,ResearchClientCapabilities
+from research.context import ResearchContextBuilder
+from research.parser import StrictHypothesisParser
+from research.prompt import PROMPT_VERSION,build_prompt
 from research_helpers import fact
 
 

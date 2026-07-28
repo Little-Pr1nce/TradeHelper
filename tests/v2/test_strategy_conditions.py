@@ -1,5 +1,5 @@
-from tradehelper_v2.contracts import ConditionExpression, ConditionOperand, ConditionOperator, ConditionResult, EvidenceRequirement
-from tradehelper_v2.strategies.conditions import evaluate
+from contracts import ConditionExpression, ConditionOperand, ConditionOperator, ConditionResult, EvidenceRequirement
+from strategies.conditions import evaluate
 
 
 def test_sp00_missing_condition_is_unknown(now):

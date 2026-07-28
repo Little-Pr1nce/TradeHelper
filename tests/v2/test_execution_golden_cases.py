@@ -14,7 +14,7 @@ import pytest
 
 from execution_helpers import intent_for, price_condition, rebuild_intent
 from risk_helpers import request_for
-from tradehelper_v2.contracts import (
+from contracts import (
     ConditionEvaluation,
     ConditionExpression,
     ConditionOperand,
@@ -45,15 +45,15 @@ from tradehelper_v2.contracts import (
     TriggerState,
     stable_hash,
 )
-from tradehelper_v2.contracts.strategy import ObservedValue
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.execution import HistoricalFillSimulator, OrderIntentFactory, TriggerEngine
-from tradehelper_v2.execution.costs import CostModel
-from tradehelper_v2.execution.market_rules import ExecutionMarketRules
-from tradehelper_v2.execution.preview import CurrentPreviewBuilder
-from tradehelper_v2.execution.simulator import HistoricalSimulationRequest
-from tradehelper_v2.risk import RiskOfficer
-from tradehelper_v2.risk.market_rules import default_market_rules
+from contracts.strategy import ObservedValue
+from data.repository import SQLiteRepository
+from execution import HistoricalFillSimulator, OrderIntentFactory, TriggerEngine
+from execution.costs import CostModel
+from execution.market_rules import ExecutionMarketRules
+from execution.preview import CurrentPreviewBuilder
+from execution.simulator import HistoricalSimulationRequest
+from risk import RiskOfficer
+from risk.market_rules import default_market_rules
 
 
 def _event(instrument, at, event_id="event", *, open="101", high=None, low=None, close=None,
@@ -198,9 +198,9 @@ def test_ex06_same_facts_have_same_intent(us_instrument, now):
 
 def test_ex07_eod_starts_at_next_session(us_instrument, calendar, now):
     from datetime import date, datetime, timezone
-    from tradehelper_v2.contracts import Market
-    from tradehelper_v2.contracts.scenario import DecisionSession
-    from tradehelper_v2.data.calendar import StaticTradingCalendar
+    from contracts import Market
+    from contracts.scenario import DecisionSession
+    from data.calendar import StaticTradingCalendar
     next_day = date(2026, 7, 13)
     open_at = datetime(2026, 7, 13, 13, 30, tzinfo=timezone.utc)
     close_at = datetime(2026, 7, 13, 20, 0, tzinfo=timezone.utc)
@@ -212,7 +212,7 @@ def test_ex07_eod_starts_at_next_session(us_instrument, calendar, now):
 
 @pytest.mark.parametrize("mode,expected", [(DecisionMode.PRE, "ready"), (DecisionMode.INTRADAY, "ready"), (DecisionMode.EOD, "staged")])
 def test_ex08_mode_state_and_validity_are_explicit(us_instrument, now, mode, expected):
-    from tradehelper_v2.contracts import IntentState
+    from contracts import IntentState
     intent = intent_for(us_instrument, now, state=IntentState(expected))
     assert intent.state.value == expected and intent.valid_from < intent.expires_at
     if mode is DecisionMode.EOD:
@@ -516,7 +516,7 @@ def test_ex48_migration_repository_round_trip_is_strongly_typed(tmp_path, monkey
 
 
 def test_ex49_architecture_and_hard_policy_are_immutable():
-    root = Path(__file__).resolve().parents[2] / "tradehelper_v2" / "execution"
+    root = Path(__file__).resolve().parents[2] / "execution"
     forbidden = ("from backtest", "from portfolio", "from learning", "from reports", "from ui")
     assert all(not any(token in path.read_text(encoding="utf-8") for token in forbidden) for path in root.glob("*.py"))
     with pytest.raises(ContractViolation):

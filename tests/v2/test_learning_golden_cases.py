@@ -9,26 +9,27 @@ import pytest
 
 from learning_replay_helpers import linked_full_chain_runner
 from test_learning_smoke import _forecast
-from tradehelper_v2.contracts import (
+from contracts import (
     AdjustmentMode, CanonicalBar, ContractViolation, DirectionProbabilities,
     EvidenceOrigin, ForecastDirection, LearningEvidenceGrade, LearningPolicy,
     Market, OutcomeStatus, JointOutcomeKind,
 )
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.learning import LearningEngine, MaturityResolver, forecast_event_metrics
-from tradehelper_v2.learning.attribution import CounterfactualObservation, paired_contribution, portfolio_contribution
-from tradehelper_v2.learning.joint import replay_joint
-from tradehelper_v2.learning.ledgers import forecast_ledger, strategy_ledger
-from tradehelper_v2.learning.lifecycle import drift_decision, next_lifecycle
-from tradehelper_v2.learning.metrics import expected_ece, strategy_summary, summarize_forecasts
-from tradehelper_v2.learning.optimizer import (
+from data.repository import SQLiteRepository
+from data.migrations.schema import SCHEMA_VERSION
+from learning import LearningEngine, MaturityResolver, forecast_event_metrics
+from learning.attribution import CounterfactualObservation, paired_contribution, portfolio_contribution
+from learning.joint import replay_joint
+from learning.ledgers import forecast_ledger, strategy_ledger
+from learning.lifecycle import drift_decision, next_lifecycle
+from learning.metrics import expected_ece, strategy_summary, summarize_forecasts
+from learning.optimizer import (
     candidate_seed, confirmation_decision, evidence_scope, forecast_promotion_decision,
     paired_event_sets, select_candidates, strategy_promotion_decision,
     shadow_decision, validate_candidate_parameters,
 )
-from tradehelper_v2.learning.replay import FoldDefinition, ReplayAccountPolicy, WalkForwardReplayer, validate_folds
-from tradehelper_v2.learning.scenario import scenario_outcome
-from tradehelper_v2.contracts import CandidateLifecycle, PromotionDecision, stable_hash
+from learning.replay import FoldDefinition, ReplayAccountPolicy, WalkForwardReplayer, validate_folds
+from learning.scenario import scenario_outcome
+from contracts import CandidateLifecycle, PromotionDecision, stable_hash
 
 
 def _mature(instrument, now, *, close=102.0, **options):
@@ -123,7 +124,7 @@ def test_le08_joint_currency_is_market_isolated(now):
     assert _joint(Market.US,now).currency == "USD" and _joint(Market.A,now).currency == "CNY"
 
 def test_le09_learning_modules_have_no_forbidden_layer_imports():
-    source="\n".join(path.read_text() for path in Path("tradehelper_v2/learning").glob("*.py")).lower()
+    source="\n".join(path.read_text() for path in Path("learning").glob("*.py")).lower()
     assert all(token not in source for token in ("tradehelper_v1", "tkinter", "report", "requests", "yfinance", "finnhub"))
 
 def test_le10_calendar_unavailable_never_invents_target_date(us_instrument, now):
@@ -207,13 +208,13 @@ def test_le32_strategy_ledger_never_uses_portfolio_shares(us_instrument, now):
     assert next(iter(strategy_ledger((row,)).values()))["not_triggered"] == 1
 
 def test_le33_strategy_uses_execution_evidence_not_new_price_provider(us_instrument, now):
-    source=Path("tradehelper_v2/learning/strategy.py").read_text(); assert "fill.total_fee" in source and "requests" not in source
+    source=Path("learning/strategy.py").read_text(); assert "fill.total_fee" in source and "requests" not in source
 
 def test_le34_strategy_summary_uses_net_not_gross_returns():
     assert strategy_summary((-.01,.02))["mean_net_return"] == pytest.approx(.005)
 
 def test_le35_daily_path_ambiguity_is_low_evidence_not_profit_claim():
-    assert "LEARNING_DAILY_PATH_AMBIGUOUS" in Path("tradehelper_v2/contracts/learning.py").read_text()
+    assert "LEARNING_DAILY_PATH_AMBIGUOUS" in Path("contracts/learning.py").read_text()
 
 def test_le36_unquantified_exit_is_not_invented_by_strategy_summary():
     assert strategy_summary((.01,))["sample_count"] == 1
@@ -297,6 +298,5 @@ def test_le58_drift_rolls_back_or_suspends_new_risk():
 
 def test_le59_migration_14_restarts_and_is_idempotent(tmp_path):
     path=Path(tmp_path)/"le59.sqlite"; first=SQLiteRepository(path); first.close(); second=SQLiteRepository(path)
-    # V2-12 追加 migration 17；V2-9/V2-10 的历史 checksum 保持不变。
-    try: assert second._connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 17
+    try: assert second._connection.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == SCHEMA_VERSION
     finally: second.close()

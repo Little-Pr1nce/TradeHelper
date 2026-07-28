@@ -3,8 +3,8 @@ from decimal import Decimal
 
 from portfolio_helpers import portfolio_batch
 from strategy_helpers import position
-from tradehelper_v2.contracts import ExecutionPolicy, RiskProfile
-from tradehelper_v2.portfolio import PortfolioDecisionEngine, PortfolioOrderAssembler
+from contracts import ExecutionPolicy, PlanAction, RiskProfile
+from portfolio import PortfolioDecisionEngine, PortfolioOrderAssembler
 
 
 def _assemble(batch, result, profile, calendar, now):
@@ -37,7 +37,7 @@ def test_po46_unselected_approved_decision_is_explicitly_zero(us_instrument, cal
 
 
 def test_po47_multiple_exit_plans_share_one_sell_reservation(us_instrument, now):
-    batch = portfolio_batch(us_instrument, position=position(us_instrument, shares="10"))
+    batch = portfolio_batch(us_instrument, position=position(us_instrument, shares="10", cost="80"))
     profile = PortfolioDecisionEngine().decide(batch, now).conservative
     assert len(profile.reservation_groups) == 1
     group = profile.reservation_groups[0]
@@ -45,3 +45,11 @@ def test_po47_multiple_exit_plans_share_one_sell_reservation(us_instrument, now)
     assert len(members) >= 2
     assert group.max_aggregate_shares == Decimal("10")
     assert sum((item.final_requested_shares for item in members), Decimal("0")) > group.max_aggregate_shares
+
+
+def test_triggered_profit_lock_ranks_before_pending_protective_exit(us_instrument, now):
+    batch = portfolio_batch(us_instrument, position=position(us_instrument, shares="10", cost="80"))
+    profile = PortfolioDecisionEngine().decide(batch, now).conservative
+    allocations = {item.allocation_id: item for item in profile.allocations}
+    first = allocations[profile.holding_priority_allocation_ids[0]]
+    assert first.action is PlanAction.REDUCE

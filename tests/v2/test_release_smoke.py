@@ -5,15 +5,18 @@ import importlib
 import json
 from pathlib import Path
 
-from tradehelper_v2.release.manifest import build_manifest, verify_manifest
-from tradehelper_v2.release.smoke import _fixture, run_smoke
-from tradehelper_v2.presentation.renderers import render_html, render_pdf
+from release.manifest import build_manifest, verify_manifest
+from release.smoke import _fixture, run_smoke
+from presentation.renderers import render_html, render_pdf
+from data.migrations.schema import SCHEMA_VERSION
 
 
 def test_RL60_macos_spec_collects_v2_dependencies_and_excludes_v1():
     source=Path("tradehelper.spec").read_text(encoding="utf-8")
-    assert "tradehelper_v2" in source and "finbert_model" in source
-    assert all(f'"{name}"' in source for name in ("alpha","backtest","core","services","strategies"))
+    assert all(f'"{name}"' in source for name in ("runtime","migration"))
+    assert "tradehelper_v2" not in source and '"tradehelper"' not in source and "finbert_model" in source
+    assert all(f'"{name}"' in source for name in ("alpha","backtest","core","services"))
+    assert all(f'"{name}"' not in source for name in ("config","data","strategies","ui"))
 
 
 def test_RL61_windows_local_and_ci_share_the_same_spec_and_strict_smoke():
@@ -25,8 +28,9 @@ def test_RL61_windows_local_and_ci_share_the_same_spec_and_strict_smoke():
 
 def test_RL62_packaged_entry_has_no_v1_business_imports():
     source=Path("main.py").read_text(encoding="utf-8")
-    assert "tradehelper_v2" in source
-    assert all(f"from {name}" not in source for name in ("alpha","backtest","core","data","services","strategies","ui"))
+    assert all(f"from {name}" in source for name in ("runtime","data","ui"))
+    assert "tradehelper_v2" not in source and "from tradehelper." not in source
+    assert all(f"from {name}" not in source for name in ("alpha","backtest","core","report","services"))
 
 
 def test_RL63_dynamic_runtime_dependencies_are_importable():
@@ -54,7 +58,8 @@ def test_RL65_packaged_renderers_export_chinese_html_and_pdf():
 def test_RL66_temporary_home_smoke_uses_only_the_requested_workdir(tmp_path,monkeypatch):
     home=tmp_path/"home"; work=tmp_path/"work"; home.mkdir(); monkeypatch.setenv("HOME",str(home))
     result=run_smoke(work)
-    assert result["ok"] and (work/"tradehelper_v2.db").exists()
+    assert result["ok"] and result["schema_version"] == SCHEMA_VERSION
+    assert (work/"tradehelper_v2.db").exists()
     assert not (home/"TradeHelperData").exists()
 
 
@@ -75,3 +80,11 @@ def test_RL69_release_manifest_contains_and_verifies_version_commit_dependency_a
     assert not verify_manifest(manifest)
     assert manifest["app_version"]=="2.0.0"
     assert all(manifest[key] for key in ("git_commit","dependency_lock_sha256","finbert_model_sha256"))
+
+
+def test_web_preview_does_not_auto_open_http_in_https_only_browser():
+    source=Path("scripts/run_web_preview.sh").read_text(encoding="utf-8")
+    assert "FLET_FORCE_WEB_SERVER=true" in source
+    assert "FLET_SERVER_IP=127.0.0.1" in source
+    assert "http://localhost:$PORT" in source
+    assert "flet run -w" not in source

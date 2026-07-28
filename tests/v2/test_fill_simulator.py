@@ -2,10 +2,10 @@
 from decimal import Decimal
 
 from execution_helpers import intent_for
-from tradehelper_v2.contracts import ExecutionEvent, ExecutionEvidenceGrade, ExecutionPolicy, ExecutionState, EventGranularity, LiquidityEvidence, TradingStatus, stable_hash
-from tradehelper_v2.execution import HistoricalFillSimulator
-from tradehelper_v2.execution.simulator import HistoricalSimulationRequest
-from tradehelper_v2.risk.market_rules import default_market_rules
+from contracts import ExecutionEvent, ExecutionEvidenceGrade, ExecutionPolicy, ExecutionState, EventGranularity, LiquidityEvidence, TradingStatus, stable_hash
+from execution import HistoricalFillSimulator
+from execution.simulator import HistoricalSimulationRequest
+from risk.market_rules import default_market_rules
 
 
 def _event(instrument, now, price="101"):

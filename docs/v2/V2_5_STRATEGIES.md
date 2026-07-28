@@ -50,7 +50,7 @@ FeatureSnapshot + TradingScenario + PositionSnapshot
 ## 3. 代码位置
 
 ```text
-tradehelper_v2/
+
   contracts/
     strategy.py          # 条件 DSL、TradePlan、StrategyBundle
   strategies/

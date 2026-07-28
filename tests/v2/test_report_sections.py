@@ -1,5 +1,5 @@
 """UX10--UX19: report sections consume frozen V2 facts without invention."""
-from tradehelper_v2.presentation.reasons import explain
+from presentation.reasons import explain
 from test_presentation_contracts import _document as _build_document, _input
 
 
@@ -15,35 +15,40 @@ def _text(section):
     return " ".join(str(block.payload) for block in section.blocks)
 
 
+def _plan_detail(document):
+    return next(block.payload for block in _section(document, "plans").blocks if block.payload.table_id == "plan_table")
+
+
 def test_ux10_action_desk_uses_risk_decision(us_instrument, now):
     document = _document(us_instrument, now)
     text = _text(_section(document, "action_desk"))
     decision = next(item for item in _input(us_instrument, now).risk_bundle.decisions if item.profile.value == "conservative" and item.action.value in {"buy", "add", "reduce", "sell"})
-    assert decision.action.value in text and str(decision.approved_shares) in text
+    action_name = {"buy":"买入", "add":"加仓", "sell":"卖出", "reduce":"减仓", "hold":"持有", "watch":"观察"}[decision.action.value]
+    assert action_name in text and str(decision.approved_shares) in text
 
 
 def test_ux11_all_four_plan_branches_are_visible(us_instrument, now):
-    table = _section(_document(us_instrument, now), "plans").blocks[0].payload
+    table = _plan_detail(_document(us_instrument, now))
     assert {row.cells[0] for row in table.rows} == {"买入/加仓", "卖出/减仓", "持有", "失效"}
     assert "当前价" in str(table.rows) and "确认：" in str(table.rows)
 
 
 def test_ux12_missing_take_profit_says_unquantifiable(us_instrument, now):
-    assert "不可量化" in str(_section(_document(us_instrument, now), "plans").blocks[0].payload.rows)
+    assert "不可量化" in str(_plan_detail(_document(us_instrument, now)).rows)
 
 
 def test_ux13_forecast_table_contains_target_probability_and_quantiles(us_instrument, now):
     columns = _section(_document(us_instrument, now), "forecast").blocks[0].payload.columns
-    assert {"预测时间", "目标交易日", "上涨", "P10", "P50", "P90"}.issubset(columns)
+    assert {"预测范围", "目标交易日", "预测时价格", "三种走势概率", "预计收益", "过去表现是否可靠"}.issubset(columns)
 
 
 def test_ux14_oof_state_explains_execution_impact(us_instrument, now):
     table = _section(_document(us_instrument, now), "forecast").blocks[0].payload
-    assert "执行影响" in table.columns and all(row.cells[-1] for row in table.rows)
+    assert "能否影响新开仓" in table.columns and all(row.cells[-1] for row in table.rows)
 
 
 def test_ux15_profile_difference_is_explained_without_invented_trigger(us_instrument, now):
-    interpretation = _section(_document(us_instrument, now), "plans").blocks[0].payload.interpretation
+    interpretation = _plan_detail(_document(us_instrument, now)).interpretation
     assert "共享触发价" in interpretation and "风险预算" in interpretation
 
 

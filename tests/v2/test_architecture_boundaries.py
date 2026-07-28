@@ -4,8 +4,13 @@ import ast
 from pathlib import Path
 
 
-FORBIDDEN = {"core", "services", "strategies", "backtest", "report", "ui", "alpha", "indicators", "utils", "data"}
+FORBIDDEN = {"core", "services", "backtest", "report", "alpha", "indicators", "utils"}
 ROOT = Path(__file__).parents[2]
+SOURCE_ROOTS = (
+    "application", "config", "contracts", "data", "execution", "features",
+    "forecast", "learning", "migration", "portfolio", "presentation", "release",
+    "research", "risk", "runtime", "scenario", "strategies", "ui",
+)
 
 
 def _illegal_imports(path: Path) -> list[str]:
@@ -31,12 +36,20 @@ def test_g00_architecture_rejects_illegal_v1_import(tmp_path: Path) -> None:
 
 
 def test_v2_main_path_has_no_v1_business_imports() -> None:
-    findings = [finding for path in (ROOT / "tradehelper_v2").rglob("*.py") for finding in _illegal_imports(path)]
+    assert all((ROOT / name).is_dir() for name in SOURCE_ROOTS)
+    assert not (ROOT / "tradehelper").exists()
+    assert not (ROOT / "tradehelper_v2").exists()
+    findings = [
+        finding
+        for name in SOURCE_ROOTS
+        for path in (ROOT / name).rglob("*.py")
+        for finding in _illegal_imports(path)
+    ]
     assert findings == []
 
 
 def test_f12_features_have_no_provider_or_upper_layer_dependencies() -> None:
-    feature_root = ROOT / "tradehelper_v2" / "features"
+    feature_root = ROOT / "features"
     banned = {"forecast", "scenario", "strategies", "risk", "reports", "ui", "requests", "httpx", "openai"}
     findings: list[str] = []
     for path in feature_root.rglob("*.py"):
@@ -49,7 +62,7 @@ def test_f12_features_have_no_provider_or_upper_layer_dependencies() -> None:
 
 
 def test_fc00_forecast_has_no_v1_or_upper_layer_dependencies() -> None:
-    forecast_root = ROOT / "tradehelper_v2" / "forecast"
+    forecast_root = ROOT / "forecast"
     banned = {"core", "services", "strategies", "backtest", "scenario", "risk", "learning", "reports", "report", "ui", "openai", "requests", "httpx"}
     findings: list[str] = []
     for path in forecast_root.rglob("*.py"):

@@ -2,9 +2,9 @@
 from decimal import Decimal
 
 from execution_helpers import intent_for
-from tradehelper_v2.contracts import DecisionMode, ExecutionPolicy, ExecutionState, FreshnessStatus, LiquidityEvidence, MarketState, TradingSession, stable_hash
-from tradehelper_v2.execution.preview import CurrentPreviewBuilder
-from tradehelper_v2.risk.market_rules import default_market_rules
+from contracts import DecisionMode, ExecutionPolicy, ExecutionState, FreshnessStatus, LiquidityEvidence, MarketState, TradingSession, stable_hash
+from execution.preview import CurrentPreviewBuilder
+from risk.market_rules import default_market_rules
 
 
 def test_current_preview_is_never_historical_fill(us_instrument, now):

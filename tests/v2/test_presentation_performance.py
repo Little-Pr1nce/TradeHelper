@@ -2,9 +2,9 @@
 from time import perf_counter
 from presentation_helpers import portfolio_presentation
 from test_presentation_contracts import _document,_input
-from tradehelper_v2.contracts import InstrumentId,Market
-from tradehelper_v2.presentation.report_builder import PortfolioReportBuilder
-from tradehelper_v2.presentation.renderers import render_html
+from contracts import InstrumentId,Market
+from presentation.report_builder import PortfolioReportBuilder
+from presentation.renderers import render_html
 def test_ux58_document_and_html_fast(us_instrument,now):
  start=perf_counter();doc=_document(_input(us_instrument,now));render_html(doc);assert perf_counter()-start<.5
 

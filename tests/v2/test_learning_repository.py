@@ -3,12 +3,12 @@ from pathlib import Path
 from dataclasses import replace
 
 import pytest
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.learning import LearningEngine, MaturityResolver
+from data.repository import SQLiteRepository
+from learning import LearningEngine, MaturityResolver
 from test_learning_smoke import _forecast
-from tradehelper_v2.contracts import AdjustmentMode, CanonicalBar
-from tradehelper_v2.contracts import ContractViolation, LedgerKind, LearningMetricSnapshot, Market, stable_hash
-from tradehelper_v2.learning.replay import FoldDefinition
+from contracts import AdjustmentMode, CanonicalBar
+from contracts import ContractViolation, LedgerKind, LearningMetricSnapshot, Market, stable_hash
+from learning.replay import FoldDefinition
 
 def test_maturity_evidence_round_trips_and_is_idempotent(tmp_path,us_instrument,now):
     forecast=_forecast(us_instrument,now)
@@ -47,6 +47,11 @@ def test_learning_metric_and_fold_round_trip(tmp_path, now):
     try:
         assert repository.save_learning_metric_snapshot(snapshot).inserted == 1
         assert repository.get_learning_metric_snapshot(snapshot.snapshot_id) == snapshot
+        later=now+__import__('datetime').timedelta(days=1)
+        later_identity={"ledger":LedgerKind.FORECAST,"scope":snapshot.scope_key,"cutoff":later,"sample_count":30,"metrics":metrics}
+        later_snapshot=LearningMetricSnapshot(stable_hash(later_identity),LedgerKind.FORECAST,snapshot.scope_key,later,30,metrics,later)
+        repository.save_learning_metric_snapshot(later_snapshot)
+        assert repository.list_latest_learning_metric_snapshots("US:XNAS:AAPL") == (later_snapshot,)
         assert repository.save_learning_fold("run",fold,generated_at=now).inserted == 1
         assert repository.get_learning_fold(fold.fold_id) == fold
     finally: repository.close()

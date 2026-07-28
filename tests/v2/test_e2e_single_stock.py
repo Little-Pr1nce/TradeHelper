@@ -5,12 +5,12 @@ from datetime import date
 import pytest
 
 from tests.v2.test_v212_production_e2e import _as_of, _container, _instrument
-from tradehelper_v2.application.analysis import RuntimeAnalysisPipeline
-from tradehelper_v2.contracts import (
+from application.analysis import RuntimeAnalysisPipeline
+from contracts import (
     DecisionMode, Market, ProviderStatus, ReportKind, SingleStockAnalysisCommand,
     stable_hash,
 )
-from tradehelper_v2.contracts.providers import ProviderResult
+from contracts.providers import ProviderResult
 
 
 def _run(tmp_path,market,mode):

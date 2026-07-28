@@ -2,14 +2,14 @@
 from datetime import timedelta
 from types import SimpleNamespace
 
-from tradehelper_v2.contracts import (
+from contracts import (
     EvidenceOrigin,
     EvidenceStatus,
     OutcomeStatus,
     RiskProfile,
 )
-from tradehelper_v2.learning.evidence import plan_evidence
-from tradehelper_v2.learning.metrics import block_bootstrap_interval
+from learning.evidence import plan_evidence
+from learning.metrics import block_bootstrap_interval
 
 def test_stock_evidence_bootstrap_is_deterministic_and_time_blocked():
     assert block_bootstrap_interval((.01,.02,-.01,.03,.02),seed=7)==block_bootstrap_interval((.01,.02,-.01,.03,.02),seed=7)

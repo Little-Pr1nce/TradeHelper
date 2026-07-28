@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.features import FeatureBuilder, FeatureStore
+from data.repository import SQLiteRepository
+from features import FeatureBuilder, FeatureStore
 
 from feature_helpers import bars, calendar, inputs
 

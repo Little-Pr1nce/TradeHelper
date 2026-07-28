@@ -31,7 +31,9 @@ TradeHelper 是 Python 3.12 + Flet 的 A 股/美股分析桌面应用。当前 `
 - V2-12 迁移、端到端与发布规范：[docs/v2/V2_12_MIGRATION_RELEASE.md](./docs/v2/V2_12_MIGRATION_RELEASE.md)
 - 1.x 文档归档：[docs/archive/v1/](./docs/archive/v1/)
 
-V2-0 至 V2-11 已完成并复审；V2-12 的代码实现、本机迁移、双市场端到端、真实 Provider/LLM 和 macOS 包内运行验收已通过。Windows 使用同一 spec 和严格 smoke，仍须由 Windows 本地或 GitHub Actions runner 完成最终产物验收后，才能宣称 2.0 跨平台发布门槛全部通过。版本为 2.0.0，不包含自动下单、Web 发布或 V2.1 功能。
+V2-0 至 V2-11 已完成并复审；V2-12 的代码实现、本机迁移、双市场端到端、真实 Provider/LLM 和 macOS 包内运行验收已通过。首次桌面启动后的兼容性复核新增 migration 18，自动修复 migration 17 曾写入错误 `WatchlistSnapshot.schema_version` 的旧行；第二次启动可正常恢复关注列表。Flet 入口已切换到 `ft.run()`，Tab1/Tab3 使用左侧导航、全宽工作区和明确的任务反馈；Tab3 在账户区明确切换美股/USD 与 A股/CNY 账户，两个市场的现金、持仓和关注列表独立维护。实时刷新开始时间与决策事实截止时间已经分离，本轮网络请求中新取得且具有明确首次可见时间的事实可以进入报告，同时继续拒绝截止时间之后的未来信息。长窗口日 K 会检查缓存起点覆盖；首次无 Champion 时生成有明确降级标识的经验基线预测，后台 OOF 只有验证通过才影响下一次分析。migration 19 持久化每股/周期最新 OOF 结论，应用重启后不会把真实失败原因重置成“未评估”。策略评价采用“绝对超额”或“收益保留 + 回撤/Sharpe 改善”双通道，不以是否跑赢买入持有作为唯一标准。当前全量测试为 `865 passed, 4 skipped`。Windows 使用同一 spec 和严格 smoke，仍须由 Windows 本地或 GitHub Actions runner 完成最终产物验收后，才能宣称 2.0 跨平台发布门槛全部通过。版本为 2.0.0，不包含自动下单、Web 发布或 V2.1 功能。
+
+本地 Web 视觉调试请运行 `bash scripts/run_web_preview.sh`，再访问 `http://localhost:8765`。该入口不会像 `flet run -w` 一样自动唤起 Safari，因此不会触发系统“仅限 HTTPS”的无效导览失败页；正式桌面运行仍直接执行 `main.py`。
 
 ## 一以贯之的系统目标
 
@@ -70,7 +72,7 @@ V2-0 至 V2-11 已完成并复审；V2-12 的代码实现、本机迁移、双�
 - 数据层未稳定前，不改预测、策略、报告或 UI。
 - 不再依赖“看日志和看完整报告”验证功能正确性。
 - 新功能必须能通过对应层级测试单独验证。
-- V2 生产代码只位于 `tradehelper_v2/` 包。V1 源码已退出当前工作树，可通过 Git 标签 `v1.0-final-before-v2` 追溯；归档文档和只读迁移 reader 继续保留。
+- 生产代码按职责直接放在根目录一级模块中，例如 `data/`、`forecast/`、`strategies/`、`risk/` 和 `ui/`。V1 源码已退出当前工作树，可通过 Git 标签 `v1.0-final-before-v2` 追溯。
 
 ## 文档关系
 
@@ -117,6 +119,16 @@ pip install -r requirements-dev.txt
 ```bash
 venv/bin/python -m pytest tests/ -q
 ```
+
+## 运行日志
+
+V2 的运行日志位于工作目录下：
+
+```text
+~/TradeHelperData/logs/tradehelper_v2.log
+```
+
+日志同时输出到启动终端；主文件达到 5MB 后自动轮转，保留 4 份历史文件，总量约 25MB。日志记录启动/关闭、数据库与迁移状态、分析任务、数据刷新摘要、后台研究/学习结果和完整异常栈。API Key、Token、Bearer 凭据及异常消息中的常见密钥形式会统一脱敏；日志目录和文件默认仅当前用户可读写。
 
 2.0 分层测试会逐步放在：
 

@@ -90,7 +90,7 @@ V2-12 不能放松任何已经冻结的硬约束。特别是：
 新增代码优先按以下结构组织；只有存在真实职责时才建文件：
 
 ```text
-tradehelper_v2/
+
   application/
     analysis.py          # 单股 use case
     portfolio_analysis.py# 组合 use case
@@ -123,7 +123,7 @@ requirements*.txt
 
 禁止：
 
-- `tradehelper_v2/runtime` import `core/`, `services/`, `data/`, `ui/` 等 V1 包。
+- `runtime` import `core/`, `services/`, `data/`, `ui/` 等 V1 包。
 - UI 直接实例化 Provider、SQLite 或业务引擎。
 - migration reader 调用 V1 `Database`/`Settings` 单例。
 - application use case 通过解析报告字符串传递业务状态。
@@ -765,3 +765,36 @@ V2-12 以及 TradeHelper 2.0 只有同时满足以下条件才算完成：
 当前本机证据：RL00-RL79 验收 `91 passed`；V2/项目全量 `819 passed, 4 skipped`；3 条真实 Provider 与 1 条真实 LLM 测试显式开启后全部通过；真实 V1 数据库迁移 19,112 项且源库未改变；macOS 包内 runtime smoke 通过。Flet 内嵌 framework 的 PyInstaller 临时签名仍有警告，本机可运行不等于已完成 Developer ID 签名或公证。Windows spec、bat 与 CI 已统一，但第 7 条中的 Windows 本地和 GitHub Windows 产物启动必须在对应 runner 真实执行，因此在该证据产生前不宣称跨平台发布门槛全部完成。
 
 V2-12 完成后不自动开始券商自动下单、Web 发布或 2.1 新功能；这些必须另立设计和风险评审。
+
+## 25. 发布后兼容迁移说明（migration 18）
+
+V2-12 冻结合同仍以 migration 17 和 RL00-RL79 为准。2026-07-17 的首次真实桌面重复启动发现：migration 17 的关注列表迁移错误地将数据库迁移号 `17` 写入对象字段 `WatchlistSnapshot.schema_version`，而该对象合同版本应为 `1`。首次启动只写不读，因此问题在第二次启动恢复快照时暴露。
+
+修复采用追加 migration 18，不修改 migration 17 内容或 checksum：
+
+1. 只将 `watchlist_snapshots.schema_version=17` 的受影响迁移行改为对象合同版本 `1`。
+2. 新的 V1 关注列表迁移直接写入对象合同版本 `1`。
+3. repository 继续严格校验索引列与 payload，不能通过放松合同掩盖脏数据。
+4. 应用启动会正常执行 migration 18；新用户空库和已有用户数据库走同一迁移器，不需要手工清库。
+
+## 26. 预测验证状态持久化（migration 19）
+
+后台股票级 OOF 可能得到 Champion，也可能得到校准失败、未优于基线或样本不足。尚未形成可部署 artifact 的候选 selection/confirmation 指标保存在无模型外键的 `forecast_candidate_evaluations`；正式版本指标继续使用 `forecast_model_evaluations`。最终每股/周期结论使用独立的 `forecast_validation_summaries` 保存，避免把没有模型版本的失败结论伪装成模型记录。
+
+应用启动按 `market + scope_key + horizon` 恢复最新结论。经验基线因此能继续显示上一次真实验证状态和原因；新用户空库与已有数据库均自动执行 migration 19，无需清库。
+
+同轮将 Flet 启动 API 更新为 `ft.run()`，并完成 Tab1/Tab3 全宽桌面与窄屏视觉复核。Tab3 账户区明确切换美股/USD 和 A股/CNY，市场选择在账户为空时也保持稳定，并分别加载现金、持仓和关注列表。实时刷新采用两阶段时点：请求开始时间冻结数据请求边界，刷新过程中实际首次可见的新闻/基本面及报价观察时间形成统一决策截止时间；下游全部冻结在该截止时间，不能用放宽 PresentationInput 合同代替。V2 运行日志固定为工作目录下的 `logs/tradehelper_v2.log`，采用 5MB × 5 文件滚动、终端同步、用户私有权限和凭据脱敏，覆盖启动、迁移、分析、逐股数据/构建异常及后台任务。项目全量结果为 `827 passed, 4 skipped`。
+
+## 26. 发布后桌面交互与预测接线复核（2026-07-20）
+
+真实桌面运行进一步确认并修复以下实现偏差：Flet 不支持的控件会导致按钮看似无响应；临时 Web 重连不得触发 RuntimeContainer 关闭；报告详情不能被可扩展输入框遮挡；宽表必须在自身区域横向滚动。Tab1/Tab3 现在提供开始、运行、取消、完成和失败的显式反馈，报告直接消费冻结 `ReportDocument` 的结构化块，不在 UI 内重算业务结论。
+
+冷启动预测必须落实 10.2 的完整语义：正式分析从已完成日 K 构造有上限的 point-in-time 技术样本，前台用这些样本生成经验基线，后台单线程执行候选 OOF，只有 confirmation 通过才原子晋升并在下一次分析生效。日 K repository 命中必须同时验证请求窗口起点和末端；短窗口缓存不能满足长窗口请求。单股和组合默认改为 1 年窗口，较短窗口明确提示可能无法满足 OOF 门槛。
+
+本机真实 AAPL 盘后验证中，一年请求从原先错误命中的 96 根缓存补齐为 370 根；主报告约 12.6 秒完成并输出四周期概率与收益区间，后台 OOF 随后完成。本次候选概率校准未通过，未晋升为 Champion，符合“不以差模型冒充可信模型”的要求。项目全量结果更新为 `834 passed, 4 skipped`。
+
+## 27. Tab3 报告可执行性与导出反馈复核（2026-07-20）
+
+真实 4 持仓加 7 关注股盘后运行暴露并修复了三类发布后偏差。第一，利润锁定必须先证明高水位达到最低盈利门槛，不能把当前价同时约束在互相冲突的上下界；持仓排序先比较 `PlanReadiness`，已触发计划不得被尚未触发计划遮盖。通用全卖保护只使用成本硬止损，成本未知时才以 MA60 兜底；趋势破坏和锁利分别由专门策略处理。第二，组合首页每股/profile 只呈现一个首要动作，退出资金、账户现金和本轮可新增额度分别解释，详细备选条件继续保留且任一成交后重算。第三，历史 outcome 按账本聚合为通俗结果，不再把内部类名作为用户内容。
+
+盘后报告明确使用已完成日K，不把缺少实时 QuoteSnapshot 描述成数据缺失；已触发但因闭市不能立即执行的计划写为“待下一可交易时段复核”。导出结果页持续显示忙碌、成功或失败状态，成功后调用系统文件管理器定位文件。最终 V2 回归为 `843 passed, 4 skipped`，并使用 production composition 对真实 11 股组合完成多次主链运行与 HTML 导出；最终报告中 FCX 为锁利减仓，LITE/SPCX/WDC 保留成本硬止损全卖。

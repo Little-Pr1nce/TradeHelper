@@ -1,8 +1,8 @@
 from dataclasses import replace
 from datetime import timedelta
 
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.strategies import StrategyEngine
+from data.repository import SQLiteRepository
+from strategies import StrategyEngine
 from strategy_helpers import strategy_input
 
 

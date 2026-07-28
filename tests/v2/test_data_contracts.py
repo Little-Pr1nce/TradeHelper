@@ -2,8 +2,8 @@ from datetime import date
 
 import pytest
 
-from tradehelper_v2.contracts import ContractViolation, InstrumentId, Market
-from tradehelper_v2.data.providers import parse_nasdaq_quote, parse_tickflow_bars
+from contracts import ContractViolation, InstrumentId, Market
+from data.providers import parse_nasdaq_quote, parse_tickflow_bars
 
 
 @pytest.mark.parametrize(("code", "market", "exchange", "expected"), [

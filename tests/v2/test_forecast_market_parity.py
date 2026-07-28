@@ -1,6 +1,6 @@
-from tradehelper_v2.contracts import ModelFamily, ModelSpec
-from tradehelper_v2.forecast.labels import direction_label, flat_band
-from tradehelper_v2.forecast.models import fit_model, predict_model
+from contracts import ModelFamily, ModelSpec
+from forecast.labels import direction_label, flat_band
+from forecast.models import fit_model, predict_model
 from tests.v2.forecast_helpers import synthetic_samples
 
 

@@ -1,8 +1,8 @@
 from datetime import timedelta
 import json
 
-from tradehelper_v2.data.repository import SQLiteRepository
-from tradehelper_v2.risk import RiskOfficer
+from data.repository import SQLiteRepository
+from risk import RiskOfficer
 from risk_helpers import request_for
 
 

@@ -54,7 +54,7 @@ StrategyBundle + TradingScenario
 ## 3. 代码位置
 
 ```text
-tradehelper_v2/
+
   contracts/
     risk.py                 # 风控输入、估值、证据、规则和决策合同
   risk/

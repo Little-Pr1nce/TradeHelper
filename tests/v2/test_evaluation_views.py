@@ -5,8 +5,8 @@ from datetime import timedelta
 import pytest
 
 from presentation_helpers import forecast_outcome
-from tradehelper_v2.application.evaluation import HistoricalEvaluationService, maturity_message
-from tradehelper_v2.contracts import ContractViolation, HistoricalEvaluationQuery, LedgerKind, LedgerViewKind, LearningMetricSnapshot, Market, stable_hash
+from application.evaluation import HistoricalEvaluationService, maturity_message
+from contracts import ContractViolation, HistoricalEvaluationQuery, LedgerKind, LedgerViewKind, LearningMetricSnapshot, Market, stable_hash
 
 
 def test_ux20_maturity_thresholds():

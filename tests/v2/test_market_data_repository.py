@@ -3,12 +3,12 @@ from datetime import date, timedelta
 
 import pytest
 
-from tradehelper_v2.contracts import (
+from contracts import (
     AdjustmentMode, CanonicalBar, ContractViolation, FreshnessStatus, FundamentalSnapshot,
     FundamentalValue, Market, NewsSnapshot, QualityStatus,
 )
-from tradehelper_v2.contracts.enums import TradingSession
-from tradehelper_v2.data.repository import SQLiteRepository
+from contracts.enums import TradingSession
+from data.repository import SQLiteRepository
 
 
 def test_g50_quote_does_not_pollute_daily_bars(tmp_path, us_instrument, bar_factory, quote_factory, now) -> None:

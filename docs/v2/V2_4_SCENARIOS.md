@@ -51,14 +51,14 @@ ForecastResult bundle + origin/current snapshots + quality + decision session
 V2-4 实现只允许新增或修改：
 
 ```text
-tradehelper_v2/contracts/scenario.py
-tradehelper_v2/scenario/__init__.py
-tradehelper_v2/scenario/planner.py
-tradehelper_v2/scenario/policy.py
-tradehelper_v2/scenario/facts.py
-tradehelper_v2/data/calendar.py          # 仅扩展正式会话窗口合同
-tradehelper_v2/data/migrations/schema.py # migration 8
-tradehelper_v2/data/repository.py        # TradingScenario 幂等读写
+contracts/scenario.py
+scenario/__init__.py
+scenario/planner.py
+scenario/policy.py
+scenario/facts.py
+data/calendar.py          # 仅扩展正式会话窗口合同
+data/migrations/schema.py # migration 8
+data/repository.py        # TradingScenario 幂等读写
 tests/v2/test_scenario_*.py
 ```
 
@@ -66,11 +66,11 @@ tests/v2/test_scenario_*.py
 
 ```text
 V1 core/services/strategies/backtest/report/ui
-tradehelper_v2/strategies
-tradehelper_v2/risk
-tradehelper_v2/execution
-tradehelper_v2/portfolio
-tradehelper_v2/learning
+strategies
+risk
+execution
+portfolio
+learning
 LLM clients
 ```
 

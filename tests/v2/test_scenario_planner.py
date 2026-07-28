@@ -1,9 +1,9 @@
 from dataclasses import replace
 from datetime import date, datetime, timezone
 
-from tradehelper_v2.contracts import *
-from tradehelper_v2.scenario import ScenarioPlanner
-from tradehelper_v2.forecast.feature_sets import model_input_hash
+from contracts import *
+from scenario import ScenarioPlanner
+from forecast.feature_sets import model_input_hash
 
 NOW=datetime(2026,7,10,14,tzinfo=timezone.utc)
 
@@ -76,3 +76,14 @@ def test_sc06_probability_distribution_mismatch_and_weak_margin_are_weak(us_inst
     assert "PROBABILITY_DISTRIBUTION_NOT_ALIGNED" in scenario.horizon_assessments[0].reason_codes
     assert scenario.horizon_assessments[1].signal is HorizonSignal.WEAK
     assert "FORECAST_MARGIN_WEAK" in scenario.horizon_assessments[1].reason_codes
+
+
+def test_noninferior_forecast_is_visible_but_marked_for_risk_cap(us_instrument):
+    request = _request(us_instrument, [_forecast(us_instrument, h) for h in (1, 3, 5, 10)])
+    forecasts = tuple(
+        replace(item, validation_status=ValidationStatus.NONINFERIOR_PASSED)
+        for item in request.forecasts
+    )
+    scenario = ScenarioPlanner().build(replace(request, forecasts=forecasts))
+    assert scenario.forecast_support is ForecastSupportLevel.CONFIRMED
+    assert "FORECAST_STOCK_NONINFERIOR" in scenario.reason_codes

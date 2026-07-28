@@ -1,5 +1,5 @@
-from tradehelper_v2.contracts import DirectionProbabilities, ForecastDirection, ReturnDistribution
-from tradehelper_v2.forecast.diagnostics import evaluate_predictions, paired_brier_improvement_interval
+from contracts import DirectionProbabilities, ForecastDirection, ReturnDistribution
+from forecast.diagnostics import evaluate_predictions, paired_brier_improvement_interval
 
 
 def test_fc09_diagnostics_are_deterministic_and_calibrated_arrays_align() -> None:

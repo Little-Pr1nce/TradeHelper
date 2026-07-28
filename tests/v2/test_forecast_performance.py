@@ -2,8 +2,8 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 from time import perf_counter
 
-from tradehelper_v2.contracts import ForecastScope
-from tradehelper_v2.forecast.trainer import ForecastTrainer
+from contracts import ForecastScope
+from forecast.trainer import ForecastTrainer
 from tests.v2.forecast_helpers import synthetic_samples
 
 

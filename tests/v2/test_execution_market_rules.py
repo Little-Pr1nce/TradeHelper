@@ -3,9 +3,9 @@ from datetime import timedelta
 from decimal import Decimal
 
 from execution_helpers import intent_for
-from tradehelper_v2.contracts import ExecutionEvent, ExecutionState, EventGranularity, PlanAction, TradingStatus
-from tradehelper_v2.execution.market_rules import ExecutionMarketRules
-from tradehelper_v2.risk.market_rules import default_market_rules
+from contracts import ExecutionEvent, ExecutionState, EventGranularity, PlanAction, TradingStatus
+from execution.market_rules import ExecutionMarketRules
+from risk.market_rules import default_market_rules
 
 
 def _event(instrument, now, *, price="100", status=TradingStatus.OPEN, volume=Decimal("1000")):

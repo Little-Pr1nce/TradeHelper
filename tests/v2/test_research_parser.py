@@ -1,9 +1,9 @@
 """LL10--LL19：严格 JSON 解析边界。"""
 import json
 import pytest
-from tradehelper_v2.contracts import (InvocationStatus, RawResearchResponse, ResearchFact, ResearchScope, stable_hash)
-from tradehelper_v2.research.context import ResearchContextBuilder
-from tradehelper_v2.research.parser import StrictHypothesisParser
+from contracts import (InvocationStatus, RawResearchResponse, ResearchFact, ResearchScope, stable_hash)
+from research.context import ResearchContextBuilder
+from research.parser import StrictHypothesisParser
 
 def _context_response(instrument, now):
     fact_payload={"instrument":instrument,"key":"feature.closed.rsi_14","value":60.0,"status":"available","available_at":now,"source_refs":("fixture",),"source_payload_hash":None}; fact=ResearchFact(stable_hash(fact_payload),instrument,"feature.closed.rsi_14",60.0,"number",None,"available",now,("fixture",),None)

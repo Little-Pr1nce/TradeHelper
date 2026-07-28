@@ -1,4 +1,4 @@
-from tradehelper_v2.forecast.preprocessing import RobustMissingPreprocessor
+from forecast.preprocessing import RobustMissingPreprocessor
 
 
 def test_fc05_preprocessor_is_fit_only_on_training_rows() -> None:

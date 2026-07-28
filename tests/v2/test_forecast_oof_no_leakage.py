@@ -1,9 +1,9 @@
 from datetime import date
 from types import SimpleNamespace
 
-from tradehelper_v2.contracts import ModelFamily, ModelSpec, ForecastScope, ValidationStatus
-from tradehelper_v2.forecast.trainer import ForecastTrainer, selection_split_index
-from tradehelper_v2.forecast.labels import matured_samples
+from contracts import ModelFamily, ModelSpec, ForecastScope, ValidationStatus
+from forecast.trainer import ForecastTrainer, selection_split_index
+from forecast.labels import matured_samples
 from tests.v2.forecast_helpers import synthetic_samples
 
 
@@ -55,3 +55,25 @@ def test_fc11_random_series_is_deterministic_and_not_promoted(us_instrument) -> 
     assert first.status is ValidationStatus.EVALUATED_NOT_BETTER and first.champion is None
     assert second.status is first.status
     assert second.evaluations[0].selection == first.evaluations[0].selection
+
+
+def test_primary_brier_metric_ranks_before_stability_tiebreaker(monkeypatch) -> None:
+    lower_brier = (
+        SimpleNamespace(spec_id="lower", complexity_rank=2),
+        SimpleNamespace(selection=SimpleNamespace(
+            multiclass_brier=.50, log_loss=.90, expected_calibration_error=.10,
+        )),
+    )
+    higher_brier = (
+        SimpleNamespace(spec_id="higher", complexity_rank=1),
+        SimpleNamespace(selection=SimpleNamespace(
+            multiclass_brier=.51, log_loss=.80, expected_calibration_error=.05,
+        )),
+    )
+    monkeypatch.setattr(
+        ForecastTrainer,
+        "_selection_stability_score",
+        staticmethod(lambda _baseline, values: 100.0 if values == "unstable" else 0.0),
+    )
+    records = {"lower": "unstable", "higher": "stable"}
+    assert ForecastTrainer._selection_rank(lower_brier, (), records) < ForecastTrainer._selection_rank(higher_brier, (), records)

@@ -2,8 +2,8 @@ from datetime import timedelta
 
 import pytest
 
-from tradehelper_v2.contracts import ContractViolation, PlanAction, PlanReadiness
-from tradehelper_v2.strategies import StrategyEngine
+from contracts import ContractViolation, PlanAction, PlanReadiness
+from strategies import StrategyEngine
 from strategy_helpers import strategy_input
 
 

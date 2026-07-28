@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
-from tradehelper_v2.contracts import (
+from contracts import (
     AdjustmentMode, CanonicalBar, DataCapabilities, DataQualityReport, DecisionMode,
     FeatureEvidenceMode, FeatureInputs, Market, QualityAction, QualityStatus,
 )
-from tradehelper_v2.data.calendar import StaticTradingCalendar
+from data.calendar import StaticTradingCalendar
 
 
 def bars(instrument, count: int, *, start: date = date(2025, 1, 1), close_start: float = 100.0, volume: int = 1000, fetched_at: datetime) -> tuple[CanonicalBar, ...]:

@@ -38,7 +38,7 @@ for package in ("tickflow", "baostock", "httpx", "h11", "httpcore", "anyio", "se
         pass
 
 hiddenimports = [
-    "tradehelper_v2", "tradehelper_v2.runtime", "tradehelper_v2.migration",
+    "runtime", "migration",
     "flet", "akshare", "tickflow", "baostock", "yfinance", "requests",
     "transformers", "transformers.pipelines", "transformers.pipelines.text_classification",
     "tokenizers", "torch", "huggingface_hub", "openai", "reportlab",
@@ -48,8 +48,8 @@ hiddenimports = [
 hiddenimports += collect_submodules("jaraco")
 a = Analysis(["main.py"], pathex=[], binaries=[], datas=datas, hiddenimports=hiddenimports,
              hookspath=[], hooksconfig={}, runtime_hooks=[], excludes=[
-                 "alpha", "backtest", "config", "core", "data", "indicators", "report",
-                 "services", "strategies", "ui", "run_backtest", "tkinter", "test", "tests", "pytest", "xmlrpc",
+                 "alpha", "backtest", "core", "indicators", "report", "services",
+                 "run_backtest", "tkinter", "test", "tests", "pytest", "xmlrpc",
              ])
 pyz = PYZ(a.pure)
 common = dict(debug=False, bootloader_ignore_signals=False, strip=False, upx=True,
