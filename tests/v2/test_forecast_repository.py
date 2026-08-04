@@ -63,6 +63,21 @@ def test_fc15_forecast_result_is_idempotent_across_generation_times(tmp_path, us
     repository.close()
 
 
+def test_market_forecast_projection_keeps_a_share_and_us_records_separate(
+    tmp_path, us_instrument, a_instrument, now,
+) -> None:
+    repository = SQLiteRepository(tmp_path / "forecast-market.db")
+    us_result = _unavailable_result(us_instrument, now)
+    a_result = _unavailable_result(a_instrument, now)
+    try:
+        repository.save_forecast_result(us_result)
+        repository.save_forecast_result(a_result)
+        assert repository.list_market_forecast_results(us_instrument.market) == (us_result,)
+        assert repository.list_market_forecast_results(a_instrument.market) == (a_result,)
+    finally:
+        repository.close()
+
+
 def test_fc15_champion_and_evaluations_survive_restart(tmp_path, us_instrument, now) -> None:
     path = tmp_path / "forecast.db"; version = _model_version(us_instrument, now)
     repository = SQLiteRepository(path)

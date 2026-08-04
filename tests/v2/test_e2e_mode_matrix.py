@@ -106,5 +106,8 @@ def test_RL79_final_reports_answer_action_conditions_risk_history_and_forecast_f
         try:
             task=container.analysis.start_single({"market":market.value,"symbol":"AAPL" if market is Market.US else "600519","mode":"eod","history_period":"6m"})
             document=container.analysis._futures[task].result(timeout=15)
-            assert {"action_desk","forecast","plans","risk","history"}<={item.section_id for item in document.sections}
+            assert {
+                "action_summary","facts","forecast","operation_report",
+                "strategy_performance","research","history",
+            }=={item.section_id for item in document.sections}
         finally: container.close()

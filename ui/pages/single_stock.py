@@ -9,6 +9,7 @@ from contracts import ExportFormat
 from ..components.progress_panel import progress_panel
 from ..components.report_view import report_view
 from ..theme import PRIMARY, TEXT_MUTED, configure_field, feedback_banner, page_heading, panel, primary_button, secondary_button
+from ..update_dispatch import rebuild_on_page
 
 
 class SingleStockPage:
@@ -34,9 +35,7 @@ class SingleStockPage:
         return self.document is not None
 
     def _update(self):
-        if self._root is not None and self._root.page is not None:
-            self._root.content = self._content()
-            self._root.update()
+        rebuild_on_page(self._root, self._content)
 
     def set_document(self, document):
         self.document = document

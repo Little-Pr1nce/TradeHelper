@@ -33,12 +33,92 @@ def _paragraph(value, style):
     return Paragraph(escape(str(value)).replace("\n", "<br/>"), style)
 
 
+def _readable_cell(value):
+    text = str(value)
+    return text.replace("；", "\n") if len(text) >= 48 else text
+
+
+def _numbered_lines(value):
+    return "\n".join(
+        f"{index}. {item.strip()}"
+        for index, item in enumerate(str(value).splitlines(), 1)
+        if item.strip()
+    )
+
+
 def _table(value, styles, available_width):
-    data = [[_paragraph(column, styles["small"]) for column in value.columns]]
-    data.extend([[_paragraph(cell, styles["small"]) for cell in row.cells] for row in value.rows])
+    if value.table_id in {"portfolio_quick_actions", "single_quick_action"}:
+        data = [[_paragraph("股票与当前动作", styles["small"]), _paragraph("下一步与风险方案", styles["small"])]]
+        data.extend([
+            [
+                _paragraph(f"{row.cells[0]}\n{row.cells[1]}\n{_readable_cell(row.cells[2])}", styles["small"]),
+                _paragraph(f"下一步：\n{_readable_cell(row.cells[3])}\n\n{_readable_cell(row.cells[4])}", styles["small"]),
+            ]
+            for row in value.rows
+        ])
+        widths = [available_width * 0.30, available_width * 0.70]
+    elif value.table_id == "operation_editorial":
+        data = [[_paragraph("股票与结论", styles["small"]), _paragraph("理由与风险提醒", styles["small"])]]
+        data.extend([
+            [
+                _paragraph(f"{row.cells[0]}  ·  {row.cells[2]}\n{row.cells[1]}\n\n{row.cells[3]}", styles["small"]),
+                _paragraph(f"为什么：\n{row.cells[4]}\n\n风险提醒：{row.cells[5]}\n{row.cells[6]}", styles["small"]),
+            ]
+            for row in value.rows
+        ])
+        widths = [available_width * 0.38, available_width * 0.62]
+    elif value.table_id == "forecast_table":
+        data = [[_paragraph("预测周期", styles["small"]), _paragraph("预测内容与可信度", styles["small"])]]
+        data.extend([
+            [
+                _paragraph(f"{row.cells[0]}\n目标 {row.cells[1]}\n参考价 {row.cells[2]}", styles["small"]),
+                _paragraph(
+                    f"{row.cells[3]}\n{_readable_cell(row.cells[4])}\n"
+                    f"预计收益：{_readable_cell(row.cells[5])}\n依据：{_readable_cell(row.cells[6])}\n"
+                    f"历史：{_readable_cell(row.cells[7])}\n{row.cells[8]}",
+                    styles["small"],
+                ),
+            ]
+            for row in value.rows
+        ])
+        widths = [available_width * 0.24, available_width * 0.76]
+    elif value.table_id == "operation_table":
+        data = [[_paragraph("方案与动作", styles["small"]), _paragraph("执行步骤与风险", styles["small"])]]
+        data.extend([
+            [
+                _paragraph(f"{row.cells[0]}方案\n{row.cells[1]} {row.cells[2]}\n最大计划亏损 {row.cells[6]}", styles["small"]),
+                _paragraph(
+                    f"执行条件：\n{_readable_cell(row.cells[3])}\n\n"
+                    f"判断错了：{_readable_cell(row.cells[4])}\n"
+                    f"盈利后处理：{_readable_cell(row.cells[5])}\n有效期：{row.cells[7]}",
+                    styles["small"],
+                ),
+            ]
+            for row in value.rows
+        ])
+        widths = [available_width * 0.28, available_width * 0.72]
+    elif value.table_id in {"portfolio_exit_signals", "portfolio_entry_signals", "portfolio_hold_signals"}:
+        data = [[_paragraph("股票与系统判断", styles["small"]), _paragraph("触发步骤与执行方案", styles["small"])]]
+        data.extend([
+            [
+                _paragraph(
+                    f"{row.cells[0]}  ·  {row.cells[1]}\n分析价 {row.cells[2]}\n\n{row.cells[3]}",
+                    styles["small"],
+                ),
+                _paragraph(
+                    f"达到以下条件后再行动：\n{_numbered_lines(row.cells[4])}\n\n条件满足后的执行方案：\n{row.cells[5]}",
+                    styles["small"],
+                ),
+            ]
+            for row in value.rows
+        ])
+        widths = [available_width * 0.35, available_width * 0.65]
+    else:
+        data = [[_paragraph(column, styles["small"]) for column in value.columns]]
+        data.extend([[_paragraph(_readable_cell(cell), styles["small"]) for cell in row.cells] for row in value.rows])
+        widths = [available_width / len(value.columns)] * len(value.columns)
     if not value.rows:
-        data.append([_paragraph(value.empty_state or "暂无数据", styles["small"])] + [""] * (len(value.columns) - 1))
-    widths = [available_width / len(value.columns)] * len(value.columns)
+        data.append([_paragraph(value.empty_state or "暂无数据", styles["small"])] + [""] * (len(data[0]) - 1))
     table = Table(data, colWidths=widths, repeatRows=1, hAlign="LEFT")
     table.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), "STSong-Light"),

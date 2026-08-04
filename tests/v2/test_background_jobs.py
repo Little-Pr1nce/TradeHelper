@@ -213,7 +213,7 @@ def test_portfolio_research_uses_stable_chunks_and_returns_visible_empty_result(
             return {
                 "status":ResearchRunStatus.COMPLETED,"reason":None,"responses":(),
                 "hypotheses":(),"validations":(),"links":(),"candidates":(),
-                "attempted_chunks":2,"completed_chunks":2,"failure_reasons":(),
+                "attempted_chunks":3,"completed_chunks":3,"failure_reasons":(),
             }
     container=SimpleNamespace(
         settings=SimpleNamespace(llm_base_url="https://example.invalid",llm_api_key="test",llm_model="fixture"),
@@ -222,8 +222,8 @@ def test_portfolio_research_uses_stable_chunks_and_returns_visible_empty_result(
     pipeline=RuntimeAnalysisPipeline(container)
     pipeline._research_inputs[base.report_id]=presentation
     revised=pipeline._research_revision(base)
-    assert len(calls)==1 and [len(item[0]) for item in calls[0]]==[10,1]
-    assert "实际调用 2 个分片，成功 2 个" in next(section for section in revised.sections if section.section_id=="research").blocks[0].payload.rows[0].cells[1]
+    assert len(calls)==1 and [len(item[0]) for item in calls[0]]==[5,5,1]
+    assert "实际调用 3 个分片，成功 3 个" in next(section for section in revised.sections if section.section_id=="research").blocks[0].payload.rows[0].cells[1]
     table=next(section for section in revised.sections if section.section_id=="research").blocks[0].payload
     assert "调用完成" in table.rows[0].cells[1]
     assert "没有提出" in table.rows[0].cells[1]

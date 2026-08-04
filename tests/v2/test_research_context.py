@@ -45,13 +45,29 @@ def test_portfolio_prompt_is_stably_chunked_and_fact_bounded(now):
     manifest=builder.build_manifest(scope=ResearchScope.PORTFOLIO,market=Market.US,cutoff_at=now,instruments=instruments,facts=facts,generated_at=now)
     context=builder.build_context(scope=ResearchScope.PORTFOLIO,market=Market.US,mode="eod",cutoff_at=now,manifest=manifest,instrument_roles=tuple((item,"holding" if index<2 else "watchlist") for index,item in enumerate(reversed(instruments))),generated_at=now)
     chunks=build_prompt_chunks(context)
-    assert tuple(len(item[0]) for item in chunks)==(10,1)
+    assert tuple(len(item[0]) for item in chunks)==(5,5,1)
     assert chunks==build_prompt_chunks(context)
     assert all(sum(item["fact_id"]==global_fact.fact_id for item in json.loads(chunk[1])["facts"])==1 for chunk in chunks)
     payload=json.loads(chunks[0][1])
     assert payload["challenge_reference_catalog"]["fact_source_ref_type"]=="artifact"
+    assert set(payload["evidence_reference_catalog"])=={
+        "portfolio",*(item["instrument"] for item in payload["instrument_roles"]),
+    }
+    visible_refs={
+        fact_id
+        for refs in payload["evidence_reference_catalog"].values()
+        for fact_id in refs
+    }
+    evidence_schema=payload["output_schema"]["properties"]["hypotheses"]["items"]["oneOf"][0]["properties"]["evidence_refs"]["items"]
+    assert evidence_schema=={"type":"string"}
+    assert visible_refs=={item["fact_id"] for item in payload["facts"]}
+    instrument_facts=[
+        item["key"] for item in payload["facts"]
+        if item["instrument"]==payload["instrument_roles"][0]["instrument"]
+    ]
+    assert any(item.startswith("feature.") for item in instrument_facts)
     system_schema=next(item for item in payload["output_schema"]["properties"]["hypotheses"]["items"]["oneOf"] if item["properties"]["kind"].get("const")=="system_challenge")
-    assert set(system_schema["properties"]["payload"]["properties"]["challenged_artifact_type"]["enum"])=={"forecast","scenario","strategy","risk","portfolio","learning","artifact"}
+    assert system_schema["properties"]["payload"]["properties"]["challenged_artifact_type"]=={"const":"artifact"}
 
 
 def test_prompt_redacts_account_segment_without_trailing_dot(us_instrument,now):
@@ -109,7 +125,11 @@ def test_news_and_fundamental_snapshots_are_projected_with_sources_and_limits(us
     )
     prompt_facts=json.loads(build_prompt_chunks(context)[0][1])["facts"]
     projected={item["fact_id"]:item for item in prompt_facts}
-    assert all(projected[item.fact_id]["source_refs"]==list(item.source_refs) for item in titles+financial)
+    included=[item for item in titles+financial if item.fact_id in projected]
+    assert included
+    assert any(item in included for item in titles)
+    assert any(item in included for item in financial)
+    assert all(projected[item.fact_id]["source_refs"]==list(item.source_refs) for item in included)
 
 
 def test_strategy_projection_keeps_plan_protection_ids(us_instrument):

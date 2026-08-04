@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 from datetime import datetime,timezone
+import logging
+from time import perf_counter
 
 from contracts import InvocationStatus, ResearchRunStatus, stable_hash
 from .client import unavailable_response
 from .prompt import MAX_PROMPT_INSTRUMENTS
+
+logger = logging.getLogger(__name__)
 
 
 class ResearchEngine:
@@ -52,7 +56,19 @@ class ResearchEngine:
             return {"status": ResearchRunStatus.PARTIAL, "reason": "RESEARCH_SCHEMA_INVALID", "response": response, **empty}
         if allowed and any(item.instrument is not None and item.instrument.stable_key not in allowed for item in hypotheses):
             return {"status":ResearchRunStatus.PARTIAL,"reason":"RESEARCH_INSTRUMENT_UNKNOWN","response":response,**empty}
-        validations = tuple(self.validator.validate(item, context, evaluated_at=response.received_at) for item in hypotheses)
+        try:
+            validations = tuple(self.validator.validate(item, context, evaluated_at=response.received_at) for item in hypotheses)
+        except Exception:
+            logger.exception(
+                "Research validation rejected malformed hypothesis request_id=%s",
+                request.request_id,
+            )
+            return {
+                "status":ResearchRunStatus.PARTIAL,
+                "reason":"RESEARCH_VALIDATION_FAILED",
+                "response":response,
+                **empty,
+            }
         pairs=[]
         candidate_count=existing_candidate_count
         business_keys=set(existing_business_keys)
@@ -66,7 +82,7 @@ class ResearchEngine:
         return {"status": ResearchRunStatus.COMPLETED, "response": response, "hypotheses": hypotheses, "validations": validations, "links": tuple(item[0] for item in pairs), "candidates": tuple(item[1] for item in pairs if item[1] is not None)}
 
     def run_chunks(self, *, context, invocations, market, scope_key, base_version, search_space_hash, cancelled=lambda:False, existing_business_keys=(), existing_candidate_count=0):
-        """稳定分片依次执行，组合级总假设上限仍为 20。"""
+        """稳定分片依次执行；失败分片不丢弃其他分片的有效观察。"""
         if market is not context.market:
             raise ValueError("research engine market must match frozen context")
         collected={"responses":[],"hypotheses":[],"validations":[],"links":[],"candidates":[]}
@@ -87,8 +103,24 @@ class ResearchEngine:
             instrument_keys,request,client=invocation
             if tuple(sorted(set(instrument_keys))) != request.instrument_keys:
                 raise ValueError("chunk request instruments must match the prompt chunk")
+            started_at=perf_counter()
+            logger.info(
+                "Research chunk started request_id=%s model=%s instruments=%s max_output_tokens=%s",
+                request.request_id,request.model_name,",".join(instrument_keys),request.max_output_tokens,
+            )
             result=self.run(context=context,request=request,client=client,market=market,scope_key=scope_key,base_version=base_version,search_space_hash=search_space_hash,cancelled=cancelled,existing_business_keys=keys,existing_candidate_count=existing_candidate_count+len(collected["candidates"]),allowed_instrument_keys=instrument_keys)
-            if result["response"] is not None: collected["responses"].append(result["response"])
+            response=result["response"]
+            if response is not None:
+                collected["responses"].append(response)
+            logger.info(
+                "Research chunk finished request_id=%s status=%s reason=%s finish_reason=%s "
+                "response_chars=%s token_usage=%s hypotheses=%s duration_seconds=%.3f",
+                request.request_id,_value(result["status"]),result.get("reason") or "none",
+                getattr(response,"finish_reason",None) or "none",
+                len(getattr(response,"content","") or ""),
+                getattr(response,"token_usage",None) or "unknown",
+                len(result["hypotheses"]),perf_counter()-started_at,
+            )
             if result["status"] is not ResearchRunStatus.COMPLETED:
                 status=ResearchRunStatus.PARTIAL; reason=result.get("reason")
                 failure_reasons.append(reason or "RESEARCH_UNKNOWN_FAILURE")
@@ -108,3 +140,7 @@ class ResearchEngine:
             "attempted_chunks":attempted_chunks,"completed_chunks":completed_chunks,
             "failure_reasons":tuple(failure_reasons),
         }
+
+
+def _value(value):
+    return getattr(value,"value",value)

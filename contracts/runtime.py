@@ -83,17 +83,29 @@ class ReportRevisionLink:
 
 
 def report_revision_invariant(document) -> str:
-    """Hash every deterministic report field while excluding research sections."""
-    sections=tuple(item for item in document.sections if not item.section_id.startswith("research"))
+    """Hash deterministic report fields while excluding research and editor prose."""
+    sections=[]
+    for section in document.sections:
+        if section.section_id.startswith("research"):
+            continue
+        blocks=tuple(
+            block for block in section.blocks
+            if not (
+                getattr(block.kind,"value",block.kind)=="table"
+                and getattr(block.payload,"table_id",None)=="operation_editorial"
+            )
+        )
+        sections.append((section.section_id,section.title,section.purpose,section.severity,blocks))
+    sections=tuple(sections)
     refs=tuple(sorted({
         ref
-        for section in sections
-        for block in section.blocks
+        for _section_id,_title,_purpose,_severity,blocks in sections
+        for block in blocks
         for ref in block.source_artifact_refs
     } | {
         ref
-        for section in sections
-        for block in section.blocks
+        for _section_id,_title,_purpose,_severity,blocks in sections
+        for block in blocks
         if getattr(block.kind,"value",block.kind)=="table"
         for row in block.payload.rows
         for ref in row.source_artifact_refs

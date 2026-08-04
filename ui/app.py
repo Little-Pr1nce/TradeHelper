@@ -4,13 +4,17 @@ import flet as ft
 
 from .theme import BACKGROUND, BORDER, NAV, PRIMARY, PRIMARY_DARK, PRIMARY_SOFT, SURFACE, TEXT_MUTED
 
-def build_app(single_stock, history, portfolio, settings, migration=None):
+def build_app(single_stock, history, portfolio, settings, migration=None, evaluation=None):
     items = [
         ("单股分析", ft.Icons.QUERY_STATS_OUTLINED, ft.Icons.QUERY_STATS, single_stock.build()),
-        ("历史报告", ft.Icons.HISTORY_OUTLINED, ft.Icons.HISTORY, history.build()),
         ("我的持仓", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED, ft.Icons.ACCOUNT_BALANCE_WALLET, portfolio.build()),
-        ("设置", ft.Icons.SETTINGS_OUTLINED, ft.Icons.SETTINGS, settings),
     ]
+    if evaluation is not None:
+        items.append(("能力评估", ft.Icons.INSIGHTS_OUTLINED, ft.Icons.INSIGHTS, evaluation.build()))
+    items.extend([
+        ("报告记录", ft.Icons.HISTORY_OUTLINED, ft.Icons.HISTORY, history.build()),
+        ("设置", ft.Icons.SETTINGS_OUTLINED, ft.Icons.SETTINGS, settings),
+    ])
     if migration is not None:
         items.append(("数据迁移", ft.Icons.SYNC_OUTLINED, ft.Icons.SYNC, migration.build()))
 
@@ -29,6 +33,10 @@ def build_app(single_stock, history, portfolio, settings, migration=None):
             current.update()
             for view in views:
                 view.update()
+        if evaluation is not None and items[selected][0] == "能力评估":
+            on_show = getattr(evaluation, "on_show", None)
+            if on_show is not None:
+                on_show()
 
     header = ft.Container(
         bgcolor=SURFACE,

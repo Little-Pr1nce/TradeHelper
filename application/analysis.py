@@ -38,7 +38,8 @@ from risk import freeze_account_valuation
 from risk.market_rules import default_market_rules
 from strategies.registry import default_specs
 from application.tasks import AnalysisTaskCoordinator
-from research.client import LLMResearchRequest, OpenAICompatibleResearchClient, ResearchClientCapabilities
+from application.report_editor import edit_report
+from research.client import LLMResearchRequest, OpenAICompatibleResearchClient, capabilities_for_endpoint, output_token_budget
 from research.context import ResearchContextBuilder
 from research.prompt import PROMPT_VERSION, build_prompt, build_prompt_chunks
 
@@ -535,6 +536,7 @@ class RuntimeAnalysisPipeline:
                     outcomes=historical_strategy_outcomes,
                     cutoff_at=as_of,
                     generated_at=as_of,
+                    action=plan.action.value,
                 )
                 self.container.repository.save_plan_evidence_snapshot(evidence)
                 learning_evidence.append(evidence)
@@ -672,11 +674,13 @@ class RuntimeAnalysisPipeline:
             risk_bundle_ids=(value.risk_bundle.risk_bundle_id,),generated_at=now)
         prompt,prompt_hash=build_prompt(context)
         request_id=stable_hash({"context":context.context_id,"prompt":prompt_hash,"model":self.container.settings.llm_model})
-        capabilities=ResearchClientCapabilities(False,True,False,False)
+        capabilities=capabilities_for_endpoint(self.container.settings.llm_base_url)
+        thinking_enabled=getattr(self.container.settings,"llm_enable_thinking",False)
         request=LLMResearchRequest.for_capabilities(capabilities=capabilities,request_id=request_id,
             context_id=context.context_id,prompt_version=PROMPT_VERSION,prompt_hash=prompt_hash,
             json_schema_version=1,provider_name="configured",model_name=self.container.settings.llm_model,
-            requested_at=now,instrument_keys=(value.instrument.stable_key,))
+            requested_at=now,instrument_keys=(value.instrument.stable_key,),
+            thinking_enabled=thinking_enabled,max_output_tokens=output_token_budget(thinking_enabled))
         client=OpenAICompatibleResearchClient(endpoint=self.container.settings.llm_base_url,
             api_key=self.container.settings.llm_api_key,prompts={request_id:prompt},capabilities=capabilities)
         result=self.container.research_engine.run(context=context,request=request,client=client,
@@ -686,11 +690,14 @@ class RuntimeAnalysisPipeline:
         response=result.get("response")
         if response is None: return None
         self.container.repository.save_research_result(context,response,result["hypotheses"],result["validations"],result["links"],candidates=result["candidates"])
-        if not result["hypotheses"]: return None
         payload={item.name:getattr(value,item.name) for item in fields(value) if item.name not in {"presentation_id","source_artifact_refs"}}
         payload.update(research_hypotheses=result["hypotheses"],research_validations=result["validations"],built_at=datetime.now(timezone.utc))
         revised=single_stock_input(**payload)
-        return SingleStockReportBuilder().build(revised)
+        builder=SingleStockReportBuilder()
+        revised_document=builder.build(revised)
+        editorial=edit_report(revised_document,self.container.settings)
+        if not result["hypotheses"] and editorial is None: return None
+        return builder.build(revised,editorial)
 
     def _portfolio_research_revision(self, base_document, value):
         builder=ResearchContextBuilder(); now=datetime.now(timezone.utc)
@@ -724,7 +731,8 @@ class RuntimeAnalysisPipeline:
             portfolio_bundle_id=value.portfolio_decision_bundle.portfolio_bundle_id,
             learning_snapshot_ids=tuple(item.snapshot_id for item in learning),generated_at=now,
         )
-        capabilities=ResearchClientCapabilities(False,True,False,False)
+        capabilities=capabilities_for_endpoint(self.container.settings.llm_base_url)
+        thinking_enabled=getattr(self.container.settings,"llm_enable_thinking",False)
         invocations=[]
         for keys,prompt,prompt_hash in build_prompt_chunks(context):
             request_id=stable_hash({"context":context.context_id,"prompt":prompt_hash,"model":self.container.settings.llm_model,"instruments":keys})
@@ -733,6 +741,7 @@ class RuntimeAnalysisPipeline:
                 prompt_version=PROMPT_VERSION,prompt_hash=prompt_hash,json_schema_version=1,
                 provider_name="configured",model_name=self.container.settings.llm_model,
                 requested_at=now,instrument_keys=keys,
+                thinking_enabled=thinking_enabled,max_output_tokens=output_token_budget(thinking_enabled),
             )
             client=OpenAICompatibleResearchClient(
                 endpoint=self.container.settings.llm_base_url,api_key=self.container.settings.llm_api_key,
@@ -782,7 +791,10 @@ class RuntimeAnalysisPipeline:
             built_at=max(completed_at,value.built_at),
         )
         revised=portfolio_input(**payload)
-        return PortfolioReportBuilder().build(revised)
+        builder=PortfolioReportBuilder()
+        revised_document=builder.build(revised)
+        editorial=edit_report(revised_document,self.container.settings)
+        return builder.build(revised,editorial)
 
     def portfolio(self, command, *, on_progress=None):
         account = self.container.repository.get_latest_account_snapshot(command.market)

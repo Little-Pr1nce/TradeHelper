@@ -9,7 +9,7 @@ import pytest
 
 from config.settings import V2Settings
 from contracts import InstrumentId,InvocationStatus,Market,ResearchScope,stable_hash
-from research.client import LLMResearchRequest,OpenAICompatibleResearchClient,ResearchClientCapabilities
+from research.client import LLMResearchRequest,OpenAICompatibleResearchClient,capabilities_for_endpoint,output_token_budget
 from research.context import ResearchContextBuilder
 from research.parser import StrictHypothesisParser
 from research.prompt import PROMPT_VERSION,build_prompt
@@ -40,10 +40,11 @@ def test_RL78_live_llm_strict_json_and_secret_redaction():
     context=builder.build_context(scope=ResearchScope.SINGLE_STOCK,market=Market.US,mode="eod",cutoff_at=now,manifest=manifest,instrument_roles=((instrument,"subject"),),generated_at=now)
     prompt,prompt_hash=build_prompt(context)
     assert "12345" not in prompt
-    request=LLMResearchRequest("live-research-smoke",context.context_id,PROMPT_VERSION,prompt_hash,1,"configured",settings.llm_model,now,max_output_tokens=4000,timeout_seconds=90,thinking_enabled=False)
+    capabilities=capabilities_for_endpoint(settings.llm_base_url)
+    request=LLMResearchRequest.for_capabilities(capabilities=capabilities,request_id="live-research-smoke",context_id=context.context_id,prompt_version=PROMPT_VERSION,prompt_hash=prompt_hash,json_schema_version=1,provider_name="configured",model_name=settings.llm_model,requested_at=now,max_output_tokens=output_token_budget(settings.llm_enable_thinking),timeout_seconds=90,thinking_enabled=settings.llm_enable_thinking)
     client=OpenAICompatibleResearchClient(
         endpoint=settings.llm_base_url,api_key=settings.llm_api_key,prompts={request.request_id:prompt},
-        capabilities=ResearchClientCapabilities(False,True,False,False),
+        capabilities=capabilities,
     )
     response=client.generate(request)
     assert response.invocation_status is InvocationStatus.SUCCEEDED

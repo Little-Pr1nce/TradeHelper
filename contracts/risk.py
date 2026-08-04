@@ -143,10 +143,12 @@ class PositionAvailability:
 @dataclass(frozen=True, slots=True)
 class PlanEvidenceSnapshot:
     evidence_id: str; instrument: InstrumentId; strategy_id: str; strategy_version: str; parameter_hash: str; profile: RiskProfile | None; sample_count: int; oof_sample_count: int; expected_net_return: float | None; confidence_low: float | None; confidence_high: float | None; win_rate: float | None; max_adverse_excursion: float | None; status: EvidenceStatus; source_ledger_version: str; data_cutoff_at: datetime; evaluated_at: datetime; generated_at: datetime
+    action: str | None = None
     def __post_init__(self):
         status = _enum(EvidenceStatus, self.status, "evidence status"); profile = None if self.profile is None else _enum(RiskProfile, self.profile, "evidence profile")
         _hash(self.parameter_hash, "evidence parameter hash")
         if self.sample_count < 0 or self.oof_sample_count < 0 or self.oof_sample_count > self.sample_count or not self.strategy_id or not self.strategy_version or not self.source_ledger_version: raise ContractViolation("invalid evidence samples")
+        if self.action is not None and self.action not in {"buy", "add", "sell", "reduce", "hold", "watch"}: raise ContractViolation("invalid evidence action")
         values = (self.expected_net_return, self.confidence_low, self.confidence_high, self.win_rate, self.max_adverse_excursion)
         if status is EvidenceStatus.CONFLICTING:
             pass
@@ -164,6 +166,8 @@ class PlanEvidenceSnapshot:
         computed = self._status()
         if computed is not status: raise ContractViolation("evidence status does not match metrics")
         identity = {"instrument": self.instrument, "strategy_id": self.strategy_id, "strategy_version": self.strategy_version, "parameter_hash": self.parameter_hash, "profile": profile, "sample_count": self.sample_count, "oof_sample_count": self.oof_sample_count, "metrics": values, "status": status, "source_ledger_version": self.source_ledger_version, "data_cutoff_at": data_at, "evaluated_at": evaluated}
+        # Legacy snapshots predate action-specific evidence and keep their old identity.
+        if self.action is not None: identity["action"] = self.action
         expected = stable_hash(identity)
         if self.evidence_id != expected: raise ContractViolation("evidence identity mismatch")
         object.__setattr__(self, "status", status); object.__setattr__(self, "profile", profile); object.__setattr__(self, "data_cutoff_at", data_at); object.__setattr__(self, "evaluated_at", evaluated); object.__setattr__(self, "generated_at", generated)

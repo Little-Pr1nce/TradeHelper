@@ -498,13 +498,13 @@ class AnalysisTaskProgress:
 
 @dataclass(frozen=True, slots=True)
 class HistoricalEvaluationQuery:
-    market:Market; ledger_kind:LedgerViewKind|None=None; instrument:InstrumentId|None=None; horizon:int|None=None; model_version:str|None=None; strategy_id:str|None=None; market_regime_key:str|None=None; evidence_origin:str|None=None; date_from:datetime|None=None; date_to:datetime|None=None; include_unverifiable:bool=False
+    market:Market; ledger_kind:LedgerViewKind|None=None; instrument:InstrumentId|None=None; horizon:int|None=None; model_version:str|None=None; strategy_id:str|None=None; market_regime_key:str|None=None; evidence_origin:str|None=None; date_from:datetime|None=None; date_to:datetime|None=None; include_unverifiable:bool=False; analysis_mode:DecisionMode|None=None; report_kind:ReportKind|None=None
     def __post_init__(self):
         market=_enum(Market,self.market,"evaluation market")
         if self.instrument and self.instrument.market is not market or self.horizon is not None and self.horizon not in {1,3,5,10}: raise ContractViolation("invalid evaluation query")
         start=None if self.date_from is None else ensure_utc(self.date_from,"evaluation date_from"); end=None if self.date_to is None else ensure_utc(self.date_to,"evaluation date_to")
         if start and end and end<start: raise ContractViolation("evaluation range is reversed")
-        object.__setattr__(self,"market",market); object.__setattr__(self,"ledger_kind",None if self.ledger_kind is None else _enum(LedgerViewKind,self.ledger_kind,"ledger kind")); object.__setattr__(self,"date_from",start); object.__setattr__(self,"date_to",end)
+        object.__setattr__(self,"market",market); object.__setattr__(self,"ledger_kind",None if self.ledger_kind is None else _enum(LedgerViewKind,self.ledger_kind,"ledger kind")); object.__setattr__(self,"analysis_mode",None if self.analysis_mode is None else _enum(DecisionMode,self.analysis_mode,"evaluation mode")); object.__setattr__(self,"report_kind",None if self.report_kind is None else _enum(ReportKind,self.report_kind,"evaluation report kind")); object.__setattr__(self,"date_from",start); object.__setattr__(self,"date_to",end)
 
 
 @dataclass(frozen=True, slots=True)

@@ -24,7 +24,7 @@ def test_RL30_us_eod_full_chain_builds_next_session_plan(tmp_path):
     container,document,_=_run(tmp_path,Market.US,DecisionMode.EOD)
     try:
         assert document.report_kind is ReportKind.SINGLE_STOCK
-        assert {"forecast","plans","risk"}<={item.section_id for item in document.sections}
+        assert {"forecast","operation_report","strategy_performance"}<={item.section_id for item in document.sections}
     finally: container.close()
 
 
@@ -41,7 +41,7 @@ def test_RL32_us_pre_market_quote_enters_current_condition_plan(tmp_path):
     container,document,_=_run(tmp_path,Market.US,DecisionMode.PRE)
     try:
         assert document.analysis_mode is DecisionMode.PRE
-        assert any(section.section_id=="plans" for section in document.sections)
+        assert any(section.section_id=="operation_report" for section in document.sections)
     finally: container.close()
 
 
@@ -49,7 +49,7 @@ def test_RL33_a_share_eod_full_chain_builds_next_session_plan(tmp_path):
     container,document,_=_run(tmp_path,Market.A,DecisionMode.EOD)
     try:
         assert document.market is Market.A
-        assert any(section.section_id=="plans" for section in document.sections)
+        assert any(section.section_id=="operation_report" for section in document.sections)
     finally: container.close()
 
 
@@ -57,7 +57,7 @@ def test_RL34_a_share_intraday_chain_applies_market_risk_rules(tmp_path):
     container,document,_=_run(tmp_path,Market.A,DecisionMode.INTRADAY)
     try:
         risk=container.repository._connection.execute("SELECT COUNT(*) FROM risk_decision_bundles").fetchone()[0]
-        assert risk==1 and any(section.section_id=="risk" for section in document.sections)
+        assert risk==1 and any(section.section_id=="operation_report" for section in document.sections)
     finally: container.close()
 
 
@@ -68,7 +68,7 @@ def test_RL35_a_share_pre_without_quote_keeps_t1_conditional_plan(tmp_path):
     command=SingleStockAnalysisCommand(stable_hash(identity),instruments[0],DecisionMode.PRE,"6m",now,stable_hash(account))
     try:
         document=RuntimeAnalysisPipeline(container).single_stock(command)
-        assert document.analysis_mode is DecisionMode.PRE and any(item.section_id=="plans" for item in document.sections)
+        assert document.analysis_mode is DecisionMode.PRE and any(item.section_id=="operation_report" for item in document.sections)
     finally: container.close()
 
 
@@ -108,6 +108,6 @@ def test_RL39_single_report_answers_branches_loss_invalidation_and_target_date(t
     container,document,_=_run(tmp_path,Market.US,DecisionMode.EOD)
     try:
         text=" ".join((document.summary,*(section.purpose for section in document.sections)))
-        assert {"plans","risk","forecast"}<={item.section_id for item in document.sections}
+        assert {"operation_report","strategy_performance","forecast"}<={item.section_id for item in document.sections}
         assert document.source_artifact_refs and text
     finally: container.close()

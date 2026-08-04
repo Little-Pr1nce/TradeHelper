@@ -822,6 +822,24 @@ class SQLiteRepository:
         sql += " ORDER BY origin_session_date, horizon, event_key"
         return tuple(self._forecast_result_from_payload(json.loads(row["payload_json"])) for row in self._fetchall(sql, parameters))
 
+    def list_market_forecast_results(self, market: Market) -> tuple[ForecastResult, ...]:
+        """Return issued forecasts for source-reference resolution.
+
+        Report source references hash forecast event keys that contain unsafe
+        delimiter characters.  Recomputing the canonical source reference is
+        therefore the only reliable way to join a frozen report back to the
+        exact issued forecast.
+        """
+        rows = self._fetchall(
+            "SELECT payload_json FROM forecast_snapshots "
+            "WHERE instrument_key LIKE ? ORDER BY origin_session_date, horizon, event_key",
+            (f"{market.value}:%",),
+        )
+        return tuple(
+            self._forecast_result_from_payload(json.loads(row["payload_json"]))
+            for row in rows
+        )
+
     def save_forecast_result(self, result: ForecastResult) -> ForecastWriteResult:
         """按 event_key 幂等记录预测发行事实；冲突不覆盖而是 quarantine。"""
         identity_payload = json.loads(canonical_json(result))
@@ -1241,7 +1259,7 @@ class SQLiteRepository:
         rule = payload["market_rules"]
         market_rules = MarketRuleSet(rule["rule_version"], Market(rule["market"]), Exchange(rule["exchange"]), Decimal(rule["lot_size"]), bool(rule["same_day_sell_restricted"]), Decimal(rule["commission_rate"]), Decimal(rule["minimum_commission"]), Decimal(rule["sell_tax_rate"]), Decimal(rule["base_slippage_reserve"]), rule["price_limit_pct"], InstrumentClassification(rule["instrument_classification"]), rule["source"], _parse_datetime(rule["effective_from"]), _parse_datetime(rule["effective_to"]) if rule["effective_to"] else None)
         evidence_raw = payload["plan_evidence"]
-        evidence = None if evidence_raw is None else PlanEvidenceSnapshot(evidence_raw["evidence_id"], cls._portfolio_instrument(evidence_raw["instrument"]), evidence_raw["strategy_id"], evidence_raw["strategy_version"], evidence_raw["parameter_hash"], RiskProfile(evidence_raw["profile"]) if evidence_raw["profile"] else None, int(evidence_raw["sample_count"]), int(evidence_raw["oof_sample_count"]), evidence_raw["expected_net_return"], evidence_raw["confidence_low"], evidence_raw["confidence_high"], evidence_raw["win_rate"], evidence_raw["max_adverse_excursion"], EvidenceStatus(evidence_raw["status"]), evidence_raw["source_ledger_version"], _parse_datetime(evidence_raw["data_cutoff_at"]), _parse_datetime(evidence_raw["evaluated_at"]), _parse_datetime(evidence_raw["generated_at"]))
+        evidence = None if evidence_raw is None else PlanEvidenceSnapshot(evidence_raw["evidence_id"], cls._portfolio_instrument(evidence_raw["instrument"]), evidence_raw["strategy_id"], evidence_raw["strategy_version"], evidence_raw["parameter_hash"], RiskProfile(evidence_raw["profile"]) if evidence_raw["profile"] else None, int(evidence_raw["sample_count"]), int(evidence_raw["oof_sample_count"]), evidence_raw["expected_net_return"], evidence_raw["confidence_low"], evidence_raw["confidence_high"], evidence_raw["win_rate"], evidence_raw["max_adverse_excursion"], EvidenceStatus(evidence_raw["status"]), evidence_raw["source_ledger_version"], _parse_datetime(evidence_raw["data_cutoff_at"]), _parse_datetime(evidence_raw["evaluated_at"]), _parse_datetime(evidence_raw["generated_at"]), evidence_raw.get("action"))
         return PortfolioCandidate(payload["candidate_id"], PortfolioRole(payload["role"]), cls._scenario_from_payload(payload["trading_scenario"]), cls._plan_from_payload(payload["trade_plan"]), cls._decision_from_payload(payload["execution_decision"]), evidence, market_rules, _parse_datetime(payload["generated_at"]), int(payload.get("schema_version", 1)))
 
     @classmethod
@@ -1643,7 +1661,12 @@ class SQLiteRepository:
         )
         learning_metrics=tuple(
             self.get_learning_metric_snapshot(row["snapshot_id"])
-            for row in self._fetchall("SELECT snapshot_id FROM learning_metric_snapshots ORDER BY generated_at")
+            for row in self._fetchall(
+                """SELECT snapshot_id FROM learning_metric_snapshots
+                   WHERE scope_key=? OR scope_key LIKE ?
+                   ORDER BY generated_at""",
+                (market.value,prefix+"%"),
+            )
         )
         research_metrics=tuple(
             self.get_research_metric_snapshot(row["snapshot_id"])
@@ -1685,7 +1708,7 @@ class SQLiteRepository:
     @staticmethod
     def _plan_evidence_from_payload(payload: dict) -> PlanEvidenceSnapshot:
         raw=payload["instrument"]; instrument=InstrumentId(raw["code"],Market(raw["market"]),Exchange(raw["exchange"]))
-        return PlanEvidenceSnapshot(payload["evidence_id"],instrument,payload["strategy_id"],payload["strategy_version"],payload["parameter_hash"],RiskProfile(payload["profile"]) if payload["profile"] else None,int(payload["sample_count"]),int(payload["oof_sample_count"]),payload["expected_net_return"],payload["confidence_low"],payload["confidence_high"],payload["win_rate"],payload["max_adverse_excursion"],EvidenceStatus(payload["status"]),payload["source_ledger_version"],_parse_datetime(payload["data_cutoff_at"]),_parse_datetime(payload["evaluated_at"]),_parse_datetime(payload["generated_at"]))
+        return PlanEvidenceSnapshot(payload["evidence_id"],instrument,payload["strategy_id"],payload["strategy_version"],payload["parameter_hash"],RiskProfile(payload["profile"]) if payload["profile"] else None,int(payload["sample_count"]),int(payload["oof_sample_count"]),payload["expected_net_return"],payload["confidence_low"],payload["confidence_high"],payload["win_rate"],payload["max_adverse_excursion"],EvidenceStatus(payload["status"]),payload["source_ledger_version"],_parse_datetime(payload["data_cutoff_at"]),_parse_datetime(payload["evaluated_at"]),_parse_datetime(payload["generated_at"]),payload.get("action"))
 
     def get_plan_evidence_snapshot(self, evidence_id: str) -> PlanEvidenceSnapshot | None:
         row=self._fetchone("SELECT * FROM plan_evidence_snapshots WHERE evidence_id=?",(evidence_id,))

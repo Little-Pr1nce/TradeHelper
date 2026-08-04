@@ -42,7 +42,7 @@ def _plain_text(value: object, name: str, maximum: int) -> str:
 
 
 class StrictHypothesisParser:
-    """拒绝猜测修复：一条无效响应整体不产生确定性 hypothesis。"""
+    """只接受显式冻结引用；允许无歧义的引用去重和 artifact 类型归一。"""
 
     def __init__(self, registry: ResearchMappingRegistry | None = None):
         self.registry = registry or default_research_registry()
@@ -89,16 +89,29 @@ class StrictHypothesisParser:
                 kind=HypothesisKind.IMPLEMENTATION_PROPOSAL
                 payload={"proposal_type":"unregistered_dsl_operator","research_question":f"Register and test predicate operator {exc}","required_inputs":("ConditionOperator","point_in_time_evidence"),"expected_benefit":"Preserve the research idea without executing an unregistered expression.","engineering_acceptance_notes":"Implement the operator in the shared V2-5 DSL and add dual-market replay tests before registration."}
             predicate_refs=self._predicate_refs(payload.get("predicate"))
-            if predicate_refs and not predicate_refs.issubset(refs):
-                raise ContractViolation("research predicate facts must be declared as evidence")
+            undeclared_predicate_refs=predicate_refs-set(refs)
+            if any(facts[item].status!="available" for item in undeclared_predicate_refs):
+                raise ContractViolation("unavailable research predicate facts must be declared as evidence")
+            effective_refs=tuple(sorted(set(refs)|predicate_refs))
+            if instrument is not None and any(facts[item].instrument not in {None,instrument} for item in effective_refs):
+                raise ContractViolation("research predicate evidence belongs to another instrument")
+            if kind is HypothesisKind.SYSTEM_CHALLENGE and instrument is not None:
+                visible_artifacts={
+                    str(reference)
+                    for fact in facts.values() if fact.instrument in {None,instrument}
+                    for reference in (*fact.source_refs,fact.value)
+                    if isinstance(reference,(str,int,float)) and not isinstance(reference,bool)
+                }
+                if payload["challenged_artifact_id"] not in visible_artifacts:
+                    raise ContractViolation("research challenge artifact belongs to another instrument")
             kind, payload = self._implementation_if_unregistered(kind, payload)
             if kind is HypothesisKind.MODEL_CONFIGURATION:
-                kind,payload=self._bind_model_scope(kind,payload,instrument,refs,facts,context)
+                kind,payload=self._bind_model_scope(kind,payload,instrument,effective_refs,facts,context)
             title = _plain_text(raw["title"], "title", 80)
             thesis = _plain_text(raw["thesis"], "thesis", 500)
             business = stable_hash({"scope": context.scope.value, "instrument": instrument, "kind": kind.value, "payload": payload})
-            identity = {"business": business, "response": response.response_id, "context": context.context_id, "instrument": instrument, "kind": kind, "evidence": tuple(sorted(refs)), "payload": tuple(sorted(payload.items())), "novelty": HypothesisNovelty.NOVEL}
-            result.append(ResearchHypothesis(stable_hash(identity), business, response.response_id, context.context_id, instrument, kind, title, thesis, tuple(refs), tuple(payload.items()), HypothesisNovelty.NOVEL, response.received_at))
+            identity = {"business": business, "response": response.response_id, "context": context.context_id, "instrument": instrument, "kind": kind, "evidence": effective_refs, "payload": tuple(sorted(payload.items())), "novelty": HypothesisNovelty.NOVEL}
+            result.append(ResearchHypothesis(stable_hash(identity), business, response.response_id, context.context_id, instrument, kind, title, thesis, effective_refs, tuple(payload.items()), HypothesisNovelty.NOVEL, response.received_at))
         return tuple(result)
 
     def _implementation_if_unregistered(self, kind, payload):
@@ -166,9 +179,13 @@ class StrictHypothesisParser:
             self._exact(payload, {"challenged_artifact_type", "challenged_artifact_id", "challenge_kind"}, optional={"counterfactual_mapping"})
             artifact_type=payload["challenged_artifact_type"]
             artifact_id=payload["challenged_artifact_id"]
-            if not all(isinstance(payload[item], str) and payload[item] for item in ("challenged_artifact_type", "challenged_artifact_id")) or artifact_id not in self._artifact_ids(context) or artifact_id not in self._artifact_ids_by_type(context).get(artifact_type,set()) or payload["challenge_kind"] not in {"fact_disagreement", "forecast_disagreement", "missing_opportunity", "strategy_too_restrictive", "risk_too_restrictive", "data_quality_concern"}:
+            if not all(isinstance(payload[item], str) and payload[item] for item in ("challenged_artifact_type", "challenged_artifact_id")) or artifact_id not in self._artifact_ids(context) or artifact_type not in self._artifact_ids_by_type(context) or payload["challenge_kind"] not in {"fact_disagreement", "forecast_disagreement", "missing_opportunity", "strategy_too_restrictive", "risk_too_restrictive", "data_quality_concern"}:
                 raise ContractViolation("system challenge payload is invalid")
-            return {"challenged_artifact_type": payload["challenged_artifact_type"], "challenged_artifact_id": payload["challenged_artifact_id"], "challenge_kind": payload["challenge_kind"], "counterfactual_mapping": self._optional_token(payload.get("counterfactual_mapping"))}
+            if artifact_id not in self._artifact_ids_by_type(context)[artifact_type]:
+                if artifact_id not in context.manifest.artifact_refs:
+                    raise ContractViolation("system challenge payload is invalid")
+                artifact_type="artifact"
+            return {"challenged_artifact_type": artifact_type, "challenged_artifact_id": artifact_id, "challenge_kind": payload["challenge_kind"], "counterfactual_mapping": self._optional_token(payload.get("counterfactual_mapping"))}
         self._exact(payload, {"proposal_type", "research_question", "required_inputs", "expected_benefit", "engineering_acceptance_notes"})
         if not isinstance(payload["proposal_type"], str) or not isinstance(payload["required_inputs"], list) or not all(isinstance(item, str) and item for item in payload["required_inputs"]):
             raise ContractViolation("implementation proposal payload is invalid")
@@ -210,6 +227,12 @@ class StrictHypothesisParser:
                 raise ContractViolation("research predicate fact is invalid")
             fact = facts[value["fact_ref"]]
             constant = _finite_number(value["constant"], "predicate constant")
+            if fact.value is not None and (
+                isinstance(fact.value,bool)
+                or not isinstance(fact.value,(int,float))
+                or not isfinite(fact.value)
+            ):
+                raise ContractViolation("research predicate fact must be numeric")
             if fact.unit not in {None, "price", "ratio", "index"}:
                 raise ContractViolation("research predicate unit is unsupported")
             return {"op": op, "fact_ref": value["fact_ref"], "fact_key": fact.key, "unit": fact.unit, "constant": constant}
@@ -220,6 +243,14 @@ class StrictHypothesisParser:
             if lower > upper:
                 raise ContractViolation("research predicate range is inverted")
             fact = facts[value["fact_ref"]]
+            if fact.value is not None and (
+                isinstance(fact.value,bool)
+                or not isinstance(fact.value,(int,float))
+                or not isfinite(fact.value)
+            ):
+                raise ContractViolation("research predicate fact must be numeric")
+            if fact.unit not in {None, "price", "ratio", "index"}:
+                raise ContractViolation("research predicate unit is unsupported")
             return {"op": op, "fact_ref": value["fact_ref"], "fact_key": fact.key, "unit": fact.unit, "lower": lower, "upper": upper}
         raise _UnknownPredicateOperator(op)
 

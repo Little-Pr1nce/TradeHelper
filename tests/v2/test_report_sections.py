@@ -16,12 +16,12 @@ def _text(section):
 
 
 def _plan_detail(document):
-    return next(block.payload for block in _section(document, "plans").blocks if block.payload.table_id == "plan_table")
+    return next(block.payload for block in _section(document, "operation_report").blocks if block.payload.table_id == "plan_table")
 
 
 def test_ux10_action_desk_uses_risk_decision(us_instrument, now):
     document = _document(us_instrument, now)
-    text = _text(_section(document, "action_desk"))
+    text = _text(_section(document, "action_summary"))
     decision = next(item for item in _input(us_instrument, now).risk_bundle.decisions if item.profile.value == "conservative" and item.action.value in {"buy", "add", "reduce", "sell"})
     action_name = {"buy":"买入", "add":"加仓", "sell":"卖出", "reduce":"减仓", "hold":"持有", "watch":"观察"}[decision.action.value]
     assert action_name in text and str(decision.approved_shares) in text
@@ -54,7 +54,7 @@ def test_ux15_profile_difference_is_explained_without_invented_trigger(us_instru
 
 def test_ux16_history_rank_is_separate_from_current_action(us_instrument, now):
     section = _section(_document(us_instrument, now), "history")
-    assert section.section_id != "action_desk" and "不会覆盖当前风险动作" in section.blocks[0].payload.interpretation
+    assert section.section_id != "action_summary" and "不会覆盖当前风险动作" in section.blocks[0].payload.interpretation
 
 
 def test_ux17_research_status_and_eligibility_columns_are_shown(us_instrument, now):

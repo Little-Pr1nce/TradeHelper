@@ -3,7 +3,9 @@ from __future__ import annotations
 from contracts import ReportBlockKind
 from presentation.formatting import format_datetime
 
-def _cell(value): return str(value).replace("|","\\|").replace("\n","<br>")
+def _cell(value):
+    text=str(value).replace("|","\\|").replace("\n","<br>")
+    return text.replace("；","<br>• ") if len(text)>=48 else text
 
 def render_markdown(document):
     lines=[f"# {document.title}","",document.summary,"",f"数据时点：{format_datetime(document.as_of, document.market, seconds=True)}"]

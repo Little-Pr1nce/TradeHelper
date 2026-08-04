@@ -55,6 +55,11 @@ def _table(value, refs):
     return ReportBlock(ReportBlockKind.TABLE, value, tuple(refs))
 
 
+def _table_refs(value):
+    refs = {ref for row in value.rows for ref in row.source_artifact_refs}
+    return tuple(sorted(refs)) or (PRESENTATION_POLICY_REF,)
+
+
 def _section(key, title, purpose, *blocks, severity=None):
     return ReportSection(key, title, purpose, severity, tuple(blocks))
 
@@ -230,20 +235,38 @@ def _display(mapping, value):
 
 
 def _strategy_history_text(outcomes):
+    exit_actions = {"sell", "reduce"}
+    is_exit = bool(outcomes) and all(item.action in exit_actions for item in outcomes)
     matured = tuple(sorted(
-        (item for item in outcomes if item.net_return is not None),
+        (
+            item for item in outcomes
+            if (item.exit_quality is not None if is_exit else item.net_return is not None)
+        ),
         key=lambda item: (item.target_session_date, item.strategy_outcome_id),
     ))
     if not matured:
-        return "尚未完成该股票的历史成交回放，不能声称已有正期望"
-    returns = tuple(Decimal(str(item.net_return)) for item in matured)
+        return "尚未完成该股票的历史退出评估，不能判断退出时机" if is_exit else "尚未完成该股票的历史入场回放，不能声称已有正期望"
+    returns = tuple(Decimal(str(item.exit_quality if is_exit else item.net_return)) for item in matured)
     positive = sum(item > 0 for item in returns)
     average = sum(returns, Decimal("0")) / Decimal(len(returns))
+    if is_exit:
+        avoided = tuple(Decimal(str(item.exit_avoided_loss)) for item in matured if item.exit_avoided_loss is not None)
+        opportunity = tuple(Decimal(str(item.exit_opportunity_cost)) for item in matured if item.exit_opportunity_cost is not None)
+        text = (
+            f"已评估 {len(matured)} 次退出，有效 {positive} 次；"
+            f"平均退出质量 {format_percent(average)}"
+        )
+        if avoided:
+            text += f"；平均避免损失 {format_percent(sum(avoided, Decimal('0')) / len(avoided))}"
+        if opportunity:
+            text += f"；平均踏空成本 {format_percent(sum(opportunity, Decimal('0')) / len(opportunity))}"
+        text += "；退出质量为正表示当时退出优于继续持有，不等于账户收益"
+        return text + ("；样本仍少，只能作为观察" if len(matured) < 30 else "")
     adverse = tuple(Decimal(str(item.mae)) for item in matured if item.mae is not None)
     text = (
-        f"已验证 {len(matured)} 次，盈利 {positive} 次；"
-        f"每次信号平均净收益 {format_percent(average)}；"
-        f"胜率 {format_percent(positive / len(matured))}"
+        f"已验证 {len(matured)} 次入场，盈利 {positive} 次；"
+        f"每次交易平均净收益 {format_percent(average)}；"
+        f"盈利率 {format_percent(positive / len(matured))}"
     )
     if adverse:
         text += f"；持有期最差不利波动 {format_percent(min(adverse))}"
@@ -268,7 +291,11 @@ def _matching_strategy_outcomes(value, plan, profile=None):
         and item.action == plan.action.value
         and (profile is None or item.profile == profile.value)
         and item.evidence_origin.value == "reconstructed_oof"
-        and item.net_return is not None
+        and (
+            item.exit_quality is not None
+            if plan.action.value in {"sell", "reduce"}
+            else item.net_return is not None
+        )
     )
 
 
@@ -402,11 +429,24 @@ def _outcome_summary(instrument, ledger, outcomes):
         if brier:
             details += f"；平均概率误差 {sum(brier) / len(brier):.3f}（越低越好）"
     elif ledger == "strategy":
-        trades = [item for item in outcomes if item.net_return is not None]
-        positive = sum(item.net_return > 0 for item in trades)
-        details = f"盈利 {positive}/{len(trades)}" if trades else "尚无可复盘成交"
-        if trades:
-            details += f"；平均净收益 {format_percent(sum(item.net_return for item in trades) / len(trades))}"
+        entries = [item for item in outcomes if item.action in {"buy", "add"} and item.net_return is not None]
+        exits = [item for item in outcomes if item.action in {"sell", "reduce"} and item.exit_quality is not None]
+        details = "尚无可复盘策略结果"
+        parts = []
+        if entries:
+            positive = sum(item.net_return > 0 for item in entries)
+            parts.append(
+                f"入场盈利 {positive}/{len(entries)}；平均交易净收益 "
+                f"{format_percent(sum(item.net_return for item in entries) / len(entries))}"
+            )
+        if exits:
+            positive = sum(item.exit_quality > 0 for item in exits)
+            parts.append(
+                f"有效退出 {positive}/{len(exits)}；平均退出质量 "
+                f"{format_percent(sum(item.exit_quality for item in exits) / len(exits))}"
+            )
+        if parts:
+            details = "；".join(parts)
     else:
         matured = [item for item in outcomes if str(_value(item.status)) == "matured"]
         details = "尚无成熟联合回放"
@@ -480,6 +520,141 @@ def _condition_text(plan):
     return "；".join(parts)
 
 
+def _plain_condition_text(expression):
+    """Render a frozen condition as trading language instead of a raw formula."""
+    text = _condition_expression_text(expression)
+    replacements = (
+        ("当前价位于 ", "价格进入 "),
+        ("当前价 >= ", "价格达到或站上 "),
+        ("当前价 > ", "价格站上 "),
+        ("当前价 <= ", "价格跌到或低于 "),
+        ("当前价 < ", "价格跌破 "),
+        ("当前价 向上穿越 ", "价格重新站上 "),
+        ("当前价 向下穿越 ", "价格向下跌破 "),
+        ("macd_hist_pct >= 0", "MACD 柱线转为非负"),
+        ("macd_hist_pct > 0", "MACD 柱线转正"),
+        ("macd_hist_pct <= 0", "MACD 柱线转为非正"),
+        ("macd_hist_pct < 0", "MACD 柱线转负"),
+        ("MA20 > MA60", "MA20 高于 MA60"),
+        ("MA20 < MA60", "MA20 低于 MA60"),
+    )
+    for source, target in replacements:
+        text = text.replace(source, target)
+    return text.replace("(", "（").replace(")", "）")
+
+
+def _signal_judgment_text(decision, plan):
+    action = _action(decision.action)
+    if plan is None:
+        return f"建议{action}，但交易计划缺失。请重新分析，暂时不要下单。"
+    family = _display(_STRATEGY_FAMILY_NAMES, plan.family)
+    readiness = str(_value(plan.readiness))
+    if decision.executable_now:
+        return f"建议{action}。{family}条件已经确认，可按风控批准的数量执行。"
+    if readiness == "triggered":
+        return f"建议{action}，但现在先不下单。{family}条件已经出现，下一交易时段需用最新价格复核。"
+    if readiness == "waiting":
+        return f"关注{action}机会。系统正在等待{family}确认，条件满足前保持不动。"
+    if readiness == "observation_only" or plan.action is PlanAction.WATCH:
+        return f"当前以观察为主。{family}证据还不足，暂不生成订单。"
+    return f"建议{action}，但当前尚未通过执行检查。满足下列条件后再重新评估。"
+
+
+def _signal_steps_text(plan, decision, market):
+    if plan is None:
+        return "1. 重新运行分析并生成完整计划\n2. 核对最新价格、股数和最大亏损后再决定"
+    steps = []
+    trigger = _plain_condition_text(plan.trigger_condition)
+    if str(_value(plan.readiness)) == "triggered":
+        steps.append(f"复核：用下一交易时段最新价格确认“{trigger}”仍然成立")
+    else:
+        steps.append(f"触发：{trigger}")
+    if (
+        plan.confirmation_condition is not None
+        and plan.confirmation_condition.condition_id != plan.trigger_condition.condition_id
+    ):
+        steps.append(f"确认：{_plain_condition_text(plan.confirmation_condition)}")
+    if plan.missing_conditions:
+        steps.append(f"补齐：{'、'.join(plan.missing_conditions)}")
+    steps.append("执行：条件成立后，按最新价格重新核定股数和最大亏损")
+    if plan.expires_at is not None:
+        steps.append(f"期限：{_datetime_text(plan.expires_at, market)} 前有效，过期后重新分析")
+    return "\n".join(steps)
+
+
+def _share_count(value: Decimal) -> str:
+    """Render an exact share quantity without assuming a particular Decimal exponent."""
+    return str(int(value)) if value == value.to_integral_value() else format(value.normalize(), "f")
+
+
+def _signal_profile_text(value, allocation_details):
+    lines = []
+    for profile_name in ("保守", "激进"):
+        detail = allocation_details.get((value.instrument.code, profile_name))
+        if detail is None:
+            lines.append(f"{profile_name}：暂不下单；等待条件满足并重新通过组合风控")
+            continue
+        allocation, arrangement = detail
+        action = _action(allocation.action)
+        shares = allocation.final_requested_shares
+        if shares <= 0 or action in {"观察", "持有"}:
+            lines.append(f"{profile_name}：暂不下单；{arrangement}")
+        else:
+            timing = "现在" if "当前" in arrangement and "复核" not in arrangement else "条件确认后"
+            lines.append(f"{profile_name}：{timing}{action} {_share_count(shares)} 股；{arrangement}")
+    return "\n".join(lines)
+
+
+def _editorial_table(action_table, members_by_code, editorial=None):
+    editorial_items = {
+        item.instrument: item
+        for item in getattr(editorial, "items", ())
+    }
+    rows = []
+    for action_row in action_table.rows:
+        stock, identity, action_text, _next_step, _profiles = action_row.cells
+        action = action_text.split("；", 1)[0]
+        member = members_by_code.get(stock)
+        item = editorial_items.get(stock)
+        if item is not None and item.action == action:
+            headline = item.headline
+            reasons = "\n".join(item.reasons)
+            risk_note = item.risk_note
+            source = editorial.source
+        else:
+            detail = action_text.split("；", 1)[-1]
+            headline = detail if detail.endswith("。") else f"{detail}。"
+            if member is None:
+                reasons = "系统已冻结当前动作\n具体条件和风险以下方操作卡为准"
+            else:
+                decision = _primary_decision(member)
+                plans = {
+                    plan.plan_id: plan
+                    for branch in (member.strategy_bundle.entry_or_add, member.strategy_bundle.reduce_or_exit, member.strategy_bundle.hold)
+                    for plan in branch.plans
+                }
+                plan = plans.get(decision.plan_id)
+                strategy = "没有可用策略" if plan is None else _display(_STRATEGY_FAMILY_NAMES, plan.family)
+                reasons = (
+                    f"预测形成“{_display(_SCENARIO_STATE_NAMES, member.scenario.state)}”情景\n"
+                    f"系统据此采用“{strategy}”思路\n"
+                    f"风控结论为“{_display(_DISPOSITION_NAMES, decision.disposition)}”"
+                )
+            risk_note = "具体价格、数量、止损和最大亏损以下方冻结操作卡为准。"
+            source = "系统自动解读"
+        rows.append(_row(
+            f"editorial:{stock}",
+            (stock, identity, action, headline, reasons, risk_note, source),
+            action_row.source_artifact_refs,
+        ))
+    overview = getattr(editorial, "overview", None) or "先看一句话结论，再按下方冻结条件决定是否行动；解读文字不会改变代码生成的操作计划。"
+    return ReportTable(
+        "operation_editorial", "操作逻辑解读",
+        ("股票", "身份与价格", "动作", "一句话结论", "主要理由", "风险提醒", "解读来源"),
+        tuple(rows), "当前没有需要解读的操作。", overview,
+    )
+
+
 def _risk_reward(plan):
     entry = plan.trigger_level.value if plan.trigger_level else None
     stop = plan.stop.level.value if plan.stop and plan.stop.level else None
@@ -537,6 +712,136 @@ def _forecast_history_text(value, forecast):
     )
 
 
+def _forecast_compact_text(forecast):
+    if forecast.direction is None or forecast.return_distribution is None:
+        return f"目标 {forecast.target_session_date or '待定'}：无法形成可靠预测"
+    probability = forecast.probabilities.for_direction(forecast.direction) if forecast.probabilities else None
+    return (
+        f"{_display(_DIRECTION_NAMES, forecast.direction)} {format_percent(probability)}；"
+        f"收益中位 {format_percent(forecast.return_distribution.p50)}；"
+        f"目标 {forecast.target_session_date or '待定'}"
+    )
+
+
+def _sample_conclusion(sample_count, *, positive=None, subject="结果"):
+    if sample_count == 0:
+        return f"尚无到期{subject}，本次只能观察"
+    if sample_count < 10:
+        return f"仅 {sample_count} 条，不能判断稳定性"
+    if sample_count < 30:
+        return f"{sample_count} 条，可作观察，暂不能作为稳定依据"
+    if positive is True:
+        return f"{sample_count} 条，当前表现为正，仍需持续监控"
+    if positive is False:
+        return f"{sample_count} 条，当前表现未达要求，需要继续优化"
+    return f"{sample_count} 条，已达到比较门槛"
+
+
+def _portfolio_forecast_ability_row(value):
+    matured = tuple(
+        item for item in value.forecast_outcomes
+        if str(_value(item.status)) == "matured" and item.direction_correct is not None
+    )
+    correct = sum(item.direction_correct is True for item in matured)
+    brier = tuple(item.event_brier for item in matured if item.event_brier is not None)
+    interval = tuple(
+        item for item in matured
+        if item.actual_return is not None and item.predicted_p10 is not None and item.predicted_p90 is not None
+    )
+    interval_hits = sum(item.predicted_p10 <= item.actual_return <= item.predicted_p90 for item in interval)
+    pending = sum(str(_value(item.status)) == "pending" for item in value.forecast_outcomes)
+    accuracy = None if not matured else Decimal(correct) / Decimal(len(matured))
+    average_brier = None if not brier else sum(brier) / len(brier)
+    interval_rate = None if not interval else Decimal(interval_hits) / Decimal(len(interval))
+    positive = None if accuracy is None else accuracy >= Decimal("0.5")
+    return _row(
+        f"{value.instrument.stable_key}:forecast-ability",
+        (
+            value.instrument.code,
+            len(matured),
+            f"{correct}/{len(matured)}（{format_percent(accuracy)}）" if matured else "—",
+            f"{average_brier:.3f}（越低越好）" if average_brier is not None else "—",
+            format_percent(interval_rate),
+            pending,
+            _sample_conclusion(len(matured), positive=positive, subject="预测"),
+        ),
+        _refs(*value.forecast_outcomes) if value.forecast_outcomes else _refs(*value.forecasts),
+    )
+
+
+def _portfolio_strategy_ability_row(value):
+    entries = tuple(
+        item for item in value.strategy_outcomes
+        if str(_value(item.status)) == "matured"
+        and item.action in {"buy", "add"}
+        and item.net_return is not None
+    )
+    exits = tuple(
+        item for item in value.strategy_outcomes
+        if str(_value(item.status)) == "matured"
+        and item.action in {"sell", "reduce"}
+        and item.exit_quality is not None
+    )
+    returns = tuple(Decimal(str(item.net_return)) for item in entries)
+    qualities = tuple(Decimal(str(item.exit_quality)) for item in exits)
+    benchmarks = tuple(
+        Decimal(str(item.benchmark_return))
+        for item in entries if item.benchmark_return is not None
+    )
+    wins = sum(item > 0 for item in returns)
+    average = None if not returns else sum(returns, Decimal("0")) / len(returns)
+    benchmark = (
+        sum(benchmarks, Decimal("0")) / len(benchmarks)
+        if benchmarks and len(benchmarks) == len(returns) else None
+    )
+    alpha = None if average is None or benchmark is None else average - benchmark
+    adverse = tuple(Decimal(str(item.mae)) for item in entries if item.mae is not None)
+    exit_average = None if not qualities else sum(qualities, Decimal("0")) / len(qualities)
+    positive = None if average is None and exit_average is None else bool(
+        (average is not None and average > 0) or (exit_average is not None and exit_average > 0)
+    )
+    return _row(
+        f"{value.instrument.stable_key}:strategy-ability",
+        (
+            value.instrument.code,
+            len(entries),
+            format_percent(Decimal(wins) / Decimal(len(entries)) if entries else None),
+            format_percent(average),
+            format_percent(benchmark),
+            format_percent(alpha),
+            format_percent(min(adverse) if adverse else None),
+            len(exits),
+            format_percent(exit_average),
+            _sample_conclusion(len(entries) + len(exits), positive=positive, subject="策略事件"),
+        ),
+        _refs(*value.strategy_outcomes) if value.strategy_outcomes else _refs(value.strategy_bundle),
+    )
+
+
+def _portfolio_joint_ability_row(value):
+    snapshots = tuple(
+        item for item in value.metric_snapshots
+        if str(_value(item.ledger_kind)) == "joint"
+    )
+    by_profile = {}
+    for item in sorted(snapshots, key=lambda entry: (entry.data_cutoff_at, entry.generated_at)):
+        by_profile[str(item.scope_key).split(":")[-1]] = item
+    conservative = by_profile.get("conservative")
+    aggressive = by_profile.get("aggressive")
+    sample_count = max((item.sample_count for item in by_profile.values()), default=0)
+    return _row(
+        f"{value.instrument.stable_key}:joint-ability",
+        (
+            value.instrument.code,
+            sample_count,
+            _metric_summary(conservative.metrics) if conservative else "尚无保守方案完整回放",
+            _metric_summary(aggressive.metrics) if aggressive else "尚无激进方案完整回放",
+            _sample_conclusion(sample_count, subject="完整链路回放"),
+        ),
+        _refs(*by_profile.values()) if by_profile else _refs(value.risk_bundle, value.order_intent_bundle),
+    )
+
+
 def _technical_position_text(value, market):
     current = _analysis_price(value)
     parts = []
@@ -577,19 +882,25 @@ def _decision_priority(decision, protective_ids, readiness_by_plan=None, evidenc
 
 def _decision_evidence_map(value, plans):
     by_identity = {
-        (item.strategy_id, item.strategy_version, item.parameter_hash, item.profile): item
+        (item.strategy_id, item.strategy_version, item.parameter_hash, item.profile, item.action): item
         for item in value.learning_evidence
     }
-    return {
-        decision.decision_id: by_identity.get((
-            plans[decision.plan_id].strategy_id,
-            plans[decision.plan_id].strategy_version,
-            plans[decision.plan_id].parameter_hash,
+    result = {}
+    for decision in value.risk_bundle.decisions:
+        plan = plans.get(decision.plan_id)
+        if plan is None:
+            continue
+        identity = (
+            plan.strategy_id,
+            plan.strategy_version,
+            plan.parameter_hash,
             decision.profile,
-        ))
-        for decision in value.risk_bundle.decisions
-        if decision.plan_id in plans
-    }
+        )
+        result[decision.decision_id] = (
+            by_identity.get((*identity, plan.action.value))
+            or by_identity.get((*identity, None))
+        )
+    return result
 
 
 def _primary_decision(value):
@@ -1081,28 +1392,99 @@ def _history_tables(value):
     return forecasts, strategies, joint, metrics
 
 
+def _single_quick_action(value, operation_table):
+    decision = _primary_decision(value)
+    plans = {
+        plan.plan_id: plan
+        for branch in (
+            value.strategy_bundle.entry_or_add,
+            value.strategy_bundle.reduce_or_exit,
+            value.strategy_bundle.hold,
+            value.strategy_bundle.invalidation,
+        )
+        for plan in branch.plans
+    }
+    selected_plan = plans.get(decision.plan_id)
+    judgment = _signal_judgment_text(decision, selected_plan)
+    steps = _signal_steps_text(selected_plan, decision, value.instrument.market)
+    profile_lines = []
+    for row in operation_table.rows:
+        profile, action, quantity, _condition, _stop, _target, risk, _validity = row.cells
+        if quantity in {"0 股", "—"} or action in {"观察", "持有", "重新分析"}:
+            profile_lines.append(f"{profile}：暂不下单；{risk}")
+        else:
+            profile_lines.append(f"{profile}：{action} {quantity}；最大计划亏损 {risk}")
+    table = ReportTable(
+        "single_quick_action", "本轮操作结论",
+        ("股票", "身份与价格", "当前动作", "下一步条件", "保守与激进"),
+        (_row(
+            f"single-quick:{value.instrument.stable_key}",
+            (
+                value.instrument.code,
+                f"{value.metadata.name} · {_price_text(value, value.instrument.market)}",
+                f"{_action(decision.action)}；{judgment}",
+                steps,
+                "\n".join(profile_lines),
+            ),
+            _refs(value.metadata, value.feature_snapshot, value.strategy_bundle, value.risk_bundle),
+        ),),
+        None,
+        "这里只给出一分钟结论；精确价格、数量、止损、止盈和有效期见详细操作报告。",
+    )
+    return table
+
+
 class SingleStockReportBuilder:
     renderer_version = "presentation_v2"
 
-    def build(self, value: SingleStockPresentationInput) -> ReportDocument:
+    def build(self, value: SingleStockPresentationInput, editorial=None) -> ReportDocument:
         decision = _primary_decision(value)
         action_refs = _refs(value.risk_bundle, value.order_intent_bundle)
         action_text = (
-            f"当前动作：{_action(decision.action)}；执行等级：{_display(_LEVEL_NAMES, decision.level)}；"
-            f"{'当前可执行' if decision.executable_now else '当前不可执行，等待冻结条件'}；"
-            f"批准 {decision.approved_shares} 股；最大计划亏损 {_currency(decision.max_loss_amount, value.instrument.market)}。"
+            f"当前动作：{_action(decision.action)} ｜ 执行等级：{_display(_LEVEL_NAMES, decision.level)} ｜ "
+            f"{'当前可执行' if decision.executable_now else '当前不可执行，等待冻结条件'}\n"
+            f"批准数量：{decision.approved_shares} 股 ｜ 最大计划亏损：{_currency(decision.max_loss_amount, value.instrument.market)}"
         )
         history_tables = _history_tables(value)
+        operation = _operation_table(value)
+        quick_action = _single_quick_action(value, operation)
+        editorial_table = _editorial_table(quick_action, {value.instrument.code: value}, editorial)
+        verified_forecasts, strategy_outcomes, joint_outcomes, learning_metrics = history_tables
         sections = (
-            _section("facts", "基本信息与数据核对", "先确认股票、日期、价格和来源是否正确", _table(_facts_table(value), _refs(value.metadata, value.quote_snapshot, value.data_quality, value.feature_snapshot, value.news_summary, value.fundamental_summary))),
-            _section("forecast", "未来走势预测", "说明预测哪个目标日、可能方向和收益范围", _table(_forecast_table(value), _refs(*value.forecasts))),
-            _section("scenario_evidence", "策略选择与过去表现", "策略必须符合当前预测，并单独展示历史收益", _table(_strategy_choice_table(value), _refs(value.scenario, value.strategy_bundle, value.risk_bundle, *value.strategy_outcomes))),
-            _section("plans", "保守与激进操作计划", "说明触发、数量、退出、最大亏损和有效期", _table(_operation_table(value), _refs(value.strategy_bundle, value.risk_bundle, value.order_intent_bundle)), _table(_plan_table(value), _refs(value.strategy_bundle, value.risk_bundle, value.order_intent_bundle))),
-            _section("risk", "账户风险明细", "金额、股数和仓位只来自真实账户", _table(_risk_table(value), _refs(value.risk_bundle, *value.learning_evidence))),
-            _section("research", "研究员观察", "LLM 只补充观察，系统负责事实验证", _table(_research_table(value), _refs(*value.research_hypotheses, *value.research_validations, *value.research_outcomes, *value.research_metric_snapshots) if (value.research_hypotheses or value.research_validations or value.research_outcomes or value.research_metric_snapshots) else (PRESENTATION_POLICY_REF,))),
-            _section("action_desk", "最终结论", "把预测、策略和风险合并成一句可执行结论", _callout(action_text, action_refs), _text(f"分析时点：{_datetime_text(value.as_of, value.instrument.market, seconds=True)}；计划有效期至：{_datetime_text(decision.expires_at, value.instrument.market) if decision.expires_at else '当前没有订单'}。判断错误时按上方退出条件处理。", action_refs)),
-            _section("glossary", "阅读说明", "只保留理解报告所需的最低限度说明", _text("先核对价格和日期，再看预测、策略与操作计划。历史预测和策略结果必须分开判断。")),
-            _section("history", "历史可信度", "最后分别核对预测是否准确、策略是否赚钱、完整链路是否有效", *(_table(item, tuple(sorted({ref for row in item.rows for ref in row.source_artifact_refs})) or (PRESENTATION_POLICY_REF,)) for item in history_tables)),
+            _section(
+                "action_summary", "操作总结", "先用一分钟确认现在该做什么",
+                _callout(action_text, action_refs), _table(quick_action, _table_refs(quick_action)),
+            ),
+            _section(
+                "facts", "基本信息与数据核对", "先确认股票、日期、价格和来源是否正确",
+                _table(_facts_table(value), _refs(value.metadata, value.quote_snapshot, value.data_quality, value.feature_snapshot, value.news_summary, value.fundamental_summary)),
+            ),
+            _section(
+                "forecast", "未来走势预测", "用颜色和概率说明目标日期、可能方向和收益范围",
+                _table(_forecast_table(value), _refs(*value.forecasts)),
+            ),
+            _section(
+                "operation_report", "详细操作报告", "先读通俗解读，再核对冻结的触发、退出、数量和风险",
+                _table(editorial_table, _table_refs(editorial_table)),
+                _table(operation, _refs(value.strategy_bundle, value.risk_bundle, value.order_intent_bundle)),
+                _table(_plan_table(value), _refs(value.strategy_bundle, value.risk_bundle, value.order_intent_bundle)),
+                _table(_risk_table(value), _refs(value.risk_bundle, *value.learning_evidence)),
+            ),
+            _section(
+                "strategy_performance", "策略表现与回测依据", "说明为什么选择该策略，以及过去的收益和回撤是否支持",
+                _table(_strategy_choice_table(value), _refs(value.scenario, value.strategy_bundle, value.risk_bundle, *value.strategy_outcomes)),
+                _table(strategy_outcomes, _table_refs(strategy_outcomes)),
+                _table(joint_outcomes, _table_refs(joint_outcomes)),
+            ),
+            _section(
+                "research", "研究员补充观察", "LLM 研究员只补充机会和质疑，不改写正式操作",
+                _table(_research_table(value), _refs(*value.research_hypotheses, *value.research_validations, *value.research_outcomes, *value.research_metric_snapshots) if (value.research_hypotheses or value.research_validations or value.research_outcomes or value.research_metric_snapshots) else (PRESENTATION_POLICY_REF,)),
+            ),
+            _section(
+                "history", "系统历史可信度", "最后分开核对预测是否准确，以及统计样本是否足够",
+                _table(verified_forecasts, _table_refs(verified_forecasts)),
+                _table(learning_metrics, _table_refs(learning_metrics)),
+            ),
         )
         title = f"{value.metadata.name} ({value.instrument.code}) 单股研究报告"
         identity = {"kind": ReportKind.SINGLE_STOCK, "market": value.instrument.market, "instrument": value.instrument, "mode": value.analysis_mode, "as_of": value.as_of, "title": title, "subtitle": value.history_period, "summary": action_text, "sections": sections, "glossary": _GLOSSARY, "refs": value.source_artifact_refs, "schema": 1, "renderer": self.renderer_version}
@@ -1112,15 +1494,15 @@ class SingleStockReportBuilder:
 class PortfolioReportBuilder:
     renderer_version = "presentation_v2"
 
-    def build(self, value: PortfolioPresentationInput) -> ReportDocument:
+    def build(self, value: PortfolioPresentationInput, editorial=None) -> ReportDocument:
         valuation = value.frozen_account_valuation
         bundle = value.portfolio_decision_bundle
         account_refs = _refs(value.account_snapshot, valuation)
         portfolio_refs = _refs(bundle)
         summary = (
-            f"冻结账户权益：{_currency(valuation.equity, value.market)}；现金：{_currency(valuation.cash, value.market)}；"
-            f"持仓市值：{_currency(valuation.invested_value, value.market)}；总仓位：{format_percent(valuation.invested_pct)}；"
-            f"估值时点：{_datetime_text(valuation.valuation_at, seconds=True)}。"
+            f"冻结账户权益 {_currency(valuation.equity, value.market)} ｜ 现金 {_currency(valuation.cash, value.market)} ｜ "
+            f"持仓市值 {_currency(valuation.invested_value, value.market)} ｜ 总仓位 {format_percent(valuation.invested_pct)}\n"
+            f"估值时点：{_datetime_text(valuation.valuation_at, seconds=True)}"
         )
         priority_rows = []
         profile_rows = []
@@ -1128,6 +1510,7 @@ class PortfolioReportBuilder:
         member_by_instrument = {item.instrument: item for item in value.instruments}
         valuation_map = {item.instrument: item for item in valuation.position_values}
         account_position_map = {item.instrument: item for item in value.account_snapshot.positions}
+        allocation_details = {}
         for profile in (bundle.conservative, bundle.aggressive):
             by_id = {item.allocation_id: item for item in profile.allocations}
             ordered_ids = profile.holding_priority_allocation_ids + profile.entry_priority_allocation_ids
@@ -1146,13 +1529,15 @@ class PortfolioReportBuilder:
                     f"{format_percent(valued.position_pct)}仓位；盈亏 {format_percent(valued.unrealized_pnl_pct)}"
                     if valued is not None else "关注股，当前未持有"
                 )
+                arrangement = _allocation_status(item, member)
+                allocation_details[(item.instrument.code, _profile(profile.profile))] = (item, arrangement)
                 priority_rows.append(_row(
                         f"{_value(profile.profile)}:{item.allocation_id}",
                     (
                         _profile(profile.profile), item.instrument.code, _price_text(member, value.market),
                         position_context, _action(item.action), item.final_requested_shares,
                         _allocation_explanation(item, member, value.market),
-                        _allocation_status(item, member),
+                        arrangement,
                     ),
                     portfolio_refs,
                 ))
@@ -1203,10 +1588,19 @@ class PortfolioReportBuilder:
         forecast_rows = []
         strategy_rows = []
         research_rows = []
-        history_rows = []
+        forecast_ability_rows = []
+        strategy_ability_rows = []
+        joint_ability_rows = []
+        exit_signal_rows = []
+        entry_signal_rows = []
+        hold_signal_rows = []
+        quick_action_seeds = []
+        holding_detail_tables = []
+        watch_detail_tables = []
         for member in value.instruments:
             member_refs = member.source_artifact_refs
-            plan_rows.extend(_portfolio_plan_rows(member))
+            plan_row = _portfolio_plan_rows(member)[0]
+            plan_rows.append(plan_row)
             valued = valuation_map.get(member.instrument)
             position = account_position_map.get(member.instrument)
             held = valued is not None
@@ -1215,7 +1609,7 @@ class PortfolioReportBuilder:
                 if held else "未持有"
             )
             mode_name = {"pre": "盘前参考价", "intraday": "盘中实时价", "eod": "盘后收盘价"}.get(str(_value(value.analysis_mode)), "分析价")
-            fact_rows.append(_row(
+            fact_row = _row(
                 member.instrument.stable_key,
                 (
                     f"{member.metadata.name} ({member.instrument.code})",
@@ -1228,7 +1622,8 @@ class PortfolioReportBuilder:
                     _technical_position_text(member, value.market),
                 ),
                 _refs(member.metadata, member.feature_snapshot, value.account_snapshot, valuation),
-            ))
+            )
+            fact_rows.append(fact_row)
             if member.quote_snapshot is not None:
                 quote_source = member.quote_snapshot.source
             elif str(_value(value.analysis_mode)) == "eod":
@@ -1248,15 +1643,26 @@ class PortfolioReportBuilder:
                 quote_source, f"{len(member.news_summary)} 条" if member.news_summary else "本次未取得",
                 "已取得" if member.fundamental_summary else "本次未取得", attention,
             ), _refs(member.metadata, member.quote_snapshot, member.data_quality, member.feature_snapshot, member.news_summary, member.fundamental_summary)))
-            strategy_rows.append(_portfolio_strategy_row(member))
-            for forecast in member.forecasts:
-                forecast_rows.append(_row(forecast.event_key, (
-                    member.instrument.code, _currency(forecast.reference_price, value.market), f"{forecast.horizon}日",
-                    forecast.target_session_date or "—", _display(_DIRECTION_NAMES, forecast.direction) if forecast.direction else "无法预测",
-                    format_percent(forecast.return_distribution.p50 if forecast.return_distribution else None),
-                    _forecast_history_text(member, forecast),
-                    "可以参与新开仓判断" if forecast.execution_eligible else "不参与新开仓执行分级；只作观察",
-                ), _refs(forecast)))
+            strategy_row = _portfolio_strategy_row(member)
+            strategy_rows.append(strategy_row)
+            forecast_by_horizon = {item.horizon: item for item in member.forecasts}
+            forecasts_for_row = tuple(forecast_by_horizon[item] for item in (1, 3, 5, 10))
+            eligible = tuple(item.horizon for item in forecasts_for_row if item.execution_eligible)
+            forecast_row = _row(
+                member.instrument.stable_key,
+                (
+                    member.instrument.code,
+                    _currency(forecasts_for_row[0].reference_price, value.market),
+                    _forecast_compact_text(forecasts_for_row[0]),
+                    _forecast_compact_text(forecasts_for_row[1]),
+                    _forecast_compact_text(forecasts_for_row[2]),
+                    _forecast_compact_text(forecasts_for_row[3]),
+                    "可参与执行：" + "、".join(f"{item}日" for item in eligible)
+                    if eligible else "当前周期均只作观察",
+                ),
+                _refs(*forecasts_for_row),
+            )
+            forecast_rows.append(forecast_row)
             hypothesis_by_id = {item.hypothesis_id: item for item in member.research_hypotheses}
             for validation in member.research_validations:
                 hypothesis = hypothesis_by_id.get(validation.hypothesis_id)
@@ -1267,24 +1673,155 @@ class PortfolioReportBuilder:
                     _display(_CANDIDATE_ELIGIBILITY_NAMES, validation.candidate_eligibility),
                     _reason_text(validation.reason_codes),
                 ), _refs(validation)))
-            for metric in member.metric_snapshots:
-                history_rows.append(_row(metric.snapshot_id, (member.instrument.code, _display(_LEDGER_NAMES, metric.ledger_kind), f"{metric.sample_count} 条", _metric_summary(metric.metrics)), _refs(metric)))
-            for ledger, outcomes in (
-                ("forecast", member.forecast_outcomes),
-                ("strategy", member.strategy_outcomes),
-                ("joint", member.joint_outcomes),
-            ):
-                row = _outcome_summary(member.instrument, ledger, outcomes)
-                if row is not None:
-                    history_rows.append(row)
-            if member.learning_evidence:
-                oof_samples = sum(item.oof_sample_count for item in member.learning_evidence)
-                statuses = "、".join(sorted({_display(_EVIDENCE_GRADE_NAMES, item.status) for item in member.learning_evidence}))
-                history_rows.append(_row(
-                    f"{member.instrument.stable_key}:plan-evidence",
-                    (member.instrument.code, "计划历史证据", f"{oof_samples} 个历史样本外记录", f"状态：{statuses}"),
-                    _refs(*member.learning_evidence),
-                ))
+            forecast_ability_row = _portfolio_forecast_ability_row(member)
+            strategy_ability_row = _portfolio_strategy_ability_row(member)
+            joint_ability_row = _portfolio_joint_ability_row(member)
+            forecast_ability_rows.append(forecast_ability_row)
+            strategy_ability_rows.append(strategy_ability_row)
+            joint_ability_rows.append(joint_ability_row)
+
+            decision = _primary_decision(member)
+            if decision.action in {PlanAction.SELL, PlanAction.REDUCE}:
+                signal_target = exit_signal_rows
+                quick_priority = 0
+            elif decision.action in {PlanAction.BUY, PlanAction.ADD}:
+                signal_target = entry_signal_rows
+                quick_priority = 1
+            else:
+                signal_target = hold_signal_rows
+                quick_priority = 2
+            plans_by_id = {
+                plan.plan_id: plan
+                for branch in (
+                    member.strategy_bundle.entry_or_add,
+                    member.strategy_bundle.reduce_or_exit,
+                    member.strategy_bundle.hold,
+                    member.strategy_bundle.invalidation,
+                )
+                for plan in branch.plans
+            }
+            selected_plan = plans_by_id.get(decision.plan_id)
+            if selected_plan is None:
+                quick_current = f"{_action(decision.action)}；{_signal_judgment_text(decision, selected_plan)}"
+                quick_condition = _signal_steps_text(selected_plan, decision, value.market)
+            else:
+                quick_current = f"{_action(decision.action)}；{_signal_judgment_text(decision, selected_plan)}"
+                quick_condition = _signal_steps_text(selected_plan, decision, value.market)
+            profile_summary = _signal_profile_text(member, allocation_details)
+            quick_action_seeds.append((
+                quick_priority,
+                _row(
+                    f"quick-seed:{member.instrument.stable_key}",
+                    (
+                        member.instrument.code,
+                        f"{'持仓' if held else '关注'} · {_price_text(member, value.market)}",
+                        quick_current,
+                        quick_condition,
+                        profile_summary,
+                    ),
+                    tuple(sorted(set((*plan_row.source_artifact_refs, *fact_row.source_artifact_refs)))),
+                ),
+            ))
+            signal_target.append(_row(
+                f"signal:{member.instrument.stable_key}",
+                (
+                    member.instrument.code,
+                    "持仓" if held else "关注",
+                    _price_text(member, value.market),
+                    _signal_judgment_text(decision, selected_plan),
+                    _signal_steps_text(selected_plan, decision, value.market),
+                    profile_summary,
+                ),
+                tuple(sorted(set((*plan_row.source_artifact_refs, *fact_row.source_artifact_refs)))),
+            ))
+
+            detail_rows = (
+                _row(
+                    f"{member.instrument.stable_key}:identity",
+                    (
+                        "股票与价格",
+                        f"{fact_row.cells[0]}；{fact_row.cells[1]}；最新完成日K {fact_row.cells[2]}；"
+                        f"{fact_row.cells[3]}；来源 {fact_row.cells[4]}",
+                    ),
+                    fact_row.source_artifact_refs,
+                ),
+                _row(
+                    f"{member.instrument.stable_key}:position",
+                    ("持仓情况", f"{fact_row.cells[5]}；组合占比 {fact_row.cells[6]}"),
+                    fact_row.source_artifact_refs,
+                ),
+                _row(
+                    f"{member.instrument.stable_key}:technical",
+                    ("关键技术位置", fact_row.cells[7]),
+                    fact_row.source_artifact_refs,
+                ),
+                _row(
+                    f"{member.instrument.stable_key}:forecast",
+                    (
+                        "未来走势",
+                        f"1日：{forecast_row.cells[2]}；3日：{forecast_row.cells[3]}；"
+                        f"5日：{forecast_row.cells[4]}；10日：{forecast_row.cells[5]}；{forecast_row.cells[6]}",
+                    ),
+                    forecast_row.source_artifact_refs,
+                ),
+                _row(
+                    f"{member.instrument.stable_key}:strategy",
+                    (
+                        "采用策略",
+                        f"{strategy_row.cells[1]}；当前动作 {_action(decision.action)}；"
+                        f"{strategy_row.cells[3]}；历史表现：{strategy_row.cells[4]}",
+                    ),
+                    strategy_row.source_artifact_refs,
+                ),
+                _row(
+                    f"{member.instrument.stable_key}:current",
+                    ("当前应对", plan_row.cells[2]),
+                    plan_row.source_artifact_refs,
+                ),
+                _row(
+                    f"{member.instrument.stable_key}:entry",
+                    ("买入或加仓", plan_row.cells[3]),
+                    plan_row.source_artifact_refs,
+                ),
+                _row(
+                    f"{member.instrument.stable_key}:exit",
+                    ("卖出或减仓", plan_row.cells[4]),
+                    plan_row.source_artifact_refs,
+                ),
+                _row(
+                    f"{member.instrument.stable_key}:hold",
+                    ("持有与失效", plan_row.cells[5]),
+                    plan_row.source_artifact_refs,
+                ),
+                _row(
+                    f"{member.instrument.stable_key}:profiles",
+                    ("风险方案", f"保守：{plan_row.cells[6]}；激进：{plan_row.cells[7]}"),
+                    plan_row.source_artifact_refs,
+                ),
+                _row(
+                    f"{member.instrument.stable_key}:history",
+                    (
+                        "历史可信度",
+                        f"预测：{forecast_ability_row.cells[-1]}；策略：{strategy_ability_row.cells[-1]}；"
+                        f"完整链路：{joint_ability_row.cells[-1]}",
+                    ),
+                    tuple(sorted(set((
+                        *forecast_ability_row.source_artifact_refs,
+                        *strategy_ability_row.source_artifact_refs,
+                        *joint_ability_row.source_artifact_refs,
+                    )))),
+                ),
+            )
+            detail_key = member.instrument.code.replace(".", "_").replace("-", "_")
+            detail_table = ReportTable(
+                f"stock_detail_{_value(value.market).lower()}_{detail_key}",
+                f"{member.metadata.name} ({member.instrument.code}) 详细解读",
+                ("重点", "结论与说明"),
+                detail_rows,
+                None,
+                "先看“当前应对”，再核对未来走势、交易条件和历史可信度；详细内容不会改变前面的组合优先级。",
+            )
+            (holding_detail_tables if held else watch_detail_tables).append(detail_table)
             research_artifacts = (*member.research_hypotheses, *member.research_outcomes, *member.research_metric_snapshots)
             if research_artifacts:
                 research_rows.append(_row(
@@ -1300,6 +1837,80 @@ class PortfolioReportBuilder:
             "暂无逐股计划。",
             "每只股票只占一行。未持有股票不展开无意义的卖出和持有计划；先执行当前动作，未来买入条件不会抵消当前卖出或减仓结论。",
         )
+        signal_columns = ("股票", "身份", "分析价", "当前判断", "触发步骤", "执行方案")
+        exit_signals = ReportTable(
+            "portfolio_exit_signals",
+            f"先处理：卖出或减仓（{len(exit_signal_rows)}只）",
+            signal_columns,
+            tuple(exit_signal_rows),
+            "当前没有需要优先卖出或减仓的股票。",
+            "这一组优先保护已有资金。盘后结论会在下一交易时段用最新价格复核，不会把未来重新买入条件误当作当前买入建议。",
+        )
+        entry_signals = ReportTable(
+            "portfolio_entry_signals",
+            f"再寻找：买入或加仓候选（{len(entry_signal_rows)}只）",
+            signal_columns,
+            tuple(entry_signal_rows),
+            "当前没有达到执行门槛的买入或加仓候选。",
+            "只有预测、策略和风控共同通过时才进入这一组；未触发的价格条件仍属于等待计划。",
+        )
+        hold_signals = ReportTable(
+            "portfolio_hold_signals",
+            f"继续跟踪：持有或观察（{len(hold_signal_rows)}只）",
+            signal_columns,
+            tuple(hold_signal_rows),
+            "当前没有单纯持有或观察的股票。",
+            "“观察”不等于看空，而是当前没有足够证据下单；下一步条件说明系统在等待什么。",
+        )
+        quick_action_rows = []
+        for _, row in sorted(quick_action_seeds, key=lambda item: (item[0], item[1].cells[0])):
+            profile_values = []
+            for profile_name in ("保守", "激进"):
+                detail = allocation_details.get((row.cells[0], profile_name))
+                if detail is None:
+                    continue
+                allocation, arrangement = detail
+                action = _action(allocation.action)
+                shares = allocation.final_requested_shares
+                if shares <= 0 or action in {"观察", "持有"}:
+                    profile_values.append(f"{profile_name}：暂不下单；{arrangement}")
+                else:
+                    profile_values.append(
+                        f"{profile_name}：{action} {_share_count(shares)} 股；{arrangement}"
+                    )
+            quick_action_rows.append(_row(
+                f"quick:{row.row_id}",
+                (
+                    row.cells[0],
+                    row.cells[1],
+                    row.cells[2],
+                    row.cells[3],
+                    "；".join(profile_values) or row.cells[4],
+                ),
+                row.source_artifact_refs,
+            ))
+        quick_action_rows = tuple(quick_action_rows)
+        quick_actions = ReportTable(
+            "portfolio_quick_actions",
+            "本轮最重要的操作",
+            ("股票", "身份与价格", "当前动作", "下一步条件", "保守与激进"),
+            quick_action_rows[:5],
+            "当前没有需要处理的股票。",
+            "最多显示 5 项，并按资金保护优先排序：卖出/减仓在前，买入/加仓其次，持有/观察最后。完整清单和理由见后文。",
+        )
+        editorial_actions = ReportTable(
+            "portfolio_editorial_actions",
+            "全部股票冻结动作",
+            quick_actions.columns,
+            quick_action_rows,
+            quick_actions.empty_state,
+            "仅用于生成详细操作解读，不改变首屏五项重点限制。",
+        )
+        editorial_table = _editorial_table(
+            editorial_actions,
+            {member.instrument.code: member for member in value.instruments},
+            editorial,
+        )
         facts = ReportTable(
             "portfolio_facts", "逐股价格与关键事实",
             ("股票", "身份", "K线日期", "用于分析的价格", "价格来源", "成本与盈亏", "组合仓位", "关键技术位置"),
@@ -1314,9 +1925,9 @@ class PortfolioReportBuilder:
         )
         forecasts = ReportTable(
             "portfolio_forecasts", "各股票未来走势预测",
-            ("股票", "预测时价格", "预测范围", "目标交易日", "最可能走势", "预计收益中间值", "过去表现是否可靠", "能否影响新开仓"),
+            ("股票", "分析价", "未来1日", "未来3日", "未来5日", "未来10日", "能否影响新开仓"),
             tuple(forecast_rows), "暂无逐股预测。",
-            "行情数据完整不等于预测模型有效。模型未通过时会明确写成模型能力不足，而不是数据缺失；持仓止损不受预测模型阻断。",
+            "行情数据完整不等于预测模型有效。每只股票只占一行；方向后的百分比是该方向概率，收益中位是模型预计的中间情形。历史验证不通过时只作观察，持仓止损不受阻断。",
         )
         strategies = ReportTable(
             "portfolio_strategies", "根据预测选择的策略与过去表现",
@@ -1367,25 +1978,108 @@ class PortfolioReportBuilder:
             tuple(research_rows), "研究员尚未返回结果。",
             "研究员可以发现机会或质疑系统，但不能直接下单。调用状态、空结果和失败都会明确展示；只有通过代码事实验证的候选才进入后续历史样本外检验。",
         )
-        history_rows.extend(_row(item.snapshot_id, ("组合", _display(_LEDGER_NAMES, item.ledger_kind), f"{item.sample_count} 条", _metric_summary(item.metrics)), _refs(item)) for item in value.portfolio_learning_evidence)
-        history = ReportTable("portfolio_history", "历史能力评估", ("股票/组合", "评估对象", "样本/记录", "通俗结果"), tuple(history_rows), "暂无成熟历史证据。", "同类原始事件已汇总；先看样本数，再同时比较收益、买入持有基准、收益保留率、最大回撤和风险调整表现。牛市中不要求策略机械跑赢基准；预测、策略和最终组合表现不能混为一个结论。")
-        priority_summary = "；".join(
-            f"{row.cells[1]}：{row.cells[4]} {row.cells[5]}股"
-            for row in priority_rows[:5]
-        ) or "当前没有需要立即执行或预留的组合动作"
-        final_summary = f"{summary} 当前优先事项：{priority_summary}。"
+        forecast_history = ReportTable(
+            "portfolio_forecast_history", "预测表现摘要",
+            ("股票", "已验证", "方向正确", "概率误差", "80%区间命中", "待验证", "结论"),
+            tuple(forecast_ability_rows), "暂无预测历史记录。",
+            "这里只评价预测是否准确。方向正确率越高越好，概率误差越低越好；少于 30 条时不宣称模型稳定。",
+        )
+        strategy_history = ReportTable(
+            "portfolio_strategy_history", "策略表现摘要",
+            ("股票", "入场成交", "入场盈利率", "入场平均净收益", "同期买入持有", "入场平均超额", "最差不利波动", "退出评估", "平均退出质量", "结论"),
+            tuple(strategy_ability_rows), "暂无策略历史回放。",
+            "入场收益与退出质量分开评价。退出质量为正表示当时卖出/减仓优于继续持有，不是账户收益；牛市中收益接近基准但回撤显著更小也有价值。",
+        )
+        joint_history = ReportTable(
+            "portfolio_joint_history", "预测 + 策略 + 风控完整链路",
+            ("股票", "历史决策样本", "保守方案", "激进方案", "结论"),
+            tuple(joint_ability_rows), "暂无完整链路历史回放。",
+            "完整链路用于判断预测、策略、风控和成交组合后是否仍然有效；原始逐事件记录请在“历史评估”页面查看。",
+        )
+        forecast_history_artifacts = tuple(
+            artifact
+            for member in value.instruments
+            for artifact in (
+                *member.forecast_outcomes,
+                *(item for item in member.metric_snapshots if str(_value(item.ledger_kind)) == "forecast"),
+            )
+        )
+        strategy_history_artifacts = tuple(
+            artifact
+            for member in value.instruments
+            for artifact in (
+                *member.strategy_outcomes,
+                *member.learning_evidence,
+                *(item for item in member.metric_snapshots if str(_value(item.ledger_kind)) == "strategy"),
+            )
+        )
+        joint_history_artifacts = tuple((
+            *value.portfolio_learning_evidence,
+            *(
+                artifact
+                for member in value.instruments
+                for artifact in (
+                    *member.joint_outcomes,
+                    *(item for item in member.metric_snapshots if str(_value(item.ledger_kind)) == "joint"),
+                )
+            ),
+        ))
+        grouped_actions = {"卖出/减仓": [], "买入/加仓": [], "持有/观察": []}
+        for row in quick_action_rows:
+            action = row.cells[2].split("；", 1)[0]
+            group = "卖出/减仓" if action in {"卖出", "减仓"} else "买入/加仓" if action in {"买入", "加仓"} else "持有/观察"
+            grouped_actions[group].append(row.cells[0])
+        focus_parts = []
+        for name, codes in grouped_actions.items():
+            if not codes:
+                continue
+            shown = "、".join(codes[:5])
+            suffix = f"等 {len(codes)} 只" if len(codes) > 5 else ""
+            focus_parts.append(f"{name}：{shown}{suffix}")
+        final_summary = f"{summary}\n本轮操作：" + ("；".join(focus_parts) if focus_parts else "当前没有需要立即执行或预留的组合动作")
         sections = (
-            _section("facts", "基本信息与数据核对", "先确认账户、股票、价格、交易日和来源", _table(facts, tuple(sorted({ref for row in facts.rows for ref in row.source_artifact_refs})) or (PRESENTATION_POLICY_REF,)), _table(qualities, tuple(sorted({ref for row in qualities.rows for ref in row.source_artifact_refs})) or (PRESENTATION_POLICY_REF,)), _callout(summary, account_refs)),
-            _section("forecast", "各股票未来走势预测", "说明目标日期、可能方向和预计收益", _table(forecasts, tuple(sorted({ref for row in forecasts.rows for ref in row.source_artifact_refs})) or (PRESENTATION_POLICY_REF,))),
-            _section("strategy", "策略选择与过去表现", "策略先服从预测情景，再比较收益和回撤", _table(strategies, tuple(sorted({ref for row in strategies.rows for ref in row.source_artifact_refs})) or (PRESENTATION_POLICY_REF,))),
-            _section("priority_actions", priority_title, "先保护退出，再持有管理，最后新增风险", _table(priorities, portfolio_refs)),
-            _section("profiles", "保守与激进组合方案", "说明现金、预留和组合风险", _table(profiles, portfolio_refs)),
-            _section("holdings", "持仓与盈亏", "核对数量、成本、现价和集中度", _table(holdings, account_refs)),
-            _section("plans", "逐股操作计划", "说明买卖条件、持有条件、失效和两种方案", _table(plans, tuple(sorted({ref for row in plans.rows for ref in row.source_artifact_refs})) or (PRESENTATION_POLICY_REF,))),
-            _section("watchlist", "关注股与替换机会", "研究候选不代表自动交易", _table(watchlist, watch_refs), _table(replacements, portfolio_refs)),
-            _section("research", "研究员观察", "研究独立展示，不改写正式操作", _table(research, tuple(sorted({ref for row in research.rows for ref in row.source_artifact_refs})) or (PRESENTATION_POLICY_REF,))),
-            _section("portfolio_overview", "最终结论", "汇总当前最需要处理的事情", _callout(final_summary, _refs(value.account_snapshot, valuation, bundle))),
-            _section("history", "历史可信度", "最后分别核对预测、策略和完整链路表现", _table(history, tuple(sorted({ref for row in history.rows for ref in row.source_artifact_refs})) or (PRESENTATION_POLICY_REF,))),
+            _section(
+                "action_summary", "操作总结", "先用一分钟确认本轮最需要处理什么",
+                _callout(final_summary, _refs(value.account_snapshot, valuation, bundle)),
+                _table(quick_actions, _table_refs(quick_actions)),
+            ),
+            _section(
+                "facts", "基本信息与数据核对", "确认股票、价格、交易日、持仓和数据来源是否与券商一致",
+                _table(facts, _table_refs(facts)),
+                _table(qualities, _table_refs(qualities)),
+                _table(holdings, account_refs),
+                _table(watchlist, watch_refs),
+                _callout(summary, account_refs),
+            ),
+            _section(
+                "forecast", "各股票未来走势预测", "用颜色和概率说明目标日期、可能方向和预计收益",
+                _table(forecasts, tuple(sorted({ref for row in forecasts.rows for ref in row.source_artifact_refs})) or (PRESENTATION_POLICY_REF,)),
+            ),
+            _section(
+                "operation_report", "详细操作报告", "先读通俗解读，再按卖出、买入和观察顺序核对冻结操作",
+                _table(editorial_table, _table_refs(editorial_table)),
+                _table(exit_signals, _table_refs(exit_signals)),
+                _table(entry_signals, _table_refs(entry_signals)),
+                _table(hold_signals, _table_refs(hold_signals)),
+                _table(profiles, portfolio_refs),
+                _table(replacements, portfolio_refs),
+                *(_table(item, _table_refs(item)) for item in holding_detail_tables),
+                *(_table(item, _table_refs(item)) for item in watch_detail_tables),
+            ),
+            _section(
+                "strategy_performance", "策略表现与回测依据", "说明为什么这样操作，并比较策略收益、基准收益和回撤控制",
+                _table(strategies, tuple(sorted({ref for row in strategies.rows for ref in row.source_artifact_refs})) or (PRESENTATION_POLICY_REF,)),
+                _table(strategy_history, _refs(*strategy_history_artifacts) if strategy_history_artifacts else (PRESENTATION_POLICY_REF,)),
+                _table(joint_history, _refs(*joint_history_artifacts) if joint_history_artifacts else (PRESENTATION_POLICY_REF,)),
+            ),
+            _section(
+                "research", "研究员补充观察", "LLM 研究员只补充机会和质疑，不改写正式操作",
+                _table(research, tuple(sorted({ref for row in research.rows for ref in row.source_artifact_refs})) or (PRESENTATION_POLICY_REF,)),
+            ),
+            _section(
+                "history", "系统历史可信度", "最后单独核对预测是否准确、样本是否足够",
+                _table(forecast_history, _refs(*forecast_history_artifacts) if forecast_history_artifacts else (PRESENTATION_POLICY_REF,)),
+            ),
         )
         title = f"{'A股' if _value(value.market) == 'A' else '美股'}组合交易工作台"
         identity = {"kind": ReportKind.PORTFOLIO, "market": value.market, "instrument": None, "mode": value.analysis_mode, "as_of": value.as_of, "title": title, "subtitle": value.history_period, "summary": summary, "sections": sections, "glossary": _GLOSSARY, "refs": value.source_artifact_refs, "schema": 1, "renderer": self.renderer_version}

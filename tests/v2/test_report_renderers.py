@@ -3,8 +3,11 @@ from test_presentation_contracts import _document,_input
 from presentation.renderers import render_html,render_markdown,render_pdf
 def test_ux53_html_is_self_contained(us_instrument,now):
     html=render_html(_document(_input(us_instrument,now)))
-    assert "cdn" not in html.lower() and "基本信息与数据核对" in html and "最终结论" in html
+    assert "cdn" not in html.lower() and "基本信息与数据核对" in html and "操作总结" in html
     assert "美东时间" in html and now.isoformat() not in html
+    assert 'class="contents"' in html and 'class="section-number"' in html
+    assert 'class="forecast-grid"' in html and 'class="forecast-card"' in html
+    assert 'class="operation-card' in html and 'class="probability-bars"' in html
 def test_ux54_pdf_is_readable_bytes(us_instrument,now): assert render_pdf(_document(_input(us_instrument,now))).startswith(b"%PDF")
 def test_ux55_export_failure_keeps_report(us_instrument,now,tmp_path):
     from application.exports import export_report

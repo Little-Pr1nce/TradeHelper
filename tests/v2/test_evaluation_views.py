@@ -4,9 +4,9 @@ from datetime import timedelta
 
 import pytest
 
-from presentation_helpers import forecast_outcome
-from application.evaluation import HistoricalEvaluationService, maturity_message
-from contracts import ContractViolation, HistoricalEvaluationQuery, LedgerKind, LedgerViewKind, LearningMetricSnapshot, Market, stable_hash
+from presentation_helpers import _forecasts, forecast_outcome, single_presentation
+from application.evaluation import HistoricalEvaluationService, IssuedForecastRecord, maturity_message
+from contracts import ContractViolation, DecisionMode, EvidenceOrigin, HistoricalEvaluationQuery, LedgerKind, LedgerViewKind, LearningMetricSnapshot, Market, OutcomeStatus, ReportKind, stable_hash
 
 
 def test_ux20_maturity_thresholds():
@@ -67,6 +67,64 @@ def test_empty_performance_charts_keep_financial_axes(now):
     assert view.charts[2].y_axis == "累计收益" and view.charts[3].y_axis == "回撤"
 
 
+def test_history_view_exposes_plain_forecast_and_strategy_summaries(us_instrument, now):
+    view = HistoricalEvaluationService().build(
+        HistoricalEvaluationQuery(Market.US),
+        outcomes=(forecast_outcome(us_instrument, now=now),),
+        built_at=now,
+    )
+    tables={table.table_id:table for table in view.tables}
+    assert tables["forecast_performance_summary"].rows[0].cells[0]=="AAPL"
+    assert tables["strategy_performance_summary"].empty_state
+    assert tables["strategy_exit_quality_summary"].empty_state
+    assert "预测是否准确" in tables["forecast_performance_summary"].interpretation
+
+
+def test_strategy_curve_requires_joint_account_replay(now):
+    view = HistoricalEvaluationService().build(HistoricalEvaluationQuery(Market.US), built_at=now)
+    assert not view.charts[2].series
+    assert "退出质量不是账户收益" in view.charts[2].interpretation
+
+
+def test_default_details_use_recent_30_days_without_narrowing_all_history_summary(us_instrument, now):
+    old = forecast_outcome(us_instrument, now=now - timedelta(days=40))
+    default_view = HistoricalEvaluationService().build(
+        HistoricalEvaluationQuery(Market.US, LedgerViewKind.FORECAST),
+        outcomes=(old,), built_at=now,
+    )
+    tables = {table.table_id: table for table in default_view.tables}
+    assert len(tables["forecast_performance_summary"].rows) == 1
+    assert not tables["forecast_event_details"].rows
+    assert "最近30天" in tables["forecast_event_details"].title
+
+    filtered_view = HistoricalEvaluationService().build(
+        HistoricalEvaluationQuery(
+            Market.US, LedgerViewKind.FORECAST,
+            date_from=now - timedelta(days=50), date_to=now - timedelta(days=30),
+        ),
+        outcomes=(old,), built_at=now,
+    )
+    filtered = {table.table_id: table for table in filtered_view.tables}
+    assert len(filtered["forecast_event_details"].rows) == 1
+    assert "筛选区间" in filtered["forecast_event_details"].title
+
+
+def test_repository_history_evaluation_loads_real_sqlite_read_path(tmp_path, now):
+    from application.evaluation import RepositoryHistoricalEvaluationService
+    from data.repository import SQLiteRepository
+    repository=SQLiteRepository(tmp_path/"history.sqlite")
+    try:
+        view=RepositoryHistoricalEvaluationService(repository,clock=lambda:now).load(
+            HistoricalEvaluationQuery(Market.US)
+        )
+        assert dict(view.maturity_summary)["matured_count"]==0
+        assert {table.table_id for table in view.tables}>={
+            "forecast_performance_summary","strategy_performance_summary",
+        }
+    finally:
+        repository.close()
+
+
 def test_filters_market_instrument_horizon_and_date(us_instrument, a_instrument, now):
     selected = forecast_outcome(us_instrument, now=now)
     other_market = forecast_outcome(a_instrument, now=now)
@@ -82,3 +140,126 @@ def test_dimensionless_metric_is_not_mixed_into_horizon_slice(us_instrument, now
     query = HistoricalEvaluationQuery(Market.US, horizon=1)
     view = HistoricalEvaluationService().build(query, metrics=(snapshot,), built_at=now)
     assert not view.tables[4].rows
+
+
+def test_scoped_metric_matches_instrument_and_horizon_but_not_unknown_mode(us_instrument, now):
+    metrics = (("brier", .2),)
+    scope = f"{us_instrument.stable_key}:h1:formal_model"
+    identity = {"ledger": LedgerKind.FORECAST, "scope": scope, "cutoff": now, "sample_count": 30, "metrics": metrics}
+    snapshot = LearningMetricSnapshot(stable_hash(identity), LedgerKind.FORECAST, scope, now, 30, metrics, now)
+    matching = HistoricalEvaluationService().build(
+        HistoricalEvaluationQuery(Market.US, instrument=us_instrument, horizon=1),
+        metrics=(snapshot,), built_at=now,
+    )
+    mode_specific = HistoricalEvaluationService().build(
+        HistoricalEvaluationQuery(Market.US, instrument=us_instrument, horizon=1, analysis_mode=DecisionMode.PRE),
+        metrics=(snapshot,), built_at=now,
+    )
+    assert len(matching.tables[4].rows) == 1
+    assert not mode_specific.tables[4].rows
+
+
+def test_issued_forecasts_keep_modes_separate_and_only_latest_revision_counts(us_instrument, now):
+    result = _forecasts(us_instrument)[0]
+    base = forecast_outcome(us_instrument, now=now)
+    reasons = base.reason_codes
+    identity = {
+        "forecast_event_key": result.event_key,
+        "origin": EvidenceOrigin.ISSUED_ONLINE,
+        "maturity": base.maturity_evidence_id,
+        "status": OutcomeStatus.MATURED,
+        "actual_return": base.actual_return,
+        "revision": base.maturity_evidence_id,
+        "reasons": reasons,
+    }
+    outcome = replace(
+        base, forecast_outcome_id=stable_hash(identity), forecast_event_key=result.event_key,
+        origin_session_date=result.origin_session_date, target_session_date=result.target_session_date,
+        horizon=result.horizon,
+    )
+    issued = (
+        IssuedForecastRecord(result, outcome, DecisionMode.PRE, ReportKind.SINGLE_STOCK, "pre-old", now-timedelta(minutes=10)),
+        IssuedForecastRecord(result, outcome, DecisionMode.PRE, ReportKind.PORTFOLIO, "pre-new", now),
+        IssuedForecastRecord(result, outcome, DecisionMode.EOD, ReportKind.PORTFOLIO, "eod", now-timedelta(hours=8)),
+    )
+    view = HistoricalEvaluationService().build(
+        HistoricalEvaluationQuery(Market.US, LedgerViewKind.FORECAST, us_instrument, 1, analysis_mode=DecisionMode.PRE),
+        outcomes=(outcome,), issued_forecasts=issued, built_at=now,
+    )
+    tables = {table.table_id: table for table in view.tables}
+    rows = tables["issued_forecast_details"].rows
+    assert len(rows) == 1
+    assert rows[0].cells[1:3] == ("盘前", "我的持仓")
+    assert rows[0].cells[0].endswith("美东时间")
+    mode_rows = {row.cells[0]: row.cells[1] for row in tables["mode_forecast_summary"].rows}
+    assert mode_rows["盘前"] == "1" and mode_rows["盘后"] == "1"
+
+    portfolio_view = HistoricalEvaluationService().build(
+        HistoricalEvaluationQuery(
+            Market.US, LedgerViewKind.FORECAST, us_instrument, 1,
+            analysis_mode=DecisionMode.PRE, report_kind=ReportKind.PORTFOLIO,
+        ),
+        outcomes=(outcome,), issued_forecasts=issued, built_at=now,
+    )
+    portfolio_rows = next(
+        table.rows for table in portfolio_view.tables
+        if table.table_id == "issued_forecast_details"
+    )
+    assert len(portfolio_rows) == 1
+    assert portfolio_rows[0].cells[2] == "我的持仓"
+    portfolio_tables = {table.table_id: table for table in portfolio_view.tables}
+    assert portfolio_tables["forecast_performance_summary"].rows[0].cells[0] == "AAPL"
+    assert dict(portfolio_view.maturity_summary)["matured_count"] == 1
+    assert portfolio_tables["ledger_summary"].rows[0].cells[1:3] == ("1", "1")
+
+
+@pytest.mark.parametrize("instrument_fixture", ("us_instrument", "a_instrument"))
+def test_repository_links_frozen_report_to_issued_forecast_and_outcome(
+    tmp_path, request, instrument_fixture, now, calendar,
+):
+    from application.evaluation import RepositoryHistoricalEvaluationService
+    from data.repository import SQLiteRepository
+    from presentation.report_builder import SingleStockReportBuilder
+
+    instrument = request.getfixturevalue(instrument_fixture)
+    presentation = single_presentation(instrument, now=now, calendar=calendar)
+    document = SingleStockReportBuilder().build(presentation)
+    forecast = presentation.forecasts[0]
+    base = forecast_outcome(instrument, now=now)
+    identity = {
+        "forecast_event_key": forecast.event_key,
+        "origin": EvidenceOrigin.ISSUED_ONLINE,
+        "maturity": base.maturity_evidence_id,
+        "status": OutcomeStatus.MATURED,
+        "actual_return": base.actual_return,
+        "revision": base.maturity_evidence_id,
+        "reasons": base.reason_codes,
+    }
+    outcome = replace(
+        base,
+        forecast_outcome_id=stable_hash(identity),
+        forecast_event_key=forecast.event_key,
+        origin_session_date=forecast.origin_session_date,
+        target_session_date=forecast.target_session_date,
+        horizon=forecast.horizon,
+    )
+    repository = SQLiteRepository(tmp_path / "issued-history.sqlite")
+    try:
+        repository.save_forecast_result(forecast)
+        repository.save_forecast_outcome(outcome)
+        repository.save_report_document(document)
+        view = RepositoryHistoricalEvaluationService(repository, clock=lambda: now).load(
+            HistoricalEvaluationQuery(
+                instrument.market,
+                LedgerViewKind.FORECAST,
+                instrument,
+                forecast.horizon,
+                analysis_mode=document.analysis_mode,
+            )
+        )
+        issued = next(table for table in view.tables if table.table_id == "issued_forecast_details")
+        assert len(issued.rows) == 1
+        assert issued.rows[0].cells[3] == instrument.code
+        assert issued.rows[0].cells[-1] == "正确"
+    finally:
+        repository.close()

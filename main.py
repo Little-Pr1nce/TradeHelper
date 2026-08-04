@@ -15,6 +15,7 @@ from config.settings import V2Settings
 from ui.app import build_app
 from ui.pages.single_stock import SingleStockPage
 from ui.pages.portfolio import PortfolioPage
+from ui.pages.evaluation import AbilityEvaluationPage
 from ui.pages.report_history import ReportHistoryPage
 from ui.pages.settings import settings_page
 from ui.pages.migration import MigrationPage
@@ -53,9 +54,12 @@ def _main(page: ft.Page) -> None:
                              export_port=lambda document, *, format: export_report_and_reveal(container.repository, document, directory=container.settings.work_dir/"reports", format=format))
         portfolio = PortfolioPage(editor=container.portfolio_editor, lookup_port=container.lookup,
                               analysis_port=container.analysis, export_port=lambda document, *, format: export_report_and_reveal(container.repository, document, directory=container.settings.work_dir/"reports", format=format),
-                              evaluation_port=RepositoryHistoricalEvaluationService(container.repository),
                               account_loader=container.repository.get_latest_account_snapshot,
                               watchlist_loader=container.repository.latest_watchlist_snapshot)
+        evaluation = AbilityEvaluationPage(
+            evaluation_port=RepositoryHistoricalEvaluationService(container.repository),
+            lookup_port=container.lookup,
+        )
         initial_account=container.repository.get_latest_account_snapshot(Market.US) or container.repository.get_latest_account_snapshot(Market.A)
         if initial_account is not None:
             portfolio.set_account(initial_account)
@@ -72,7 +76,7 @@ def _main(page: ft.Page) -> None:
             return f"{instrument.code} 元数据 {metadata.status.value}；日K {bars.status.value}"
         settings = settings_page(container.settings, save_port=lambda value: value.save(),live_test_port=live_test)
         migration = MigrationPage(container.repository, lifecycle.migration_source) if lifecycle.migration_source else None
-        page.add(build_app(single, history, portfolio, settings, migration))
+        page.add(build_app(single, history, portfolio, settings, migration, evaluation=evaluation))
         if os.environ.get("TRADEHELPER_SMOKE_TEST") == "1":
             page.add(ft.Text("V2 smoke mode: runtime initialized", size=12))
         logger.info("Flet UI session ready migration_status=%s", container.migration_status)

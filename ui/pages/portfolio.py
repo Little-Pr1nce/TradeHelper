@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import inspect
+import logging
 
 import flet as ft
 
-from contracts import ExportFormat, HistoricalEvaluationQuery, LedgerViewKind, Market
-from ..components.evaluation_charts import evaluation_charts
+from contracts import ExportFormat, Market
 from ..components.progress_panel import progress_panel
 from ..components.report_view import report_view
 from ..theme import DANGER, PRIMARY, SURFACE_MUTED, TEXT, TEXT_MUTED, configure_field, feedback_banner, page_heading, panel, primary_button, secondary_button
+from ..update_dispatch import rebuild_on_page
+
+logger = logging.getLogger(__name__)
 
 
 class PortfolioPage:
     """Tab3 portfolio workbench with immutable account/watchlist edits."""
 
-    def __init__(self, editor=None, lookup_port=None, analysis_port=None, export_port=None, evaluation_port=None, account_loader=None, watchlist_loader=None):
+    def __init__(self, editor=None, lookup_port=None, analysis_port=None, export_port=None, account_loader=None, watchlist_loader=None):
         self.document = None
         self.account = None
         self.watchlist_snapshot = None
@@ -22,14 +25,12 @@ class PortfolioPage:
         self.lookup_port = lookup_port
         self.analysis_port = analysis_port
         self.export_port = export_port
-        self.evaluation_port = evaluation_port
         self.account_loader = account_loader
         self.watchlist_loader = watchlist_loader
         self.analysis_mode = "eod"
         self.history_period = "1y"
         self.progress = None
         self.error = None
-        self.evaluation_view = None
         self.running_task_id = None
         self.busy = False
         self.notice = None
@@ -50,8 +51,7 @@ class PortfolioPage:
         return self.document is not None
 
     def _update(self):
-        if self._root is not None and self._root.page is not None:
-            self._root.content = self._content(); self._root.update()
+        rebuild_on_page(self._root, self._content)
 
     def set_document(self, document):
         revised = self.document is not None and self.document.report_id != document.report_id
@@ -95,7 +95,7 @@ class PortfolioPage:
 
     def _section_changed(self, event):
         selected = tuple(getattr(event.control, "selected", ()))
-        if selected:
+        if selected and selected[0] in {"account", "watchlist"}:
             self.active_section = selected[0]
             self._update()
 
@@ -105,9 +105,6 @@ class PortfolioPage:
             selected = tuple(getattr(event.control, "selected", ()))
             value = selected[0] if selected else self.selected_market.value
         self._select_market(value)
-
-    def set_evaluation(self, view):
-        self.evaluation_view = view; self._update()
 
     def edit_position(self, account, *, instrument, shares, cost_price):
         if self.editor is None:
@@ -379,47 +376,6 @@ class PortfolioPage:
             *([] if rows else [ft.Text("关注列表为空", color=TEXT_MUTED)]),
         ], spacing=8)
 
-    def _evaluation_view(self):
-        market = configure_field(ft.Dropdown(label="市场", value=self.selected_market.value, options=[ft.dropdown.Option("US", "美股"), ft.dropdown.Option("A", "A股")], width=125))
-        ledger = configure_field(ft.Dropdown(label="账本", value="all", options=[ft.dropdown.Option("all", "全部"), ft.dropdown.Option("forecast", "预测"), ft.dropdown.Option("strategy", "策略"), ft.dropdown.Option("joint", "联合"), ft.dropdown.Option("research", "研究")], width=125))
-        instrument = configure_field(ft.TextField(label="股票代码或公司名（可选）", width=230))
-        horizon = configure_field(ft.Dropdown(label="周期", value="all", options=[ft.dropdown.Option("all", "全部"), *(ft.dropdown.Option(str(item), f"{item}日") for item in (1, 3, 5, 10))], width=110))
-
-        def refresh(_event=None):
-            try:
-                selected_market = Market(market.value)
-                selected_instrument = None
-                if instrument.value.strip():
-                    if self.lookup_port is None:
-                        raise ValueError("未配置股票检索服务")
-                    matches = tuple(self.lookup_port(selected_market.value, instrument.value.strip()))
-                    if not matches:
-                        raise ValueError("未找到股票")
-                    selected_instrument = getattr(matches[0], "instrument", matches[0])
-                query = HistoricalEvaluationQuery(
-                    selected_market,
-                    None if ledger.value == "all" else LedgerViewKind(ledger.value),
-                    selected_instrument,
-                    None if horizon.value == "all" else int(horizon.value),
-                )
-                if self.evaluation_port is None:
-                    raise ValueError("未配置历史评估服务")
-                method = getattr(self.evaluation_port, "load", self.evaluation_port)
-                self.evaluation_view = method(query)
-                self.error = None
-            except Exception as exc:
-                self.error = str(exc)
-            self._update()
-
-        toolbar = ft.Row([market, ledger, instrument, horizon, ft.IconButton(ft.Icons.REFRESH, tooltip="刷新历史评估", on_click=refresh)], wrap=True)
-        if self.evaluation_view is None:
-            return ft.Column([toolbar, ft.Text("暂无历史评估读模型。运行分析后，成熟结果将在这里按市场和股票独立展示。")])
-        tables = []
-        from ..components.report_view import table_control
-        for table in self.evaluation_view.tables:
-            tables.append(table_control(table))
-        return ft.Column([toolbar, evaluation_charts(self.evaluation_view), *tables], spacing=14)
-
     def _input_content(self):
         market=configure_field(ft.Dropdown(label="账户/市场",value=self.selected_market.value,options=[ft.dropdown.Option("US","美股"),ft.dropdown.Option("A","A股")],width=140))
         mode=configure_field(ft.Dropdown(label="分析时段",value=self.analysis_mode,options=[ft.dropdown.Option("pre","盘前"),ft.dropdown.Option("intraday","盘中"),ft.dropdown.Option("eod","盘后")],width=145))
@@ -432,14 +388,12 @@ class PortfolioPage:
             segments=[
                 ft.Segment(value="account", label=ft.Text("账户与持仓"), icon=ft.Icon(ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED)),
                 ft.Segment(value="watchlist", label=ft.Text("关注列表"), icon=ft.Icon(ft.Icons.STAR_OUTLINE)),
-                ft.Segment(value="evaluation", label=ft.Text("历史评估"), icon=ft.Icon(ft.Icons.INSIGHTS_OUTLINED)),
             ],
             on_change=self._section_changed,
         )
         section_content = {
             "account": self._account_view,
             "watchlist": self._watchlist_view,
-            "evaluation": self._evaluation_view,
         }[self.active_section]()
         actions=[
             primary_button("分析运行中" if self.busy else "开始组合分析",ft.Icons.HOURGLASS_TOP if self.busy else ft.Icons.PLAY_ARROW,self._start,disabled=self.busy),
@@ -477,7 +431,7 @@ class PortfolioPage:
         banner = feedback_banner(self.error or self.notice, error=bool(self.error))
         if banner is not None:
             controls.append(banner)
-        controls.append(panel(report_view(self.document)))
+        controls.append(report_view(self.document))
         return ft.Column(controls, expand=True, scroll=ft.ScrollMode.AUTO, spacing=14)
 
     def _content(self):

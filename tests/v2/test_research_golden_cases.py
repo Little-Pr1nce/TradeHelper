@@ -9,7 +9,7 @@ from research_helpers import context_response, fact, forecast_item, response_jso
 from contracts import (CandidateEligibility, ContractViolation, Exchange, HypothesisKind, HypothesisOutcomeStatus, HypothesisValidationStatus, InstrumentId, InvocationStatus, Market, RawResearchResponse, ResearchRunStatus, ResearchScope, stable_hash)
 from data.repository import SQLiteRepository
 from research.bridge import CandidateBridge
-from research.client import LLMResearchRequest, OpenAICompatibleResearchClient, ResearchClientCapabilities
+from research.client import LLMResearchRequest, OpenAICompatibleResearchClient, ResearchClientCapabilities, capabilities_for_endpoint, output_token_budget
 from research.context import ResearchContextBuilder
 from research.engine import ResearchEngine
 from research.parser import StrictHypothesisParser
@@ -72,6 +72,50 @@ def test_openai_compatible_client_keeps_credentials_out_of_response(us_instrumen
     client=OpenAICompatibleResearchClient(endpoint="https://example.invalid/v1",api_key="secret",prompts={"r":json.dumps({"output_schema":{"type":"object"}})},capabilities=ResearchClientCapabilities(True,True,False,False),transport=lambda *_: {"id":"provider-id","choices":[{"finish_reason":"stop","message":{"content":"{}"}}],"usage":{"total_tokens":3}})
     response=client.generate(request)
     assert response.invocation_status is InvocationStatus.SUCCEEDED and "secret" not in response.content
+
+
+def test_deepseek_v4_receives_explicit_non_thinking_toggle(now):
+    captured={}
+    capabilities=capabilities_for_endpoint("https://api.deepseek.com")
+    request=LLMResearchRequest.for_capabilities(
+        capabilities=capabilities,request_id="r",context_id="c",prompt_version="p",
+        prompt_hash="a"*64,json_schema_version=1,provider_name="deepseek",
+        model_name="deepseek-v4-pro",requested_at=now,thinking_enabled=False,
+    )
+    client=OpenAICompatibleResearchClient(
+        endpoint="https://api.deepseek.com",api_key="secret",prompts={"r":"{}"},
+        capabilities=capabilities,
+        transport=lambda _endpoint,body,_key,_timeout:(
+            captured.update(body) or
+            {"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}
+        ),
+    )
+    client.generate(request)
+    assert captured["thinking"]=={"type":"disabled"}
+    assert captured["temperature"]==0.0
+
+
+def test_deepseek_v4_thinking_switch_has_larger_budget_and_no_temperature(now):
+    captured={}
+    capabilities=capabilities_for_endpoint("https://api.deepseek.com")
+    request=LLMResearchRequest.for_capabilities(
+        capabilities=capabilities,request_id="r",context_id="c",prompt_version="p",
+        prompt_hash="a"*64,json_schema_version=1,provider_name="deepseek",
+        model_name="deepseek-v4-pro",requested_at=now,thinking_enabled=True,
+        max_output_tokens=output_token_budget(True),
+    )
+    client=OpenAICompatibleResearchClient(
+        endpoint="https://api.deepseek.com",api_key="secret",prompts={"r":"{}"},
+        capabilities=capabilities,
+        transport=lambda _endpoint,body,_key,_timeout:(
+            captured.update(body) or
+            {"choices":[{"finish_reason":"stop","message":{"content":"{}"}}]}
+        ),
+    )
+    client.generate(request)
+    assert captured["thinking"]=={"type":"enabled"}
+    assert "temperature" not in captured
+    assert request.max_output_tokens>output_token_budget(False)
 
 def test_client_success_cache_is_bound_to_prompt_hash_and_model(now):
     calls=[]
@@ -240,6 +284,52 @@ def test_ll36_unknown_predicate_operator_is_rejected(us_instrument,now):
     context,response,facts=context_response(us_instrument,now); item=forecast_item(us_instrument,facts[0].fact_id,predicate={"op":"eval","fact_ref":facts[0].fact_id,"constant":1})
     value=StrictHypothesisParser().parse(content=response_json(context,[item]),context=context,response=response)
     assert value[0].kind is HypothesisKind.IMPLEMENTATION_PROPOSAL
+
+
+def test_numeric_predicate_rejects_text_fact_before_validation(us_instrument,now):
+    text_fact=fact(us_instrument,now,key="feature.context.market",value="US")
+    context,response,facts=context_response(us_instrument,now,facts=(text_fact,))
+    item=forecast_item(
+        us_instrument,facts[0].fact_id,
+        predicate={"op":"gte","fact_ref":facts[0].fact_id,"constant":1},
+    )
+    with pytest.raises(ContractViolation):
+        StrictHypothesisParser().parse(
+            content=response_json(context,[item]),context=context,response=response,
+        )
+
+
+def test_predicate_fact_ref_is_canonical_evidence_without_duplicate_copy(us_instrument,now):
+    first=fact(us_instrument,now,key="feature.closed.rsi_14",value=55)
+    second=fact(us_instrument,now,key="feature.closed.return_5",value=0.02)
+    context,response,facts=context_response(us_instrument,now,facts=(first,second))
+    item=forecast_item(
+        us_instrument,facts[0].fact_id,
+        predicate={"op":"gte","fact_ref":facts[1].fact_id,"constant":0.01},
+    )
+    parsed=StrictHypothesisParser().parse(
+        content=response_json(context,[item]),context=context,response=response,
+    )
+    assert set(parsed[0].evidence_refs)=={facts[0].fact_id,facts[1].fact_id}
+
+
+def test_frozen_plan_reference_is_canonicalized_to_generic_artifact(us_instrument,now):
+    frozen=fact(us_instrument,now,source_refs=("frozen-plan-id",))
+    context,response,facts=context_response(us_instrument,now,facts=(frozen,))
+    item={
+        "kind":"system_challenge","instrument_key":us_instrument.stable_key,
+        "title":"计划冲突","thesis":"冻结计划与当前事实存在冲突。",
+        "evidence_refs":[facts[0].fact_id],
+        "payload":{
+            "challenged_artifact_type":"strategy",
+            "challenged_artifact_id":"frozen-plan-id",
+            "challenge_kind":"strategy_too_restrictive",
+        },
+    }
+    parsed=StrictHypothesisParser().parse(
+        content=response_json(context,[item]),context=context,response=response,
+    )
+    assert dict(parsed[0].payload)["challenged_artifact_type"]=="artifact"
 
 def test_ll37_candidate_is_always_candidate(us_instrument,now):
     h=SimpleNamespace(hypothesis_id="h",business_key="b",response_id="r",context_id="c",kind=HypothesisKind.MODEL_CONFIGURATION,payload=(("registered_model_family","analog"),)); v=SimpleNamespace(candidate_eligibility=CandidateEligibility.ELIGIBLE_FOR_OOF)

@@ -118,7 +118,7 @@ def test_single_stock_real_chain_all_markets_and_modes(tmp_path, market, mode):
     try:
         document = RuntimeAnalysisPipeline(container).single_stock(command)
         assert document.report_kind is ReportKind.SINGLE_STOCK
-        assert {section.section_id for section in document.sections} >= {"forecast", "plans", "risk", "history"}
+        assert {section.section_id for section in document.sections} >= {"forecast", "operation_report", "strategy_performance", "history"}
     finally:
         container.close()
 
@@ -133,7 +133,7 @@ def test_portfolio_real_chain_all_markets_and_modes(tmp_path, market, mode):
         document = RuntimeAnalysisPipeline(container).portfolio(command)
         assert document.report_kind is ReportKind.PORTFOLIO
         assert "冻结账户权益" in document.summary
-        assert {section.section_id for section in document.sections} >= {"priority_actions", "holdings", "forecast"}
+        assert {section.section_id for section in document.sections} >= {"action_summary", "facts", "forecast", "operation_report"}
     finally:
         container.close()
 

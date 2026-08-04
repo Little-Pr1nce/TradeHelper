@@ -23,6 +23,7 @@ def _matches_identity(
     parameter_hash,
     profile,
     evaluation_horizon,
+    action=None,
 ):
     return (
         item.instrument == instrument
@@ -31,6 +32,7 @@ def _matches_identity(
         and item.parameter_hash == parameter_hash
         and item.profile == profile.value
         and (evaluation_horizon is None or item.evaluation_horizon == evaluation_horizon)
+        and (action is None or item.action == action)
     )
 
 
@@ -61,11 +63,13 @@ def plan_evidence(
     cutoff_at,
     generated_at,
     evaluation_horizon=None,
+    action=None,
 ):
-    """只使用同一股票/策略/profile/周期的成熟 OOF 成交结果计算证据。
+    """只使用同一股票/策略/profile/动作/周期的成熟 OOF 结果计算证据。
 
     在线 issued 样本保留在 ``sample_count`` 中用于覆盖率观察，但不会进入
-    可执行证据的收益、置信区间或 ``oof_sample_count``。
+    可执行证据的收益、置信区间或 ``oof_sample_count``。买入/加仓使用真实
+    交易净收益；卖出/减仓使用退出质量，二者不得混合。
     """
     matching = tuple(
         item
@@ -78,17 +82,26 @@ def plan_evidence(
             parameter_hash=parameter_hash,
             profile=profile,
             evaluation_horizon=evaluation_horizon,
+            action=action,
         )
         and getattr(item, "evaluated_at", item.generated_at) <= cutoff_at
     )
     sliced = tuple(item for item in matching if item.status is OutcomeStatus.MATURED)
-    filled = tuple(
-        item
-        for item in sliced
-        if item.fill_outcome in {"filled", "partial"} and item.net_return is not None
-    )
+    if action in {"sell", "reduce"}:
+        filled = tuple(
+            item for item in sliced
+            if item.fill_outcome in {"filled", "partial"}
+            and getattr(item, "exit_quality", None) is not None
+        )
+        value_of = lambda item: item.exit_quality
+    else:
+        filled = tuple(
+            item for item in sliced
+            if item.fill_outcome in {"filled", "partial"} and item.net_return is not None
+        )
+        value_of = lambda item: item.net_return
     oof = tuple(item for item in filled if item.evidence_origin is EvidenceOrigin.RECONSTRUCTED_OOF)
-    values = tuple(float(item.net_return) for item in oof)
+    values = tuple(float(value_of(item)) for item in oof)
     count = len(oof)
     expected = mean(values) if values else None
     interval = block_bootstrap_interval(values, seed=int(parameter_hash[:8], 16)) if values else None
@@ -117,6 +130,8 @@ def plan_evidence(
         "data_cutoff_at": cutoff_at,
         "evaluated_at": cutoff_at,
     }
+    if action is not None:
+        identity["action"] = action
     return PlanEvidenceSnapshot(
         stable_hash(identity),
         instrument,
@@ -132,4 +147,5 @@ def plan_evidence(
         cutoff_at,
         cutoff_at,
         generated_at,
+        action,
     )
