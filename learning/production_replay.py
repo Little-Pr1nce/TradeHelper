@@ -40,6 +40,7 @@ from portfolio import (
 from risk import freeze_account_valuation
 from risk.market_rules import default_market_rules
 from strategies.registry import default_specs
+from strategies.policy import POLICY_VERSION as STRATEGY_POLICY_VERSION
 
 
 _HORIZONS = (1, 3, 5, 10)
@@ -377,7 +378,7 @@ class HistoricalStrategyReplayer:
         valuation = freeze_account_valuation(account, {instrument: price}, as_of, generated_at=as_of)
         position = account.positions[0] if account.positions else None
         strategy = self.strategy_engine.build(
-            StrategyInput(instrument, snapshot, scenario, position, default_specs(), "strategy_policy_v1", as_of),
+            StrategyInput(instrument, snapshot, scenario, position, default_specs(), STRATEGY_POLICY_VERSION, as_of),
             generated_at=as_of,
         )
         plans = {

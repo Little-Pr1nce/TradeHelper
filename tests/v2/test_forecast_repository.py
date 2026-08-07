@@ -4,7 +4,7 @@ from hashlib import sha256
 import sqlite3
 
 from contracts import (
-    ForecastAvailability, ForecastModelVersion, ForecastResult, ForecastScope, ModelFamily,
+    EvidenceOrigin, ForecastAvailability, ForecastModelVersion, ForecastResult, ForecastScope, ModelFamily,
     ModelLifecycle, ModelSpec, ValidationStatus, stable_hash,
 )
 from data.migrations.schema import apply_schema
@@ -12,6 +12,7 @@ from data.repository import SQLiteRepository
 from forecast.models import fit_model
 from forecast.registry import ForecastRegistry
 from tests.v2.forecast_helpers import synthetic_samples
+from presentation_helpers import forecast_outcome
 
 
 def test_fc15_migration_six_creates_forecast_persistence_tables(tmp_path) -> None:
@@ -78,6 +79,26 @@ def test_market_forecast_projection_keeps_a_share_and_us_records_separate(
         repository.close()
 
 
+def test_market_forecast_outcome_query_filters_market_horizon_and_origin(
+    tmp_path, us_instrument, a_instrument, now,
+) -> None:
+    repository = SQLiteRepository(tmp_path / "forecast-outcomes-market.db")
+    us_outcome = forecast_outcome(us_instrument, now=now)
+    a_outcome = forecast_outcome(a_instrument, now=now)
+    try:
+        repository.save_forecast_outcome(us_outcome)
+        repository.save_forecast_outcome(a_outcome)
+        assert repository.list_market_forecast_outcomes(
+            us_instrument.market, horizon=1, origin=EvidenceOrigin.ISSUED_ONLINE,
+        ) == (us_outcome,)
+        assert repository.list_market_forecast_outcomes(
+            a_instrument.market, horizon=1, origin=EvidenceOrigin.ISSUED_ONLINE,
+        ) == (a_outcome,)
+        assert repository.list_market_forecast_outcomes(us_instrument.market, horizon=3) == ()
+    finally:
+        repository.close()
+
+
 def test_fc15_champion_and_evaluations_survive_restart(tmp_path, us_instrument, now) -> None:
     path = tmp_path / "forecast.db"; version = _model_version(us_instrument, now)
     repository = SQLiteRepository(path)
@@ -99,6 +120,28 @@ def test_fc15_champion_and_evaluations_survive_restart(tmp_path, us_instrument, 
     evaluations = reopened.list_forecast_model_evaluations(version.version)
     assert evaluations[0]["payload"] == {"brier": 0.4, "samples": 80}
     reopened.close()
+
+
+def test_failed_fresh_oof_can_atomically_retire_stale_champion(tmp_path, us_instrument, now) -> None:
+    repository = SQLiteRepository(tmp_path / "forecast-retire.db")
+    version = _model_version(us_instrument, now)
+    try:
+        repository.promote_forecast_model(version)
+        assert repository.retire_forecast_champion(
+            market=us_instrument.market, scope=ForecastScope.STOCK,
+            scope_key=us_instrument.stable_key, horizon=1,
+            expected_version="newer-version",
+        ) is None
+        assert len(repository.list_forecast_champions()) == 1
+        assert repository.retire_forecast_champion(
+            market=us_instrument.market, scope=ForecastScope.STOCK,
+            scope_key=us_instrument.stable_key, horizon=1,
+            expected_version=version.version,
+        ) == version.version
+        assert repository.list_forecast_champions() == ()
+        assert repository.get_forecast_model_version(version.version).lifecycle is ModelLifecycle.RETIRED
+    finally:
+        repository.close()
 
 
 def test_latest_oof_validation_verdict_survives_restart(tmp_path, us_instrument, now) -> None:

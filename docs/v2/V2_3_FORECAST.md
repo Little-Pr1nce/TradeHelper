@@ -396,7 +396,7 @@ context 当前缺失时不能用个股自身走势冒充。一个候选只有在
 
 ### 6.1 依赖决策
 
-Multinomial Logistic 和 DecisionTree 使用 scikit-learn 的成熟实现，不再复制 V1 手写梯度下降和手写树。实现时允许新增唯一的预测依赖：
+Multinomial Logistic、DecisionTree 和 ExtraTrees 使用 scikit-learn 的成熟实现，不再复制 V1 手写梯度下降和手写树。实现时允许新增唯一的预测依赖：
 
 ```text
 scikit-learn>=1.5,<2.0
@@ -410,14 +410,17 @@ scikit-learn>=1.5,<2.0
 
 | family | 参数空间 | 允许特征集 |
 |------|------|------|
-| empirical | Laplace alpha=1 | tech，仅作基线，不参与候选数量 |
+| empirical | Laplace alpha=1；固定 120/250 日滚动窗口 | tech；全历史版本作基线，滚动版本可作为候选 |
 | analog | k=40/80，距离权重 `1/(d+1e-6)` | tech/full |
-| multinomial_logistic | C=0.1/1.0，L2，max_iter=1000 | tech/tech_news/tech_fund/full |
-| probability_tree | max_depth=2/3，min_samples_leaf=max(15, 2%训练样本) | tech/full |
+| multinomial_logistic | C=0.1，L2，max_iter=1000 | tech/trend/reversion 及满足覆盖率的扩展集 |
+| probability_tree | max_depth=2，min_samples_leaf=max(15, 2%训练样本) | tech/trend/reversion |
+| probability_forest | ExtraTrees 24 棵、max_depth=4、max_features=0.7、单线程、固定 seed | market panel 的 tech；最终收益区间和校准仍绑定目标股票 |
 | ensemble | analog80 + logisticC0.1，固定 0.5/0.5 | tech/full |
 | regime_analog | k=40/80，仅匹配同 regime | tech |
 
 若组合超过 20，按 ModelSpec 的固定 `complexity_rank` 截断，不能根据结果动态增加候选。
+
+受控候选允许少量预注册 `market_panel` 版本。它们只在同一市场内共享方向关系，用来缓解单股样本不足；每个历史原点只能读取当时已经成熟的跨股票标签。概率校准、收益分位数、最终 OOF 判定和 Champion 身份仍绑定目标股票，A股与美股不得混池。面板模型不是市场级 fallback，也不能因为其他股票表现好而绕过目标股票 confirmation。
 
 ### 6.3 Regime 定义
 
@@ -437,13 +440,16 @@ regime = down_or_flat/up × low/mid/high_vol
 - 每个 OOF 训练窗口最后 20% 的已成熟样本作为内部校准段，至少 30 条；其余样本训练基础模型。
 - 校准段不参与基础模型拟合。
 - 使用单参数 temperature scaling，`T` 限制在 `[0.5, 5.0]`，最小化校准段 Log Loss。
+- 温度缩放后允许向“基础模型训练段”的 Laplace 类别先验做 `[0, 0.6]` 固定网格凸收缩，收缩强度只在内部校准段选择。禁止用校准段类别频率作为收缩目标，否则会追逐近期随机涨跌分布。
+- empirical 模型的方向概率就是历史类别频率，不再对同一概率重复做温度缩放；内部校准段只用于调整 P10/P90 收益区间宽度，之后用完整成熟历史重算方向概率。
+- `market_panel` 候选的方向参数使用同市场成熟面板拟合，但温度、先验收缩、收益历史和区间尺度只使用目标股票的无泄漏校准段。
 - 校准样本不足时不拟合温度，`T=1`，模型仍可评估但不能仅凭 ECE 优势晋升。
 
 ### 6.5 收益区间
 
 - empirical：训练成熟收益等权分位数。
 - analog/regime_analog：近邻距离权重分位数。
-- logistic/tree：对训练收益使用 `weight_i = current_probability[label_i] / class_count[label_i]`，再计算加权分位数。
+- logistic/tree/forest：对训练收益使用 `weight_i = current_probability[label_i] / class_count[label_i]`，再计算加权分位数。
 - ensemble：使用两个成员的收益权重混合，权重与概率混合一致。
 - 任一类别训练计数为 0 时使用 Laplace 平滑概率，但该类别没有收益样本时不能伪造收益；退回全部训练收益等权分布并记录 `RETURN_CLASS_EMPTY_FALLBACK`。
 
@@ -469,7 +475,7 @@ s.feature_snapshot.cutoff_at <= s.origin_session 收盘后的合法 EOD 截止�
 - stock 最少 80 条成熟训练样本后才能产生第一个 OOF 点。
 - industry/market 最少 200 条成熟训练样本，且至少覆盖 5 只股票。
 - 可评估 OOF 点少于 60 时为 `insufficient_sample`。
-- 最后至少 `max(30, ceil(OOF点数 × 25%))` 个点为 confirmation，其余为 selection；切分必须移动到完整交易日边界，不能拆开同日横截面；selection 也必须至少 30 点。
+- 最后至少 `max(30, ceil(OOF点数 × 25%))` 个点为 confirmation。候选选型只使用 confirmation 之前最近最多 360 个完整交易日；120/252/360 日窗口已在独立开发回放中比较，360 日在保留近期适应性的同时稳定性更好。较早 OOF 继续用于模型拟合、长期稳定性和审计；边界不得拆开同日横截面，selection 也必须至少 30 点。
 - 所有候选只在 selection 比较。只能把 selection 排名第一的一个候选带入 confirmation。
 - confirmation 不能用于改特征、改标签、调参数、换主要指标或选择另一个候选。
 - 同一天的跨股票样本必须作为一个时间组移动，不能把同日股票随机拆到训练和测试两侧。
@@ -482,7 +488,9 @@ s.feature_snapshot.cutoff_at <= s.origin_session 收盘后的合法 EOD 截止�
 p(class) = (class_count + 1) / (total_count + 3)
 ```
 
-收益区间使用成熟历史收益等权分位数。基线是比较对象和无 Champion 时的观察输出，永远 `execution_eligible=False`。
+收益区间使用成熟历史收益等权分位数。普通经验基线仍只是比较对象和无 Champion 时的观察输出，`execution_eligible=False`。
+
+当复杂候选没有通过相对基线晋升时，允许对股票自身经验基线再执行一套独立绝对质量门：selection 和 confirmation 均须至少 30 个样本，三分类 Brier 不高于 0.66、Log Loss 不高于 `ln(3)`、ECE 不高于 0.15，80% 区间覆盖须位于 65% 至 95%。全部通过时登记为 `validated-empirical-stock`，只按 `noninferior` 的 B 级证据参与小仓验证；它不代表发现 Alpha，也不得升级为 A 级。任何指标不合格时继续保持观察基线，不能为了提高覆盖率放宽门槛。
 
 ### 7.4 股票、行业和市场范围
 
@@ -568,6 +576,8 @@ selection 唯一胜者在 untouched confirmation 中必须全部满足：
 4. 写 promotion event。
 
 不可原地修改旧 ModelVersion。
+
+每次同股票、同周期的新 OOF 如果明确返回 `evaluated_not_better`、`calibration_failed` 或 `drifted`，而不是临时性的 `insufficient_sample`，repository 与内存 registry 必须按版本一致性保护共同退役旧 Champion。旧模型不能仅凭过去一次通过而永久参与执行；退役后回到明确的经验基线，等待后续候选重新通过。
 
 ### 9.2 选择层级
 
@@ -762,3 +772,11 @@ venv/bin/python -m pytest tests/ -q
 ```
 
 完成 V2-3 后必须停止。V2-4 情景层开始前另行制定 `TradingScenario` 精确合同，不得在 ForecastResult 中提前塞入交易动作。
+
+## 17. 2026-08-06 在线表现执行门槛补充
+
+- OOF 晋升只证明模型在历史样本外流程中曾通过检验，不代表永久获得执行资格。生产分析必须继续按市场和预测周期统计已到期的在线预测。
+- 在线门槛使用最近最多 120 个去重事件；同一股票、起点、目标日和周期的重复运行只保留最新事实，不能靠重复分析虚增样本。
+- 少于 20 个成熟事件时继续服从原 OOF 结论；样本充足后，同时检查方向正确率相对多数类基准和三分类 Brier。明显低于简单基准时，预测概率继续展示，但暂停影响新开仓。
+- 暂停执行必须生成带 `live-observation-v1` 后缀的独立模型身份和事件键，禁止用同一事件键覆盖原正式预测；报告仍展示原正式模型的 OOF 指标，不得误称为经验基线。
+- 在线门槛是风险保险丝，不负责自动美化结果。模型恢复执行资格仍需新的成熟在线证据或重新完成训练、OOF 选择和确认流程。

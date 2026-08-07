@@ -16,6 +16,7 @@ _REASONS={
     "RISK_PORTFOLIO_ALLOCATION_PENDING":"单股已通过初审，最终股数等待组合资金分配。",
     "RISK_SMALL_SAMPLE":"历史样本不足，只允许小仓验证。",
     "RISK_PLAN_OBSERVATION_ONLY":"该计划仅供观察，不生成可执行订单。",
+    "TRIGGER_OUTSIDE_ACTIONABLE_RANGE":"触发价超出本计划有效期内的合理波动范围，已降级为远期观察。",
     "PORTFOLIO_ALLOCATED":"已从本轮可新增资金中完成分配。",
     "PORTFOLIO_CONDITIONAL_RESERVATION":"仅预留额度，触发条件后仍需重新检查行情和风险。",
     "PORTFOLIO_PROTECTIVE_EXIT_PRIORITY":"持仓保护优先于新增风险。",

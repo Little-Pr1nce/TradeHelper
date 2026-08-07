@@ -1,3 +1,9 @@
-POLICY_VERSION="strategy_policy_v1"
+POLICY_VERSION="strategy_policy_v2"
 POSITION_EPSILON_FLOOR=.0025
 POSITION_ATR_MULTIPLIER=.25
+
+# 交易计划只对一个决策时段有效。等待中的入场价若超出该时段合理可达
+# 范围，只能作为远期观察，不能继续进入风控和组合资金预留。
+ENTRY_TRIGGER_REACH_FLOOR = .03
+ENTRY_TRIGGER_REACH_ATR_MULTIPLIER = 2.5
+ENTRY_TRIGGER_REACH_HARD_CAP = .20

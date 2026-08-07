@@ -122,6 +122,9 @@ _FEATURE_NAMES = {
     "current.price": "当前价", "closed.ma_20": "MA20", "closed.ma_60": "MA60",
     "closed.ma_120": "MA120", "closed.rsi_14": "RSI14", "closed.volume_ratio_20": "20日量比",
     "current.volume_vs_daily_20": "盘中量能/20日均量", "current.retreat_from_session_high": "距当日高点回撤",
+    "closed.macd_hist_pct": "MACD柱线", "closed.bb_pct_20": "布林带位置",
+    "closed.bb_width_20": "布林带宽度", "closed.atr_pct_14": "近期日波动幅度",
+    "closed.high_distance_20": "距20日高点", "closed.low_distance_20": "距20日低点",
 }
 
 _RESEARCH_STATUS_NAMES = {
@@ -503,7 +506,15 @@ def _condition_expression_text(expression):
         "gt": ">", "gte": ">=", "lt": "<", "lte": "<=", "equals": "=",
         "crosses_above": "向上穿越", "crosses_below": "向下穿越",
     }
-    return f"{left} {labels.get(operator, operator)} {_operand_text(expression.right)}"
+    right = _operand_text(expression.right)
+    if (
+        expression.left is not None
+        and expression.left.key in {"closed.volume_ratio_20", "current.volume_vs_daily_20"}
+        and expression.right is not None
+        and isinstance(expression.right.value, (int, float))
+    ):
+        right += "倍"
+    return f"{left} {labels.get(operator, operator)} {right}"
 
 
 def _condition_text(plan):
@@ -537,46 +548,148 @@ def _plain_condition_text(expression):
         ("macd_hist_pct < 0", "MACD 柱线转负"),
         ("MA20 > MA60", "MA20 高于 MA60"),
         ("MA20 < MA60", "MA20 低于 MA60"),
+        ("20日量比 >= ", "成交量达到过去20日平均的 "),
+        ("20日量比 > ", "成交量超过过去20日平均的 "),
+        ("盘中量能/20日均量 >= ", "盘中成交量达到系统估算日均量的 "),
+        ("盘中量能/20日均量 > ", "盘中成交量超过系统估算日均量的 "),
     )
     for source, target in replacements:
         text = text.replace(source, target)
     return text.replace("(", "（").replace(")", "）")
 
 
-def _signal_judgment_text(decision, plan):
+def _condition_feature_keys(expression):
+    keys = set()
+    for operand in (expression.left, expression.right, expression.lower, expression.upper):
+        if operand is not None and str(_value(operand.kind)) == "feature":
+            keys.add(operand.key)
+    for child in expression.children:
+        keys.update(_condition_feature_keys(child))
+    return keys
+
+
+def _condition_evaluation(plan, expression):
+    return next(
+        (item for item in plan.evaluations if item.condition_id == expression.condition_id),
+        None,
+    )
+
+
+def _condition_status_text(evaluation):
+    if evaluation is None:
+        return "等待系统检查"
+    return {
+        "true": "已满足",
+        "false": "未满足",
+        "pending_event": "等待后续行情确认",
+        "unknown": "当前数据不足，系统无法确认",
+        "not_applicable": "不适用",
+    }.get(str(_value(evaluation.result)), "等待系统检查")
+
+
+def _observed_condition_text(evaluation):
+    if evaluation is None:
+        return ""
+    parts = []
+    seen = set()
+    for item in evaluation.observed_values:
+        if (
+            item.value is None
+            or item.key == "current.price"
+            or item.key in seen
+            or item.key not in _FEATURE_NAMES
+        ):
+            continue
+        seen.add(item.key)
+        label = _FEATURE_NAMES.get(item.key, item.key)
+        if isinstance(item.value, (int, float)) and not isinstance(item.value, bool):
+            if "volume" in item.key:
+                rendered = f"{float(item.value):.2f}倍"
+            elif item.key.endswith("rsi_14"):
+                rendered = f"{float(item.value):.1f}"
+            elif "macd" in item.key:
+                rendered = f"{float(item.value):.3f}"
+            else:
+                rendered = f"{float(item.value):.2f}"
+        else:
+            rendered = str(item.value)
+        parts.append(f"{label}当前为{rendered}")
+    return "；".join(parts)
+
+
+def _current_action(decision, plan, *, held):
+    """Return what the user can do now, not the future plan's action verb."""
+    if decision.executable_now:
+        return decision.action
+    readiness = str(_value(plan.readiness)) if plan is not None else "observation_only"
+    if readiness == "triggered" and decision.action in {PlanAction.SELL, PlanAction.REDUCE}:
+        return decision.action
+    return PlanAction.HOLD if held else PlanAction.WATCH
+
+
+def _signal_judgment_text(decision, plan, *, held=False):
     action = _action(decision.action)
     if plan is None:
-        return f"建议{action}，但交易计划缺失。请重新分析，暂时不要下单。"
+        return "当前不操作。交易计划缺失，请重新分析后再决定。"
     family = _display(_STRATEGY_FAMILY_NAMES, plan.family)
     readiness = str(_value(plan.readiness))
     if decision.executable_now:
         return f"建议{action}。{family}条件已经确认，可按风控批准的数量执行。"
     if readiness == "triggered":
-        return f"建议{action}，但现在先不下单。{family}条件已经出现，下一交易时段需用最新价格复核。"
+        if decision.action in {PlanAction.SELL, PlanAction.REDUCE}:
+            return f"准备{action}。{family}保护条件已经出现，下一交易时段先用最新价格复核。"
+        return f"当前不{action}。{family}条件已经出现，但尚未通过最终执行检查。"
     if readiness == "waiting":
-        return f"关注{action}机会。系统正在等待{family}确认，条件满足前保持不动。"
+        if decision.action in {PlanAction.BUY, PlanAction.ADD}:
+            return f"当前不{action}。系统正在监测{family}条件，全部满足并重新通过风控后才行动。"
+        if decision.action in {PlanAction.SELL, PlanAction.REDUCE}:
+            return f"当前继续持有。系统正在监测{family}保护条件，触发后再{action}。"
+        return "当前保持不动，等待系统确认下一步条件。"
     if readiness == "observation_only" or plan.action is PlanAction.WATCH:
+        if "TRIGGER_OUTSIDE_ACTIONABLE_RANGE" in plan.reason_codes:
+            return f"当前不{action}。目标价超出本计划有效期内的合理波动范围，只保留为远期观察。"
         return f"当前以观察为主。{family}证据还不足，暂不生成订单。"
     return f"建议{action}，但当前尚未通过执行检查。满足下列条件后再重新评估。"
 
 
-def _signal_steps_text(plan, decision, market):
+def _signal_steps_text(plan, decision, market, *, current_price=None):
     if plan is None:
         return "1. 重新运行分析并生成完整计划\n2. 核对最新价格、股数和最大亏损后再决定"
     steps = []
     trigger = _plain_condition_text(plan.trigger_condition)
-    if str(_value(plan.readiness)) == "triggered":
-        steps.append(f"复核：用下一交易时段最新价格确认“{trigger}”仍然成立")
+    trigger_evaluation = _condition_evaluation(plan, plan.trigger_condition)
+    trigger_status = _condition_status_text(trigger_evaluation)
+    if "TRIGGER_OUTSIDE_ACTIONABLE_RANGE" in plan.reason_codes:
+        distance = None
+        if current_price is not None and current_price > 0 and plan.trigger_level is not None:
+            distance = abs(float(plan.trigger_level.value) / float(current_price) - 1.0)
+        distance_text = f"，距离当前价约 {format_percent(distance)}" if distance is not None else ""
+        steps.append(f"当前状态：远期观察，暂不下单{distance_text}")
+        steps.append(f"远期观察价：{trigger}；到达后必须重新运行分析，不能直接照此下单")
+    elif str(_value(plan.readiness)) == "triggered":
+        steps.append(f"价格复核（{trigger_status}）：下一交易时段确认“{trigger}”仍然成立")
     else:
-        steps.append(f"触发：{trigger}")
+        steps.append(f"价格条件（{trigger_status}）：{trigger}")
     if (
         plan.confirmation_condition is not None
         and plan.confirmation_condition.condition_id != plan.trigger_condition.condition_id
     ):
-        steps.append(f"确认：{_plain_condition_text(plan.confirmation_condition)}")
+        confirmation = plan.confirmation_condition
+        evaluation = _condition_evaluation(plan, confirmation)
+        status = _condition_status_text(evaluation)
+        observed = _observed_condition_text(evaluation)
+        machine_monitored = any(
+            key != "current.price" for key in _condition_feature_keys(confirmation)
+        )
+        owner = "系统自动监测，用户无需计算" if machine_monitored else "价格确认"
+        observed_text = f"；{observed}" if observed else ""
+        steps.append(
+            f"{owner}（{status}）：{_plain_condition_text(confirmation)}{observed_text}"
+        )
     if plan.missing_conditions:
-        steps.append(f"补齐：{'、'.join(plan.missing_conditions)}")
-    steps.append("执行：条件成立后，按最新价格重新核定股数和最大亏损")
+        steps.append(f"数据要求：系统仍需取得 {'、'.join(plan.missing_conditions)}，取得前不执行")
+    if "TRIGGER_OUTSIDE_ACTIONABLE_RANGE" not in plan.reason_codes:
+        steps.append("执行方式：全部条件满足后，由系统按最新价格重新核定股数和最大亏损")
     if plan.expires_at is not None:
         steps.append(f"期限：{_datetime_text(plan.expires_at, market)} 前有效，过期后重新分析")
     return "\n".join(steps)
@@ -587,12 +700,19 @@ def _share_count(value: Decimal) -> str:
     return str(int(value)) if value == value.to_integral_value() else format(value.normalize(), "f")
 
 
-def _signal_profile_text(value, allocation_details):
+def _signal_profile_text(value, allocation_details, selected_plans=None):
+    selected_plans = selected_plans or {}
     lines = []
     for profile_name in ("保守", "激进"):
-        detail = allocation_details.get((value.instrument.code, profile_name))
+        selected_plan = selected_plans.get(profile_name)
+        detail = allocation_details.get(
+            (value.instrument.code, profile_name, getattr(selected_plan, "plan_id", None))
+        )
         if detail is None:
-            lines.append(f"{profile_name}：暂不下单；等待条件满足并重新通过组合风控")
+            if selected_plan is not None and selected_plan.action is PlanAction.HOLD:
+                lines.append(f"{profile_name}：继续持有；保护条件由系统持续监测")
+            else:
+                lines.append(f"{profile_name}：暂不下单；等待条件满足并重新通过组合风控")
             continue
         allocation, arrangement = detail
         action = _action(allocation.action)
@@ -667,6 +787,8 @@ def _risk_reward(plan):
 
 def _forecast_plain_status(forecast):
     status = str(_value(forecast.validation_status))
+    if forecast.reason == "LIVE_TRACK_RECORD_BELOW_BASELINE":
+        return "近期到期预测表现低于简单基准，已暂停影响新开仓"
     if forecast.execution_eligible and status == "confirmation_passed":
         return "已通过历史检验，可用于交易判断"
     if forecast.execution_eligible and status == "noninferior_passed":
@@ -903,10 +1025,11 @@ def _decision_evidence_map(value, plans):
     return result
 
 
-def _primary_decision(value):
+def _profile_decision(value, profile):
     decisions = tuple(value.risk_bundle.decisions)
-    conservative = tuple(item for item in decisions if item.profile is RiskProfile.CONSERVATIVE)
-    pool = conservative or decisions
+    pool = tuple(item for item in decisions if item.profile is profile)
+    if not pool:
+        return None
     plans = {
         plan.plan_id: plan
         for branch in (value.strategy_bundle.entry_or_add, value.strategy_bundle.reduce_or_exit, value.strategy_bundle.hold)
@@ -917,6 +1040,13 @@ def _primary_decision(value):
     return min(pool, key=lambda item: _decision_priority(
         item, set(value.risk_bundle.protective_decision_ids), readiness, evidence,
     ))
+
+
+def _primary_decision(value):
+    return (
+        _profile_decision(value, RiskProfile.CONSERVATIVE)
+        or _profile_decision(value, RiskProfile.AGGRESSIVE)
+    )
 
 
 def _forecast_table(value):
@@ -1091,8 +1221,9 @@ def _portfolio_plan_rows(value):
     selected_plan = plan_by_id.get(decision.plan_id)
     held = str(_value(value.strategy_bundle.position_state)) != "flat"
     if selected_plan is None:
-        current = f"{_action(decision.action)}；上游计划缺失，必须重新分析"
+        current = "观察；上游计划缺失，必须重新分析"
     else:
+        current_action = _current_action(decision, selected_plan, held=held)
         family = _display(_STRATEGY_FAMILY_NAMES, selected_plan.family)
         validity = (
             f"有效期 {_datetime_text(selected_plan.valid_from, value.instrument.market)} 至 {_datetime_text(selected_plan.expires_at, value.instrument.market)}"
@@ -1105,7 +1236,8 @@ def _portfolio_plan_rows(value):
             )
         else:
             current = (
-                f"{_action(decision.action)}；{family}；{_decision_state_text(decision, selected_plan)}；"
+                f"{_action(current_action)}；未来计划为{_action(decision.action)}；{family}；"
+                f"{_decision_state_text(decision, selected_plan)}；"
                 f"分析价 {_price_text(value, value.instrument.market)}；依据“{_condition_text(selected_plan)}”；{validity}"
             )
     conservative = _profile_decision_text(value, RiskProfile.CONSERVATIVE)
@@ -1150,9 +1282,11 @@ def _portfolio_strategy_row(value):
         reason = f"预测情景：{_display(_SCENARIO_STATE_NAMES, value.scenario.state)}；当前条件：{_condition_text(plan)}"
         outcomes = _matching_strategy_outcomes(value, plan, decision.profile)
         history = _strategy_history_text(outcomes)
+    held = str(_value(value.strategy_bundle.position_state)) != "flat"
+    current_action = _current_action(decision, plan, held=held)
     return _row(
         f"portfolio-strategy:{value.instrument.stable_key}",
-        (value.instrument.code, strategy_name, _action(decision.action), reason, history),
+        (value.instrument.code, strategy_name, _action(current_action), reason, history),
         _refs(value.scenario, value.strategy_bundle, value.risk_bundle, *value.strategy_outcomes),
     )
 
@@ -1245,6 +1379,8 @@ def _operation_table(value):
         if plan is None:
             cells = (_profile(profile), "重新分析", "—", "—", "—", "—", "—", "上游计划缺失")
         else:
+            held = str(_value(value.strategy_bundle.position_state)) != "flat"
+            current_action = _current_action(decision, plan, held=held)
             stop = (
                 _currency(plan.stop.level.value, value.instrument.market)
                 if plan.stop and plan.stop.level else _condition_expression_text(plan.invalidation_condition)
@@ -1256,8 +1392,9 @@ def _operation_table(value):
                 if plan.take_profit and plan.take_profit.condition else "按条件退出，暂无固定目标价"
             )
             risk = "不新增风险" if decision.action in {PlanAction.SELL, PlanAction.REDUCE, PlanAction.HOLD, PlanAction.WATCH} else _currency(decision.max_loss_amount, value.instrument.market)
+            quantity = f"{decision.approved_shares} 股" if decision.executable_now else "触发后重新核定"
             cells = (
-                _profile(profile), _action(decision.action), f"{decision.approved_shares} 股",
+                _profile(profile), _action(current_action), quantity,
                 _condition_text(plan), stop, target, risk,
                 f"{_datetime_text(plan.valid_from, value.instrument.market)} 至 {_datetime_text(plan.expires_at, value.instrument.market)}",
             )
@@ -1267,7 +1404,7 @@ def _operation_table(value):
         ))
     return ReportTable(
         "operation_table", "保守与激进操作计划",
-        ("方案", "当前动作", "数量", "达到什么条件执行", "判断错了在哪里退出", "盈利后怎么处理", "最大计划亏损", "计划有效期"),
+        ("方案", "当前动作", "本次可下单数量", "达到什么条件执行", "判断错了在哪里退出", "盈利后怎么处理", "最大计划亏损", "计划有效期"),
         tuple(rows), "当前没有操作计划。",
         "保守和激进方案可能使用同一触发价，但确认要求、数量和最大风险不同。",
     )
@@ -1405,12 +1542,17 @@ def _single_quick_action(value, operation_table):
         for plan in branch.plans
     }
     selected_plan = plans.get(decision.plan_id)
-    judgment = _signal_judgment_text(decision, selected_plan)
-    steps = _signal_steps_text(selected_plan, decision, value.instrument.market)
+    held = str(_value(value.strategy_bundle.position_state)) != "flat"
+    current_action = _current_action(decision, selected_plan, held=held)
+    judgment = _signal_judgment_text(decision, selected_plan, held=held)
+    steps = _signal_steps_text(
+        selected_plan, decision, value.instrument.market,
+        current_price=_analysis_price(value),
+    )
     profile_lines = []
     for row in operation_table.rows:
         profile, action, quantity, _condition, _stop, _target, risk, _validity = row.cells
-        if quantity in {"0 股", "—"} or action in {"观察", "持有", "重新分析"}:
+        if quantity in {"0 股", "—", "触发后重新核定"} or action in {"观察", "持有", "重新分析"}:
             profile_lines.append(f"{profile}：暂不下单；{risk}")
         else:
             profile_lines.append(f"{profile}：{action} {quantity}；最大计划亏损 {risk}")
@@ -1422,7 +1564,7 @@ def _single_quick_action(value, operation_table):
             (
                 value.instrument.code,
                 f"{value.metadata.name} · {_price_text(value, value.instrument.market)}",
-                f"{_action(decision.action)}；{judgment}",
+                f"{_action(current_action)}；{judgment}",
                 steps,
                 "\n".join(profile_lines),
             ),
@@ -1439,11 +1581,25 @@ class SingleStockReportBuilder:
 
     def build(self, value: SingleStockPresentationInput, editorial=None) -> ReportDocument:
         decision = _primary_decision(value)
+        plans = {
+            plan.plan_id: plan
+            for branch in (
+                value.strategy_bundle.entry_or_add,
+                value.strategy_bundle.reduce_or_exit,
+                value.strategy_bundle.hold,
+            )
+            for plan in branch.plans
+        }
+        selected_plan = plans.get(decision.plan_id)
+        held = str(_value(value.strategy_bundle.position_state)) != "flat"
+        current_action = _current_action(decision, selected_plan, held=held)
         action_refs = _refs(value.risk_bundle, value.order_intent_bundle)
         action_text = (
-            f"当前动作：{_action(decision.action)} ｜ 执行等级：{_display(_LEVEL_NAMES, decision.level)} ｜ "
+            f"当前动作：{_action(current_action)} ｜ 未来条件计划：{_action(decision.action)} ｜ "
+            f"执行等级：{_display(_LEVEL_NAMES, decision.level)} ｜ "
             f"{'当前可执行' if decision.executable_now else '当前不可执行，等待冻结条件'}\n"
-            f"批准数量：{decision.approved_shares} 股 ｜ 最大计划亏损：{_currency(decision.max_loss_amount, value.instrument.market)}"
+            f"本次可下单数量：{decision.approved_shares if decision.executable_now else 0} 股 ｜ "
+            f"最大计划亏损：{_currency(decision.max_loss_amount, value.instrument.market)}"
         )
         history_tables = _history_tables(value)
         operation = _operation_table(value)
@@ -1520,17 +1676,19 @@ class PortfolioReportBuilder:
                 status = str(_value(item.status))
                 if status not in {"allocated_now", "reserved_conditional", "shared_exit_reservation"}:
                     continue
+                member = member_by_instrument[item.instrument]
+                arrangement = _allocation_status(item, member)
+                allocation_details[
+                    (item.instrument.code, _profile(profile.profile), item.plan_id)
+                ] = (item, arrangement)
                 if item.instrument in shown_instruments:
                     continue
                 shown_instruments.add(item.instrument)
-                member = member_by_instrument[item.instrument]
                 valued = valuation_map.get(item.instrument)
                 position_context = (
                     f"{format_percent(valued.position_pct)}仓位；盈亏 {format_percent(valued.unrealized_pnl_pct)}"
                     if valued is not None else "关注股，当前未持有"
                 )
-                arrangement = _allocation_status(item, member)
-                allocation_details[(item.instrument.code, _profile(profile.profile))] = (item, arrangement)
                 priority_rows.append(_row(
                         f"{_value(profile.profile)}:{item.allocation_id}",
                     (
@@ -1681,15 +1839,6 @@ class PortfolioReportBuilder:
             joint_ability_rows.append(joint_ability_row)
 
             decision = _primary_decision(member)
-            if decision.action in {PlanAction.SELL, PlanAction.REDUCE}:
-                signal_target = exit_signal_rows
-                quick_priority = 0
-            elif decision.action in {PlanAction.BUY, PlanAction.ADD}:
-                signal_target = entry_signal_rows
-                quick_priority = 1
-            else:
-                signal_target = hold_signal_rows
-                quick_priority = 2
             plans_by_id = {
                 plan.plan_id: plan
                 for branch in (
@@ -1701,13 +1850,29 @@ class PortfolioReportBuilder:
                 for plan in branch.plans
             }
             selected_plan = plans_by_id.get(decision.plan_id)
-            if selected_plan is None:
-                quick_current = f"{_action(decision.action)}；{_signal_judgment_text(decision, selected_plan)}"
-                quick_condition = _signal_steps_text(selected_plan, decision, value.market)
+            profile_plans = {}
+            for profile in (RiskProfile.CONSERVATIVE, RiskProfile.AGGRESSIVE):
+                profile_decision = _profile_decision(member, profile)
+                if profile_decision is not None:
+                    profile_plans[_profile(profile)] = plans_by_id.get(profile_decision.plan_id)
+            current_action = _current_action(decision, selected_plan, held=held)
+            if current_action in {PlanAction.SELL, PlanAction.REDUCE}:
+                signal_target = exit_signal_rows
+                quick_priority = 0
+            elif current_action in {PlanAction.BUY, PlanAction.ADD}:
+                signal_target = entry_signal_rows
+                quick_priority = 1
             else:
-                quick_current = f"{_action(decision.action)}；{_signal_judgment_text(decision, selected_plan)}"
-                quick_condition = _signal_steps_text(selected_plan, decision, value.market)
-            profile_summary = _signal_profile_text(member, allocation_details)
+                signal_target = hold_signal_rows
+                quick_priority = 2
+            quick_current = (
+                f"{_action(current_action)}；"
+                f"{_signal_judgment_text(decision, selected_plan, held=held)}"
+            )
+            quick_condition = _signal_steps_text(
+                selected_plan, decision, value.market, current_price=_analysis_price(member)
+            )
+            profile_summary = _signal_profile_text(member, allocation_details, profile_plans)
             quick_action_seeds.append((
                 quick_priority,
                 _row(
@@ -1728,8 +1893,11 @@ class PortfolioReportBuilder:
                     member.instrument.code,
                     "持仓" if held else "关注",
                     _price_text(member, value.market),
-                    _signal_judgment_text(decision, selected_plan),
-                    _signal_steps_text(selected_plan, decision, value.market),
+                    _signal_judgment_text(decision, selected_plan, held=held),
+                    _signal_steps_text(
+                        selected_plan, decision, value.market,
+                        current_price=_analysis_price(member),
+                    ),
                     profile_summary,
                 ),
                 tuple(sorted(set((*plan_row.source_artifact_refs, *fact_row.source_artifact_refs)))),
@@ -1768,7 +1936,8 @@ class PortfolioReportBuilder:
                     f"{member.instrument.stable_key}:strategy",
                     (
                         "采用策略",
-                        f"{strategy_row.cells[1]}；当前动作 {_action(decision.action)}；"
+                        f"{strategy_row.cells[1]}；当前动作 {_action(current_action)}；"
+                        f"条件满足后的计划为 {_action(decision.action)}；"
                         f"{strategy_row.cells[3]}；历史表现：{strategy_row.cells[4]}",
                     ),
                     strategy_row.source_artifact_refs,
@@ -1864,20 +2033,6 @@ class PortfolioReportBuilder:
         )
         quick_action_rows = []
         for _, row in sorted(quick_action_seeds, key=lambda item: (item[0], item[1].cells[0])):
-            profile_values = []
-            for profile_name in ("保守", "激进"):
-                detail = allocation_details.get((row.cells[0], profile_name))
-                if detail is None:
-                    continue
-                allocation, arrangement = detail
-                action = _action(allocation.action)
-                shares = allocation.final_requested_shares
-                if shares <= 0 or action in {"观察", "持有"}:
-                    profile_values.append(f"{profile_name}：暂不下单；{arrangement}")
-                else:
-                    profile_values.append(
-                        f"{profile_name}：{action} {_share_count(shares)} 股；{arrangement}"
-                    )
             quick_action_rows.append(_row(
                 f"quick:{row.row_id}",
                 (
@@ -1885,7 +2040,7 @@ class PortfolioReportBuilder:
                     row.cells[1],
                     row.cells[2],
                     row.cells[3],
-                    "；".join(profile_values) or row.cells[4],
+                    row.cells[4],
                 ),
                 row.source_artifact_refs,
             ))

@@ -16,14 +16,15 @@ from time import monotonic
 from contracts import (
     AnalysisRunResult, AnalysisRunStatus, AnalysisStage, AvailabilitySource,
     DecisionMode, ExecutionPolicy, FeatureEvidenceMode, FeatureInputs,
-    FreshnessStatus, InstrumentId, LearningMetricSnapshot, LedgerKind, Market, PortfolioCandidate,
+    ForecastScope, FreshnessStatus, InstrumentId, LearningMetricSnapshot, LedgerKind, Market, PortfolioCandidate,
     PortfolioInputBatch, PortfolioPolicy, PortfolioRole, PositionAvailability,
-    ProviderStatus, RiskPolicy, RiskRequest, SingleStockAnalysisCommand,
+    EvidenceOrigin, ProviderStatus, RiskPolicy, RiskRequest, SingleStockAnalysisCommand,
     PortfolioAnalysisCommand, ResearchRunStatus, ResearchScope, RiskProfile, StockMetadata, StrategyInput, TaskStatus,
     ValuationPrice, ValuationPriceKind, stable_hash,
 )
 from contracts.forecast import ForecastRequest
 from forecast import build_training_sample
+from forecast.live_quality import live_forecast_verdict
 from learning.evidence import plan_evidence
 from contracts.scenario import ScenarioRequest
 from data.calendar import TradingCalendarUnavailable
@@ -37,6 +38,7 @@ from presentation.report_builder import PortfolioReportBuilder, SingleStockRepor
 from risk import freeze_account_valuation
 from risk.market_rules import default_market_rules
 from strategies.registry import default_specs
+from strategies.policy import POLICY_VERSION as STRATEGY_POLICY_VERSION
 from application.tasks import AnalysisTaskCoordinator
 from application.report_editor import edit_report
 from research.client import LLMResearchRequest, OpenAICompatibleResearchClient, capabilities_for_endpoint, output_token_budget
@@ -48,6 +50,7 @@ _HISTORY_DAYS = {"1m": 45, "3m": 140, "6m": 280, "1y": 540}
 _FORECAST_HISTORY_DAYS = 1900
 _FORECAST_MAX_ORIGINS = 720
 logger = logging.getLogger(__name__)
+_LIVE_OBSERVATION_VERSION_SUFFIX = ":live-observation-v1"
 
 
 def _provider_attempt_trace(result) -> str:
@@ -93,6 +96,7 @@ class _InstrumentAnalysis:
     risk_bundle: object
     plans: Mapping[str, object]
     bars: tuple
+    training_samples: tuple = ()
 
 
 class RuntimeAnalysisPipeline:
@@ -102,6 +106,71 @@ class RuntimeAnalysisPipeline:
         self.container = container
         self._research_inputs = {}
         self._research_lock = Lock()
+        self._forecast_live_health_cache = {}
+        self._forecast_live_health_lock = Lock()
+
+    def _reset_forecast_live_health(self):
+        with self._forecast_live_health_lock:
+            self._forecast_live_health_cache.clear()
+
+    def _apply_live_forecast_gate(self, instrument, forecasts):
+        loader = getattr(self.container.repository, "list_market_forecast_outcomes", None)
+        if loader is None:
+            return tuple(forecasts)
+        gated = []
+        for forecast in forecasts:
+            if not forecast.execution_eligible:
+                gated.append(forecast)
+                continue
+            key = (instrument.market, forecast.horizon)
+            with self._forecast_live_health_lock:
+                verdict = self._forecast_live_health_cache.get(key)
+            if verdict is None:
+                outcomes = loader(
+                    instrument.market,
+                    horizon=forecast.horizon,
+                    origin=EvidenceOrigin.ISSUED_ONLINE,
+                )
+                verdict = live_forecast_verdict(outcomes)
+                with self._forecast_live_health_lock:
+                    self._forecast_live_health_cache.setdefault(key, verdict)
+                    verdict = self._forecast_live_health_cache[key]
+            if verdict.execution_allowed:
+                gated.append(forecast)
+                continue
+            logger.warning(
+                "Forecast live gate suspended execution instrument=%s horizon=%d samples=%d "
+                "accuracy=%.3f majority_baseline=%.3f brier=%.3f",
+                instrument.stable_key, forecast.horizon, verdict.sample_count,
+                verdict.direction_accuracy, verdict.majority_baseline_accuracy,
+                verdict.mean_brier,
+            )
+            gated_version = (
+                forecast.model_version
+                if forecast.model_version.endswith(_LIVE_OBSERVATION_VERSION_SUFFIX)
+                else f"{forecast.model_version}{_LIVE_OBSERVATION_VERSION_SUFFIX}"
+            )
+            target_identity = (
+                forecast.target_session_date.isoformat()
+                if forecast.target_session_date is not None
+                else "calendar-unavailable"
+            )
+            gated_event_key = "|".join((
+                forecast.instrument.stable_key,
+                forecast.origin_session_date.isoformat(),
+                target_identity,
+                str(forecast.horizon),
+                gated_version,
+                forecast.model_input_hash,
+            ))
+            gated.append(replace(
+                forecast,
+                model_version=gated_version,
+                execution_eligible=False,
+                reason=verdict.reason,
+                event_key=gated_event_key,
+            ))
+        return tuple(gated)
 
     @staticmethod
     def _emit(callback, stage, instrument=None, message=None):
@@ -332,6 +401,8 @@ class RuntimeAnalysisPipeline:
                 sample = build_training_sample(
                     calendar=self.container.calendar, feature_snapshot=snapshot,
                     reference_bar=reference, target_bar=target, horizon=horizon,
+                    scope_membership={ForecastScope.MARKET: facts.instrument.market.value},
+                    scope_membership_available_at={ForecastScope.MARKET: cutoff},
                 )
                 if sample is not None:
                     samples.append(sample)
@@ -395,7 +466,13 @@ class RuntimeAnalysisPipeline:
             latest = tuple(item for item in evaluations if item["created_at"] == latest_at)
             selected = None
             metric_side = "baseline"
-            if forecast.execution_eligible:
+            is_formal_model = (
+                forecast.lifecycle.value == "champion"
+                and forecast.validation_status.value in {
+                    "confirmation_passed", "noninferior_passed",
+                }
+            )
+            if is_formal_model:
                 registered = self.container.forecast_registry.resolve(
                     market=instrument.market, stock_key=instrument.stable_key,
                     industry_key=None, horizon=forecast.horizon,
@@ -414,7 +491,7 @@ class RuntimeAnalysisPipeline:
             )
             scope_key = (
                 f"{instrument.stable_key}:h{forecast.horizon}:"
-                f"{'formal_model' if forecast.execution_eligible else 'empirical_baseline'}"
+                f"{'formal_model' if is_formal_model else 'empirical_baseline'}"
             )
             normalized_metrics = tuple(sorted(metrics))
             identity = {
@@ -430,7 +507,10 @@ class RuntimeAnalysisPipeline:
             snapshots.append(snapshot)
         return tuple(snapshots)
 
-    def _build_instrument(self, facts, mode, history_period, as_of, account, valuation, callback=None):
+    def _build_instrument(
+        self, facts, mode, history_period, as_of, account, valuation, callback=None,
+        *, training_samples=None, forecast_panel_samples=(),
+    ):
         instrument = facts.instrument
         self._emit(callback, AnalysisStage.BUILD_FEATURES, instrument)
         origin_quality = evaluate_data_quality(
@@ -457,11 +537,12 @@ class RuntimeAnalysisPipeline:
             raise RuntimeError(f"{instrument.code}: DAILY_BARS_UNAVAILABLE")
 
         self._emit(callback, AnalysisStage.FORECAST, instrument)
-        training_samples = self._technical_training_samples(facts)
+        training_samples = tuple(training_samples) if training_samples is not None else self._technical_training_samples(facts)
         forecasts = self.container.forecast_engine.forecast(
             ForecastRequest(origin, facts.bars[-1], as_of, data_quality=origin_quality),
             samples=training_samples,
         )
+        forecasts = self._apply_live_forecast_gate(instrument, forecasts)
         for forecast in forecasts:
             self.container.repository.save_forecast_result(forecast)
         logger.info(
@@ -500,7 +581,7 @@ class RuntimeAnalysisPipeline:
         self._emit(callback, AnalysisStage.STRATEGY, instrument)
         position = next((item for item in account.positions if item.instrument == instrument), None)
         strategy = self.container.strategy_engine.build(
-            StrategyInput(instrument, current, scenario, position, default_specs(), "strategy_policy_v1", as_of),
+            StrategyInput(instrument, current, scenario, position, default_specs(), STRATEGY_POLICY_VERSION, as_of),
             generated_at=as_of,
         )
         self.container.repository.save_strategy_bundle(strategy)
@@ -621,14 +702,17 @@ class RuntimeAnalysisPipeline:
         if self.container.background_learning is not None:
             self.container.background_learning.submit(instrument,facts.bars,listing_date=facts.listing_date)
         if getattr(self.container, "background_forecast_training", None) is not None and training_samples:
-            self.container.background_forecast_training.submit(instrument, training_samples)
+            self.container.background_forecast_training.submit(
+                instrument, training_samples, panel_samples=forecast_panel_samples,
+            )
         if getattr(self.container, "background_strategy_replay", None) is not None and training_samples:
             self.container.background_strategy_replay.submit(
                 instrument, facts.bars, training_samples, listing_date=facts.listing_date,
             )
-        return _InstrumentAnalysis(presentation, scenario, strategy, risk, plans, facts.bars)
+        return _InstrumentAnalysis(presentation, scenario, strategy, risk, plans, facts.bars, training_samples)
 
     def single_stock(self, command, *, on_progress=None):
+        self._reset_forecast_live_health()
         self._emit(on_progress, AnalysisStage.RESOLVE_SUBJECT, command.instrument)
         account = self.container.repository.get_latest_account_snapshot(command.instrument.market)
         if account is None:
@@ -797,6 +881,7 @@ class RuntimeAnalysisPipeline:
         return builder.build(revised,editorial)
 
     def portfolio(self, command, *, on_progress=None):
+        self._reset_forecast_live_health()
         account = self.container.repository.get_latest_account_snapshot(command.market)
         if account is None:
             raise ValueError("真实账户快照缺失，不能生成组合分析")
@@ -831,13 +916,28 @@ class RuntimeAnalysisPipeline:
             len(failures),
         )
         valuation = self._valuation(account, facts_by_instrument, analysis_at)
+        training_by_instrument = {
+            instrument: self._technical_training_samples(facts)
+            for instrument, facts in facts_by_instrument.items()
+        }
+        forecast_panel_samples = tuple(sorted(
+            (sample for values in training_by_instrument.values() for sample in values),
+            key=lambda sample: (
+                sample.origin_session_date, sample.instrument.stable_key, sample.horizon,
+            ),
+        ))
         analyses = []
         for instrument in universe:
             facts = facts_by_instrument.get(instrument)
             if facts is None:
                 continue
             try:
-                analyses.append(self._build_instrument(facts, command.mode, command.history_period, analysis_at, account, valuation, on_progress))
+                analyses.append(self._build_instrument(
+                    facts, command.mode, command.history_period, analysis_at,
+                    account, valuation, on_progress,
+                    training_samples=training_by_instrument[instrument],
+                    forecast_panel_samples=forecast_panel_samples,
+                ))
             except Exception as exc:
                 failures.append(f"{instrument.code}:{type(exc).__name__}")
                 logger.exception(

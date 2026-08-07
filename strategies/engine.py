@@ -12,7 +12,13 @@ from contracts import (
     StrategyInput, TakeProfitMode, TakeProfitSpec, TradePlan, stable_hash,
 )
 from .conditions import evaluate
-from .policy import POSITION_ATR_MULTIPLIER, POSITION_EPSILON_FLOOR
+from .policy import (
+    ENTRY_TRIGGER_REACH_ATR_MULTIPLIER,
+    ENTRY_TRIGGER_REACH_FLOOR,
+    ENTRY_TRIGGER_REACH_HARD_CAP,
+    POSITION_ATR_MULTIPLIER,
+    POSITION_EPSILON_FLOOR,
+)
 from .templates import exits, observation, support, trend
 from .templates.common import Proposal, always_false, compare, constant, feature, level
 
@@ -293,6 +299,41 @@ class StrategyEngine:
             readiness = PlanReadiness.OBSERVATION_ONLY
         if readiness in {PlanReadiness.TRIGGERED, PlanReadiness.WAITING} and (scenario.valid_from is None or scenario.expires_at is None):
             readiness = PlanReadiness.OBSERVATION_ONLY
+        trigger_outside_actionable_range = False
+        if (
+            readiness is PlanReadiness.WAITING
+            and proposal.action in {PlanAction.BUY, PlanAction.ADD}
+            and price is not None
+            and price > 0
+            and trigger_level is not None
+        ):
+            atr = values.get("closed.atr_pct_14")
+            atr_pct = (
+                float(atr.value)
+                if atr is not None
+                and atr.status is FeatureStatus.AVAILABLE
+                and isinstance(atr.value, (int, float))
+                else 0.0
+            )
+            h1 = next((item for item in scenario.horizon_assessments if item.horizon == 1), None)
+            distribution = None if h1 is None else (h1.remaining_distribution or h1.original_distribution)
+            forecast_reach = (
+                max(abs(float(distribution.p10)), abs(float(distribution.p90)))
+                if distribution is not None
+                else 0.0
+            )
+            reasonable_reach = min(
+                ENTRY_TRIGGER_REACH_HARD_CAP,
+                max(
+                    ENTRY_TRIGGER_REACH_FLOOR,
+                    ENTRY_TRIGGER_REACH_ATR_MULTIPLIER * max(0.0, atr_pct),
+                    forecast_reach,
+                ),
+            )
+            trigger_distance = abs(trigger_level.value / float(price) - 1.0)
+            if trigger_distance > reasonable_reach:
+                readiness = PlanReadiness.OBSERVATION_ONLY
+                trigger_outside_actionable_range = True
         take = None
         if proposal.take_mode is not TakeProfitMode.NONE:
             take_level = _level(proposal.take_price, "take_profit", "template_take_profit_v1", scenario.scenario_id, proposal.evidence_features) if proposal.take_price else None
@@ -312,6 +353,8 @@ class StrategyEngine:
             )
         readiness_codes = {"PLAN_TRIGGERED", "PLAN_WAITING", "PLAN_OBSERVATION_ONLY", "BRANCH_NOT_APPLICABLE"}
         reasons = [reason for reason in proposal.reason_codes if reason not in readiness_codes]
+        if trigger_outside_actionable_range:
+            reasons.append("TRIGGER_OUTSIDE_ACTIONABLE_RANGE")
         reasons.append({PlanReadiness.TRIGGERED: "PLAN_TRIGGERED", PlanReadiness.WAITING: "PLAN_WAITING", PlanReadiness.OBSERVATION_ONLY: "PLAN_OBSERVATION_ONLY", PlanReadiness.NOT_APPLICABLE: "BRANCH_NOT_APPLICABLE"}[readiness])
         missing = tuple(sorted({name for item in evaluations for name in item.missing_features} | set(proposal.explicit_missing_conditions)))
         if missing:

@@ -131,3 +131,34 @@ def fit_temperature(probabilities: tuple[DirectionProbabilities, ...], labels: t
     actual = np.asarray([_index(item) for item in labels], dtype=int)
     losses = -np.log(np.clip(adjusted[:, np.arange(len(labels)), actual], 1e-15, 1.0)).mean(axis=1)
     return float(candidates[int(np.argmin(losses))])
+
+
+def fit_prior_shrinkage(
+    probabilities: tuple[DirectionProbabilities, ...], labels: tuple[ForecastDirection, ...],
+    *, prior_labels: tuple[ForecastDirection, ...] | None = None,
+) -> tuple[float, DirectionProbabilities]:
+    """Calibrate recent class bias after temperature scaling.
+
+    Temperature cannot correct a model that systematically overpredicts one
+    direction. A bounded convex shrinkage toward the calibration-period class
+    prior fixes that bias without changing the model's class ordering by fiat.
+    The chosen weight is subsequently judged on untouched OOF observations.
+    """
+    if len(labels) < 30:
+        return 0.0, DirectionProbabilities(1 / 3, 1 / 3, 1 / 3)
+    counts = np.ones(3, dtype=float)
+    for label in prior_labels if prior_labels is not None else labels:
+        counts[_index(label)] += 1.0
+    counts /= counts.sum()
+    prior = DirectionProbabilities(*map(float, counts))
+    matrix = np.asarray([_vector(item) for item in probabilities], dtype=float)
+    actual = np.asarray([_index(item) for item in labels], dtype=int)
+    candidates = np.linspace(0.0, 0.6, 31)
+    adjusted = (
+        matrix[None, :, :] * (1.0 - candidates[:, None, None])
+        + counts[None, None, :] * candidates[:, None, None]
+    )
+    losses = -np.log(
+        np.clip(adjusted[:, np.arange(len(labels)), actual], 1e-15, 1.0),
+    ).mean(axis=1)
+    return float(candidates[int(np.argmin(losses))]), prior

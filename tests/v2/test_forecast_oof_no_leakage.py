@@ -1,8 +1,12 @@
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 from contracts import ModelFamily, ModelSpec, ForecastScope, ValidationStatus
-from forecast.trainer import ForecastTrainer, selection_split_index
+from forecast.trainer import (
+    ForecastTrainer, eligible_panel_training_samples, recent_selection_start,
+    selection_split_index,
+)
+from forecast.diagnostics import ForecastMetrics
 from forecast.labels import matured_samples
 from tests.v2.forecast_helpers import synthetic_samples
 
@@ -20,6 +24,50 @@ def test_fc07_selection_confirmation_never_split_same_date() -> None:
         records.extend((SimpleNamespace(origin_session_date=day), None, None) for _ in range(count))
     split = selection_split_index(records)
     assert records[split - 1][0].origin_session_date < records[split][0].origin_session_date
+
+
+def test_recent_selection_window_keeps_complete_dates_and_excludes_confirmation() -> None:
+    records = []
+    for offset in range(300):
+        day = date(2025, 1, 1) + timedelta(days=offset)
+        records.extend((SimpleNamespace(origin_session_date=day), None, None) for _ in range(2))
+    split = selection_split_index(records)
+    start = recent_selection_start(records, split, lookback_dates=60)
+    selected_dates = {item[0].origin_session_date for item in records[start:split]}
+    assert len(selected_dates) == 60
+    assert start % 2 == 0
+    assert records[split - 1][0].origin_session_date < records[split][0].origin_session_date
+
+
+def test_selection_lookback_rejects_too_short_regime_window() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="at least 60"):
+        ForecastTrainer(selection_lookback_dates=20)
+
+
+def test_empirical_baseline_has_separate_absolute_quality_gate() -> None:
+    good = ForecastMetrics(.62, 1.02, .50, .08, .80, 80, .58, .66)
+    random_like = ForecastMetrics(2 / 3, 1.09, .34, .02, .80, 80, .62, .71)
+    poor_coverage = ForecastMetrics(.62, 1.02, .50, .08, .60, 80, .58, .66)
+    assert ForecastTrainer._validated_empirical_baseline(good, good)
+    assert not ForecastTrainer._validated_empirical_baseline(good, random_like)
+    assert not ForecastTrainer._validated_empirical_baseline(good, poor_coverage)
+
+
+def test_market_panel_excludes_other_stock_labels_that_have_not_matured() -> None:
+    mature = SimpleNamespace(
+        origin_session_date=date(2026, 1, 2), target_session_date=date(2026, 1, 8),
+    )
+    future_origin = SimpleNamespace(
+        origin_session_date=date(2026, 1, 11), target_session_date=date(2026, 1, 14),
+    )
+    immature = SimpleNamespace(
+        origin_session_date=date(2026, 1, 3), target_session_date=date(2026, 1, 12),
+    )
+    assert eligible_panel_training_samples(
+        (mature, future_origin, immature), date(2026, 1, 10),
+    ) == (mature,)
 
 
 def test_fc08_equal_to_baseline_is_not_reported_as_insufficient(us_instrument) -> None:

@@ -13,7 +13,7 @@ from contracts import (
     ModelSpec, ValidationStatus,
 )
 
-from .models import TrainedForecastModel, fit_model, model_from_artifact
+from .models import TrainedForecastModel, fit_calibrated_model, fit_model, model_from_artifact
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +40,17 @@ class ForecastRegistry:
             raise ValueError("only confirmed champion model versions may be registered")
         loaded = model or model_from_artifact(version.spec, version.artifact)
         self._models[self._key(version)] = RegisteredModel(version, loaded)
+
+    def retire(
+        self, *, market, scope: ForecastScope, scope_key: str, horizon: int,
+        expected_version: str | None = None,
+    ) -> RegisteredModel | None:
+        """Remove a stale Champion after a definitive fresh OOF failure."""
+        key = (market, scope, scope_key, horizon)
+        current = self._models.get(key)
+        if current is None or (expected_version is not None and current.version.version != expected_version):
+            return None
+        return self._models.pop(key)
 
     def restore(self, versions: tuple[ForecastModelVersion, ...]) -> None:
         """从 repository 恢复持久化 Champion；任一损坏 artifact 都明确失败。"""
@@ -77,9 +88,9 @@ class ForecastRegistry:
         stock = tuple(item for item in matured if item.horizon == horizon and item.scope_membership.get(ForecastScope.STOCK) == stock_key)
         if len(stock) >= 20:
             spec = ModelSpec("empirical-stock-baseline", ModelFamily.EMPIRICAL, "tech", {})
-            return ForecastScope.STOCK, stock_key, fit_model(spec, stock)  # type: ignore[return-value]
+            return ForecastScope.STOCK, stock_key, fit_calibrated_model(spec, stock)  # type: ignore[return-value]
         market_samples = tuple(item for item in matured if item.horizon == horizon and item.instrument.market == market)
         if len(market_samples) >= 100 and len({item.instrument.stable_key for item in market_samples}) >= 5:
             spec = ModelSpec("empirical-market-baseline", ModelFamily.EMPIRICAL, "tech", {})
-            return ForecastScope.MARKET, market.value, fit_model(spec, market_samples)  # type: ignore[return-value]
+            return ForecastScope.MARKET, market.value, fit_calibrated_model(spec, market_samples)  # type: ignore[return-value]
         return None

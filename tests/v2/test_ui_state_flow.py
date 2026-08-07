@@ -130,6 +130,22 @@ def test_desktop_shell_uses_branded_header_and_icon_navigation():
  assert "TradeHelper" in {getattr(item,"value",None) for item in _walk(navigation.leading)}
 
 
+def test_desktop_shell_builds_hidden_pages_only_when_selected():
+ class CountedPage:
+  def __init__(self): self.builds=0
+  def build(self):
+   import flet as ft
+   self.builds+=1
+   return ft.Container(expand=True)
+ single,portfolio,evaluation,history=(CountedPage() for _ in range(4))
+ shell=build_app(single,history,portfolio,CountedPage().build(),evaluation=evaluation)
+ assert (single.builds,portfolio.builds,evaluation.builds,history.builds)==(1,0,0,0)
+ navigation=shell.controls[0].content
+ navigation.selected_index=3
+ navigation.on_change(SimpleNamespace(control=navigation))
+ assert history.builds==1
+
+
 def test_tab1_and_tab3_have_primary_workbench_surfaces():
  tab1=SingleStockPage().build()
  tab3=PortfolioPage().build()
@@ -305,7 +321,8 @@ def test_portfolio_forecast_query_only_uses_tab3_issued_predictions(now):
  assert queries[-1].report_kind.value=="portfolio"
 
 
-def test_transient_disconnect_does_not_close_runtime():
+def test_page_session_does_not_own_process_runtime():
  source=Path("main.py").read_text(encoding="utf-8")
  assert "page.on_disconnect = close_session" not in source
- assert "page.on_close = close_session" in source
+ assert "page.on_close = close_session" not in source
+ assert "runner(lambda page: _main(page, lifecycle))" in source

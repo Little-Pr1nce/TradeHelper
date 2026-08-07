@@ -23,3 +23,11 @@ def test_history_period_date_and_rating_filters_use_snapshot_index(us_instrument
     repo=SQLiteRepository(tmp_path/"history.sqlite");doc=_document(_input(us_instrument,now));repo.save_report_document(doc);repo.save_report_feedback(_feedback(doc,4,now))
     query=ReportHistoryQuery(market=us_instrument.market,history_period="3m",date_from=doc.as_of-timedelta(minutes=1),date_to=doc.as_of+timedelta(minutes=1),minimum_rating=4)
     assert repo.list_report_history(query).total_count==1;repo.close()
+
+
+def test_history_list_reads_snapshot_summaries_without_revalidating_full_documents(us_instrument,now,tmp_path,monkeypatch):
+    repo=SQLiteRepository(tmp_path/"history.sqlite");doc=_document(_input(us_instrument,now));repo.save_report_document(doc)
+    monkeypatch.setattr(repo,"get_report_snapshot",lambda _report_id: (_ for _ in ()).throw(AssertionError("full document validation")))
+    page=repo.list_report_history(ReportHistoryQuery())
+    assert page.items[0].report_id==doc.report_id and page.items[0].instrument==us_instrument
+    repo.close()

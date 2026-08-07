@@ -231,7 +231,7 @@ StrategyInput:
   trading_scenario: TradingScenario
   position_snapshot: PositionSnapshot | None
   strategy_specs: tuple[StrategySpec, ...]
-  policy_version: str = "strategy_policy_v1"
+  policy_version: str = "strategy_policy_v2"
   as_of: datetime
   schema_version: int = 1
 ```
@@ -721,3 +721,10 @@ V2-5 完成后必须停止。不得顺手实现：
 - P1：StrategySpec 参数实际进入公式；缺失、陈旧、阻断和历史不足状态进入结构化观察；三值 DSL、持久化嵌套时间戳幂等和动作合同已收紧。
 - SP00-SP29 均有直接测试映射；1000 次无缓存完整 bundle 构建约 `1.30s`。
 - 2026-07-14 验证：V2-5 专项及 migration `38 passed`；V2 全量 `218 passed, 3 skipped`；项目全量 `478 passed, 3 skipped`；真实 Provider 门控测试 `3 passed in 40.96s`。
+
+## 23. 2026-08-06 条件可执行性补充
+
+- `strategy_policy_v2` 对等待中的买入/加仓触发价增加“本计划有效期内是否合理可达”检查。合理范围取 `3%`、`2.5 × ATR%` 和 1 日预测区间可达幅度中的较大值，并设置 `20%` 绝对上限。
+- 超出合理范围的入场条件必须降级为 `observation_only`，记录 `TRIGGER_OUTSIDE_ACTIONABLE_RANGE`；它可以保留为远期研究观察，但不得进入风控批准、组合现金预留或报告的当前买入候选。
+- 该门槛只约束等待中的新增风险，不替代突破、回踩、止损或保护退出本身的策略逻辑，也不把“离现价近”误当成策略有效。
+- 实时生产编排和历史联合重放必须使用同一策略政策版本，禁止再次形成两套信号语义。

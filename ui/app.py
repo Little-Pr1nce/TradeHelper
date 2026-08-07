@@ -6,37 +6,50 @@ from .theme import BACKGROUND, BORDER, NAV, PRIMARY, PRIMARY_DARK, PRIMARY_SOFT,
 
 def build_app(single_stock, history, portfolio, settings, migration=None, evaluation=None):
     items = [
-        ("单股分析", ft.Icons.QUERY_STATS_OUTLINED, ft.Icons.QUERY_STATS, single_stock.build()),
-        ("我的持仓", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED, ft.Icons.ACCOUNT_BALANCE_WALLET, portfolio.build()),
+        ("单股分析", ft.Icons.QUERY_STATS_OUTLINED, ft.Icons.QUERY_STATS, single_stock.build, single_stock),
+        ("我的持仓", ft.Icons.ACCOUNT_BALANCE_WALLET_OUTLINED, ft.Icons.ACCOUNT_BALANCE_WALLET, portfolio.build, portfolio),
     ]
     if evaluation is not None:
-        items.append(("能力评估", ft.Icons.INSIGHTS_OUTLINED, ft.Icons.INSIGHTS, evaluation.build()))
+        items.append(("能力评估", ft.Icons.INSIGHTS_OUTLINED, ft.Icons.INSIGHTS, evaluation.build, evaluation))
     items.extend([
-        ("报告记录", ft.Icons.HISTORY_OUTLINED, ft.Icons.HISTORY, history.build()),
-        ("设置", ft.Icons.SETTINGS_OUTLINED, ft.Icons.SETTINGS, settings),
+        ("报告记录", ft.Icons.HISTORY_OUTLINED, ft.Icons.HISTORY, history.build, history),
+        ("设置", ft.Icons.SETTINGS_OUTLINED, ft.Icons.SETTINGS, lambda: settings, None),
     ])
     if migration is not None:
-        items.append(("数据迁移", ft.Icons.SYNC_OUTLINED, ft.Icons.SYNC, migration.build()))
+        items.append(("数据迁移", ft.Icons.SYNC_OUTLINED, ft.Icons.SYNC, migration.build, migration))
 
     views = [
-        ft.Container(content=item[3], visible=index == 0, expand=True)
+        ft.Container(visible=index == 0, expand=True)
         for index, item in enumerate(items)
     ]
+    mounted = [False] * len(items)
+
+    def mount(index):
+        if not mounted[index]:
+            views[index].content = items[index][3]()
+            mounted[index] = True
+
+    mount(0)
     current = ft.Text(items[0][0], size=12, weight=ft.FontWeight.W_600, color=TEXT_MUTED)
 
     def switch_page(event):
         selected = event.control.selected_index
+        mount(selected)
         for index, view in enumerate(views):
             view.visible = index == selected
         current.value = items[selected][0]
-        if current.page:
+        try:
+            attached_page = current.page
+        except RuntimeError:
+            attached_page = None
+        if attached_page is not None:
             current.update()
             for view in views:
                 view.update()
-        if evaluation is not None and items[selected][0] == "能力评估":
-            on_show = getattr(evaluation, "on_show", None)
-            if on_show is not None:
-                on_show()
+        page_model = items[selected][4]
+        on_show = getattr(page_model, "on_show", None)
+        if on_show is not None:
+            on_show()
 
     header = ft.Container(
         bgcolor=SURFACE,
@@ -81,7 +94,7 @@ def build_app(single_stock, history, portfolio, settings, migration=None, evalua
                 selected_icon=ft.Icon(selected_icon, color=PRIMARY_DARK),
                 label=label,
             )
-            for label, icon, selected_icon, _view in items
+            for label, icon, selected_icon, _builder, _page in items
         ],
         selected_index=0,
         on_change=switch_page,

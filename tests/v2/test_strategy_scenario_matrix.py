@@ -240,6 +240,20 @@ def test_sp22_us_pre_market_missing_volume_does_not_confirm_breakout(us_instrume
     assert "current.volume_vs_daily_20" in plan.missing_conditions
 
 
+def test_far_breakout_is_observation_only_not_an_actionable_buy(us_instrument):
+    input = strategy_input(
+        us_instrument,
+        feature_overrides={"closed.high_distance_20": -0.50},
+    )
+    plan = next(
+        plan for plan in _entry_plans(StrategyEngine().build(input))
+        if plan.family is StrategyFamily.BREAKOUT_CONFIRMATION
+    )
+    assert plan.trigger_level.value > 2 * 100.0
+    assert plan.readiness is PlanReadiness.OBSERVATION_ONLY
+    assert "TRIGGER_OUTSIDE_ACTIONABLE_RANGE" in plan.reason_codes
+
+
 def test_sp23_equivalent_markets_keep_strategy_semantics(a_instrument, us_instrument):
     a_plans = {plan.strategy_id: plan for plan in _entry_plans(StrategyEngine().build(strategy_input(a_instrument)))}
     us_plans = {plan.strategy_id: plan for plan in _entry_plans(StrategyEngine().build(strategy_input(us_instrument)))}

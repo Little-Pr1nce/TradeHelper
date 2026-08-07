@@ -215,7 +215,8 @@ def test_portfolio_signal_cards_use_plain_judgment_steps_and_real_execution_lang
  assert "分析价" not in row.cells[3]
  assert "依据“" not in row.cells[3]
  assert row.cells[3].endswith("。")
- assert "触发：" in row.cells[4] and "执行：" in row.cells[4]
+ assert "价格条件（" in row.cells[4] and "执行方式：" in row.cells[4]
+ assert "用户无需计算" in row.cells[4]
  assert "保守：" in row.cells[5] and "激进：" in row.cells[5]
  assert " 0 股" not in row.cells[5]
 
@@ -251,6 +252,50 @@ def test_portfolio_share_display_accepts_decimal_scale_from_real_allocation():
 
 def test_portfolio_profile_text_uses_typed_decimal_shares(us_instrument):
  allocation=SimpleNamespace(action=PlanAction.BUY,final_requested_shares=Decimal("55.0"))
- details={(us_instrument.code,name):(allocation,"条件满足后执行") for name in ("保守","激进")}
- text=_signal_profile_text(SimpleNamespace(instrument=us_instrument),details)
+ plan=SimpleNamespace(plan_id="selected",action=PlanAction.BUY)
+ details={(us_instrument.code,name,plan.plan_id):(allocation,"条件满足后执行") for name in ("保守","激进")}
+ text=_signal_profile_text(
+     SimpleNamespace(instrument=us_instrument), details,
+     {"保守": plan, "激进": plan},
+ )
  assert "买入 55 股" in text and "55.0" not in text
+
+
+def test_portfolio_profile_text_never_borrows_another_plans_allocation(us_instrument):
+ wrong=SimpleNamespace(action=PlanAction.SELL,final_requested_shares=Decimal("10"))
+ selected=SimpleNamespace(plan_id="hold-plan",action=PlanAction.HOLD)
+ details={(us_instrument.code,name,"sell-plan"):(wrong,"卖出预案") for name in ("保守","激进")}
+ text=_signal_profile_text(
+     SimpleNamespace(instrument=us_instrument), details,
+     {"保守": selected, "激进": selected},
+ )
+ assert "卖出" not in text
+ assert text.count("继续持有") == 2
+
+
+def test_portfolio_profile_text_uses_each_profiles_selected_plan(us_instrument):
+ conservative_plan=SimpleNamespace(plan_id="conservative-plan",action=PlanAction.BUY)
+ aggressive_plan=SimpleNamespace(plan_id="aggressive-plan",action=PlanAction.BUY)
+ conservative=SimpleNamespace(action=PlanAction.BUY,final_requested_shares=Decimal("10"))
+ aggressive=SimpleNamespace(action=PlanAction.BUY,final_requested_shares=Decimal("25"))
+ details={
+     (us_instrument.code,"保守",conservative_plan.plan_id):(conservative,"条件满足后执行"),
+     (us_instrument.code,"激进",aggressive_plan.plan_id):(aggressive,"条件满足后执行"),
+ }
+ text=_signal_profile_text(
+     SimpleNamespace(instrument=us_instrument), details,
+     {"保守": conservative_plan, "激进": aggressive_plan},
+ )
+ assert "保守：条件确认后买入 10 股" in text
+ assert "激进：条件确认后买入 25 股" in text
+
+
+def test_waiting_entry_is_reported_as_observation_not_current_buy(us_instrument, now, calendar):
+ document=PortfolioReportBuilder().build(portfolio_presentation((us_instrument,),now=now,calendar=calendar))
+ operation=_section(document,"operation_report")
+ entry=next(block.payload for block in operation.blocks if block.payload.table_id=="portfolio_entry_signals")
+ hold=next(block.payload for block in operation.blocks if block.payload.table_id=="portfolio_hold_signals")
+ quick=next(block.payload for block in _section(document,"action_summary").blocks if block.kind.value=="table")
+ assert not entry.rows
+ assert hold.rows and hold.rows[0].cells[0]==us_instrument.code
+ assert quick.rows[0].cells[2].startswith("观察；当前不买入")

@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 import flet as ft
 
 from runtime import start_runtime
@@ -29,11 +30,10 @@ from ui.theme import BACKGROUND, PRIMARY
 
 logger = logging.getLogger(__name__)
 
-def _main(page: ft.Page) -> None:
-    lifecycle = None
+def _main(page: ft.Page, lifecycle) -> None:
+    started_at = monotonic()
     try:
         logger.info("Flet UI session initializing")
-        lifecycle = start_runtime()
         container = lifecycle.container
         page.title = "TradeHelper - 股票分析助手"
         page.theme_mode = ft.ThemeMode.LIGHT
@@ -44,12 +44,6 @@ def _main(page: ft.Page) -> None:
         page.window.min_width = 920
         page.window.min_height = 640
         page.theme = ft.Theme(color_scheme_seed=PRIMARY)
-        def close_session(_event=None):
-            logger.info("Flet UI session closing permanently")
-            lifecycle.close()
-        # A transient disconnect can reconnect to the same Page. Closing the
-        # repository there leaves every button bound to a dead runtime.
-        page.on_close = close_session
         single = SingleStockPage(lookup_port=container.lookup, analysis_port=container.analysis,
                              export_port=lambda document, *, format: export_report_and_reveal(container.repository, document, directory=container.settings.work_dir/"reports", format=format))
         portfolio = PortfolioPage(editor=container.portfolio_editor, lookup_port=container.lookup,
@@ -79,12 +73,27 @@ def _main(page: ft.Page) -> None:
         page.add(build_app(single, history, portfolio, settings, migration, evaluation=evaluation))
         if os.environ.get("TRADEHELPER_SMOKE_TEST") == "1":
             page.add(ft.Text("V2 smoke mode: runtime initialized", size=12))
-        logger.info("Flet UI session ready migration_status=%s", container.migration_status)
+        logger.info(
+            "Flet UI session ready migration_status=%s duration_seconds=%.3f",
+            container.migration_status,
+            monotonic() - started_at,
+        )
     except Exception:
         logger.exception("Flet UI session initialization failed")
-        if lifecycle is not None:
-            lifecycle.close()
         raise
+
+
+def run_desktop(*, settings: V2Settings | None = None, app_runner=None) -> None:
+    """Own one runtime for the whole desktop process, including UI reconnects."""
+    lifecycle = start_runtime(settings) if settings is not None else start_runtime()
+    runner = app_runner or ft.run
+    try:
+        runner(lambda page: _main(page, lifecycle))
+    finally:
+        close_started_at = monotonic()
+        logger.info("Desktop window closed; stopping runtime")
+        lifecycle.close()
+        logger.info("Desktop runtime stopped duration_seconds=%.3f", monotonic() - close_started_at)
 
 if __name__ == "__main__":
     runtime_settings = V2Settings.load()
@@ -94,7 +103,7 @@ if __name__ == "__main__":
         if os.environ.get("TRADEHELPER_SMOKE_TEST") == "1":
             from release.smoke import run_smoke
             raise SystemExit(0 if run_smoke().get("ok") else 1)
-        ft.run(_main)
+        run_desktop()
     except SystemExit:
         raise
     except Exception:

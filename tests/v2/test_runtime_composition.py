@@ -50,8 +50,27 @@ def test_RL02_startup_order_is_settings_schema_migration_then_ui():
     assert source.index("V2Settings.load") < source.index("ensure_work_dir")
     assert source.index("build_runtime_container") < source.index("find_completed_migration")
     main=Path("main.py").read_text(encoding="utf-8")
-    body=main[main.index("def _main"):]
-    assert body.index("start_runtime") < body.index("build_app")
+    assert main.index("def run_desktop") < main.index('if __name__ == "__main__"')
+    body=main[main.index("def run_desktop"):]
+    assert body.index("start_runtime") < body.index("runner(lambda page: _main(page, lifecycle))")
+
+
+def test_desktop_runtime_is_started_and_closed_once_for_recreated_sessions(monkeypatch):
+    import main
+    calls=[]
+    class Lifecycle:
+        container=object()
+        def close(self): calls.append("close")
+    lifecycle=Lifecycle()
+    monkeypatch.setattr(main,"start_runtime",lambda _settings=None:(calls.append("start"),lifecycle)[1])
+    monkeypatch.setattr(main,"_main",lambda page,value:calls.append((page,value)))
+    def runner(target):
+        target("session-1")
+        target("session-2")
+    main.run_desktop(settings=object(),app_runner=runner)
+    assert calls[0]=="start"
+    assert calls[1:3]==[("session-1",lifecycle),("session-2",lifecycle)]
+    assert calls[3:]==["close"]
 
 
 def test_RL03_close_stops_executors_before_repository_use(tmp_path):

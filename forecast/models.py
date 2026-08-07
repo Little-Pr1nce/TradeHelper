@@ -16,6 +16,7 @@ import warnings
 import zlib
 
 import numpy as np
+from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.tree import DecisionTreeClassifier
@@ -113,6 +114,17 @@ class TrainedForecastModel:
         return sha256(self.artifact_bytes()).hexdigest()
 
 
+def with_stock_return_history(
+    model: TrainedForecastModel, samples: tuple[ForecastTrainingSample, ...],
+) -> TrainedForecastModel:
+    """Keep fitted direction parameters while refreshing stock return history."""
+    return replace(
+        model,
+        training_returns=tuple(sample.future_return for sample in samples),
+        training_labels=tuple(sample.direction for sample in samples),
+    )
+
+
 def model_from_artifact(spec: ModelSpec, artifact: bytes) -> TrainedForecastModel:
     """安全加载 artifact；格式、版本或 spec 不一致即拒绝。"""
     payload = json.loads(zlib.decompress(artifact).decode("utf-8"))
@@ -186,6 +198,29 @@ def _row_regime(row: tuple[float | None, ...], payload: dict) -> str | None:
     return f"{'up' if trend > 0 else 'down_or_flat'}:{bucket}"
 
 
+def _tree_payload(estimator: DecisionTreeClassifier) -> dict:
+    tree = estimator.tree_
+    return {
+        "children_left": tree.children_left.tolist(),
+        "children_right": tree.children_right.tolist(),
+        "feature": tree.feature.tolist(),
+        "threshold": tree.threshold.tolist(),
+        "value": tree.value[:, 0, :].tolist(),
+    }
+
+
+def _tree_leaf_values(payload: dict, vector: np.ndarray) -> list[float]:
+    node = 0
+    while int(payload["children_left"][node]) != -1:
+        feature = int(payload["feature"][node])
+        node = int(
+            payload["children_left"][node]
+            if vector[feature] <= float(payload["threshold"][node])
+            else payload["children_right"][node]
+        )
+    return [float(value) for value in payload["value"][node]]
+
+
 def fit_model(spec: ModelSpec, samples: tuple[ForecastTrainingSample, ...], *, random_seed: int = 20260714) -> TrainedForecastModel | None:
     """Fit a candidate using only the supplied (fold-local) mature samples."""
     samples = _windowed_samples(spec, samples)
@@ -227,8 +262,25 @@ def fit_model(spec: ModelSpec, samples: tuple[ForecastTrainingSample, ...], *, r
         min_leaf = max(15, int(math.ceil(len(samples) * 0.02)))
         estimator = DecisionTreeClassifier(max_depth=int(spec.hyperparameters.get("max_depth", 2)), min_samples_leaf=min_leaf, random_state=random_seed)
         estimator.fit(matrix, y)
-        tree = estimator.tree_
-        payload = {"classes": estimator.classes_.tolist(), "children_left": tree.children_left.tolist(), "children_right": tree.children_right.tolist(), "feature": tree.feature.tolist(), "threshold": tree.threshold.tolist(), "value": tree.value[:, 0, :].tolist()}
+        payload = {"classes": estimator.classes_.tolist(), **_tree_payload(estimator)}
+    elif family is ModelFamily.PROBABILITY_FOREST:
+        # ExtraTrees supplies nonlinear interactions while remaining bounded:
+        # fixed seed, shallow trees and one CPU thread. Each tree is flattened
+        # into JSON arrays, preserving the no-pickle artifact contract.
+        min_leaf = max(15, int(math.ceil(len(samples) * 0.02)))
+        estimator = ExtraTreesClassifier(
+            n_estimators=int(spec.hyperparameters.get("n_estimators", 24)),
+            max_depth=int(spec.hyperparameters.get("max_depth", 4)),
+            min_samples_leaf=min_leaf,
+            max_features=float(spec.hyperparameters.get("max_features", 0.7)),
+            random_state=random_seed,
+            n_jobs=1,
+        )
+        estimator.fit(matrix, y)
+        payload = {
+            "classes": estimator.classes_.tolist(),
+            "trees": [_tree_payload(tree) for tree in estimator.estimators_],
+        }
     elif family is ModelFamily.ENSEMBLE:
         # 集成权重是预注册常量，不能根据 confirmation 结果再调权重。
         child_window = ({"training_window": spec.hyperparameters["training_window"]}
@@ -245,27 +297,33 @@ def fit_model(spec: ModelSpec, samples: tuple[ForecastTrainingSample, ...], *, r
     return TrainedForecastModel(spec, preprocessor, payload, returns, labels)
 
 
-def fit_calibrated_model(
-    spec: ModelSpec, samples: tuple[ForecastTrainingSample, ...], *, random_seed: int = 20260714,
-) -> TrainedForecastModel | None:
-    """按时间保留最后 20% 成熟样本校准概率，并把温度固化进 artifact。"""
-    if spec.family is ModelFamily.EMPIRICAL:
-        return fit_model(spec, samples, random_seed=random_seed)
-    effective_samples = _windowed_samples(spec, samples)
-    calibration_count = int(math.ceil(len(effective_samples) * 0.20))
-    if calibration_count < 30 or len(effective_samples) - calibration_count < 30:
-        return fit_model(spec, effective_samples, random_seed=random_seed)
-    training = effective_samples[:-calibration_count]
-    calibration = effective_samples[-calibration_count:]
-    model = fit_model(spec, training, random_seed=random_seed)
-    if model is None:
+def _calibration_start(samples: tuple[ForecastTrainingSample, ...]) -> int | None:
+    """Return a complete-date 20% calibration boundary with 30 points per side."""
+    calibration_count = int(math.ceil(len(samples) * 0.20))
+    if calibration_count < 30 or len(samples) - calibration_count < 30:
         return None
+    start = len(samples) - calibration_count
+    boundary = samples[start].origin_session_date
+    while start > 0 and samples[start - 1].origin_session_date == boundary:
+        start -= 1
+    return start if start >= 30 and len(samples) - start >= 30 else None
+
+
+def _calibrate_fitted_model(
+    model: TrainedForecastModel,
+    calibration: tuple[ForecastTrainingSample, ...],
+    *, prior_samples: tuple[ForecastTrainingSample, ...],
+    final_history: tuple[ForecastTrainingSample, ...],
+    calibrate_probabilities: bool = True,
+) -> TrainedForecastModel | None:
+    """Fit probability and interval calibration on a model-untouched time slice."""
+    prediction_model = with_stock_return_history(model, prior_samples)
     raw_probabilities: list[DirectionProbabilities] = []
     interval_ratios: list[float] = []
     labels: list[ForecastDirection] = []
     for sample in calibration:
         try:
-            probability, interval = predict_model(model, sample.feature_snapshot)
+            probability, interval = predict_model(prediction_model, sample.feature_snapshot)
         except InsufficientRegimeSamples:
             return None
         raw_probabilities.append(probability)
@@ -274,8 +332,11 @@ def fit_calibrated_model(
         center = float(interval.p50)
         width = max(center - float(interval.p10), 1e-9) if observed < center else max(float(interval.p90) - center, 1e-9)
         interval_ratios.append(abs(observed - center) / width)
-    from .diagnostics import fit_temperature
-    temperature = fit_temperature(tuple(raw_probabilities), tuple(labels))
+    from .diagnostics import apply_temperature, fit_prior_shrinkage, fit_temperature
+    temperature = (
+        fit_temperature(tuple(raw_probabilities), tuple(labels))
+        if calibrate_probabilities else 1.0
+    )
     # Calibrate the nominal P10-P90 interval separately from direction
     # probabilities. The finite-sample "higher" quantile avoids claiming an
     # 80% interval that was too narrow even on its own calibration segment.
@@ -283,12 +344,98 @@ def fit_calibrated_model(
     interval_scale = min(max(interval_scale, 0.50), 3.00)
     payload = dict(model.payload)
     payload["_interval_scale"] = interval_scale
+    if calibrate_probabilities:
+        temperature_scaled = tuple(apply_temperature(item, temperature) for item in raw_probabilities)
+        prior_shrinkage, calibration_prior = fit_prior_shrinkage(
+            temperature_scaled, tuple(labels),
+            prior_labels=tuple(sample.direction for sample in prior_samples),
+        )
+        payload["_prior_shrinkage"] = prior_shrinkage
+        payload["_calibration_prior"] = calibration_prior.to_dict()
     return replace(
         model,
         payload=payload,
-        training_returns=tuple(sample.future_return for sample in effective_samples),
-        training_labels=tuple(sample.direction for sample in effective_samples),
+        training_returns=tuple(sample.future_return for sample in final_history),
+        training_labels=tuple(sample.direction for sample in final_history),
         temperature=temperature,
+    )
+
+
+def fit_calibrated_model(
+    spec: ModelSpec, samples: tuple[ForecastTrainingSample, ...], *, random_seed: int = 20260714,
+) -> TrainedForecastModel | None:
+    """按完整交易日保留最后 20% 成熟样本校准概率与收益区间。"""
+    effective_samples = _windowed_samples(spec, samples)
+    start = _calibration_start(effective_samples)
+    if start is None:
+        return fit_model(spec, effective_samples, random_seed=random_seed)
+    calibration = effective_samples[start:]
+    calibration_origin = calibration[0].origin_session_date
+    training = tuple(
+        sample for sample in effective_samples[:start]
+        if sample.target_session_date <= calibration_origin
+    )
+    if len(training) < 30:
+        return fit_model(spec, effective_samples, random_seed=random_seed)
+    model = fit_model(spec, training, random_seed=random_seed)
+    if model is None:
+        return None
+    calibrated = _calibrate_fitted_model(
+        model, calibration, prior_samples=training, final_history=effective_samples,
+        calibrate_probabilities=spec.family is not ModelFamily.EMPIRICAL,
+    )
+    if calibrated is None or spec.family is not ModelFamily.EMPIRICAL:
+        return calibrated
+    # The held-out slice estimates interval width only.  Direction probability
+    # remains the full-history empirical prior used by the original baseline.
+    refitted = fit_model(spec, effective_samples, random_seed=random_seed)
+    if refitted is None:
+        return None
+    payload = dict(refitted.payload)
+    payload["_interval_scale"] = calibrated.payload["_interval_scale"]
+    return replace(refitted, payload=payload)
+
+
+def fit_panel_calibrated_model(
+    spec: ModelSpec,
+    panel_samples: tuple[ForecastTrainingSample, ...],
+    target_samples: tuple[ForecastTrainingSample, ...],
+    *,
+    random_seed: int = 20260714,
+) -> TrainedForecastModel | None:
+    """Fit market-pooled direction parameters and stock-specific calibration.
+
+    The target calibration dates are excluded from every panel instrument's
+    direction fit.  Target-stock OOF therefore remains the sole promotion
+    authority while the estimator can borrow stable cross-stock relationships.
+    """
+    target = _windowed_samples(spec, target_samples)
+    start = _calibration_start(target)
+    if start is None:
+        fitted = fit_model(spec, panel_samples, random_seed=random_seed)
+        return None if fitted is None else with_stock_return_history(fitted, target)
+    calibration = target[start:]
+    calibration_origin = calibration[0].origin_session_date
+    direction_training = tuple(
+        sample for sample in panel_samples
+        if sample.origin_session_date < calibration_origin
+        and sample.target_session_date <= calibration_origin
+    )
+    prior_samples = tuple(
+        sample for sample in target[:start]
+        if sample.target_session_date <= calibration_origin
+    )
+    if (
+        len(prior_samples) < 30
+        or len({sample.instrument.stable_key for sample in direction_training}) < 5
+    ):
+        fitted = fit_model(spec, panel_samples, random_seed=random_seed)
+        return None if fitted is None else with_stock_return_history(fitted, target)
+    fitted = fit_model(spec, direction_training, random_seed=random_seed)
+    if fitted is None:
+        return None
+    return _calibrate_fitted_model(
+        fitted, calibration, prior_samples=prior_samples, final_history=target,
     )
 
 
@@ -297,10 +444,17 @@ def _softmax(values: np.ndarray) -> np.ndarray:
 
 
 def _calibrated(model: TrainedForecastModel, probabilities: DirectionProbabilities) -> DirectionProbabilities:
-    if model.temperature == 1.0:
-        return probabilities
     from .diagnostics import apply_temperature
-    return apply_temperature(probabilities, model.temperature)
+    adjusted = probabilities if model.temperature == 1.0 else apply_temperature(probabilities, model.temperature)
+    shrinkage = float(model.payload.get("_prior_shrinkage", 0.0))
+    prior_payload = model.payload.get("_calibration_prior")
+    if shrinkage <= 0.0 or not isinstance(prior_payload, dict):
+        return adjusted
+    prior = DirectionProbabilities(**prior_payload)
+    return _probabilities(
+        np.asarray((adjusted.bullish, adjusted.neutral, adjusted.bearish)) * (1.0 - shrinkage)
+        + np.asarray((prior.bullish, prior.neutral, prior.bearish)) * shrinkage
+    )
 
 
 def _class_mixture_distribution(model: TrainedForecastModel, probabilities: DirectionProbabilities) -> ReturnDistribution:
@@ -347,14 +501,36 @@ def _model_probabilities(model: TrainedForecastModel, row: tuple[float | None, .
         scores = np.asarray(model.payload["coef"], dtype=float) @ vector + np.asarray(model.payload["intercept"], dtype=float)
         partial = _softmax(scores); values = np.zeros(3, dtype=float)
         for class_index, probability in zip(model.payload["classes"], partial): values[int(class_index)] = probability
-        probabilities = _calibrated(model, _probabilities(values))
+        probabilities = _probabilities(values)
+        empirical_blend = float(model.spec.hyperparameters.get("empirical_blend", 0.0))
+        if not 0.0 <= empirical_blend <= 0.8:
+            raise ValueError("empirical_blend must be in [0.0, 0.8]")
+        if empirical_blend:
+            prior = _laplace(model.training_labels)
+            probabilities = _probabilities(
+                np.asarray(
+                    (probabilities.bullish, probabilities.neutral, probabilities.bearish),
+                    dtype=float,
+                ) * (1.0 - empirical_blend)
+                + np.asarray((prior.bullish, prior.neutral, prior.bearish), dtype=float)
+                * empirical_blend
+            )
+        probabilities = _calibrated(model, probabilities)
         return probabilities, _class_mixture_distribution(model, probabilities)
     if family is ModelFamily.PROBABILITY_TREE:
-        node = 0
-        while int(model.payload["children_left"][node]) != -1:
-            node = int(model.payload["children_left"][node] if vector[int(model.payload["feature"][node])] <= float(model.payload["threshold"][node]) else model.payload["children_right"][node])
         values = np.ones(3, dtype=float)
-        for class_index, count in zip(model.payload["classes"], model.payload["value"][node]): values[int(class_index)] += float(count)
+        for class_index, count in zip(model.payload["classes"], _tree_leaf_values(model.payload, vector)): values[int(class_index)] += count
+        probabilities = _calibrated(model, _probabilities(values))
+        return probabilities, _class_mixture_distribution(model, probabilities)
+    if family is ModelFamily.PROBABILITY_FOREST:
+        values = np.zeros(3, dtype=float)
+        for tree in model.payload["trees"]:
+            leaf = np.asarray(_tree_leaf_values(tree, vector), dtype=float)
+            total = float(leaf.sum())
+            if total <= 0:
+                continue
+            for class_index, probability in zip(model.payload["classes"], leaf / total):
+                values[int(class_index)] += float(probability)
         probabilities = _calibrated(model, _probabilities(values))
         return probabilities, _class_mixture_distribution(model, probabilities)
     if family is ModelFamily.ENSEMBLE:

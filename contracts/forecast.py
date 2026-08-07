@@ -52,6 +52,7 @@ class ModelFamily(_StringEnum):
     ANALOG = "analog"
     MULTINOMIAL_LOGISTIC = "multinomial_logistic"
     PROBABILITY_TREE = "probability_tree"
+    PROBABILITY_FOREST = "probability_forest"
     ENSEMBLE = "ensemble"
     REGIME_ANALOG = "regime_analog"
 

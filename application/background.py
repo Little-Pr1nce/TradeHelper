@@ -7,7 +7,7 @@ from concurrent.futures import Executor
 from threading import Lock
 from contracts.runtime import ReportRevisionLink, RevisionKind, report_revision_invariant
 from contracts.market_data import stable_hash
-from contracts import ForecastScope
+from contracts import ForecastScope, ValidationStatus
 from forecast.trainer import training_data_hash
 from learning.maturity import MaturityResolver
 
@@ -139,12 +139,14 @@ class BackgroundForecastTrainingService:
         self._futures = {}
         self._lock = Lock()
 
-    def submit(self, instrument, samples):
+    def submit(self, instrument, samples, *, panel_samples=()):
         materialized = tuple(samples)
+        panel_materialized = tuple(panel_samples)
         task_id = stable_hash({
             "kind": "forecast_oof",
             "instrument": instrument.stable_key,
             "training_data_hash": training_data_hash(materialized),
+            "panel_data_hash": training_data_hash(panel_materialized) if panel_materialized else None,
         })
         with self._lock:
             existing = self._futures.get(task_id)
@@ -154,11 +156,19 @@ class BackgroundForecastTrainingService:
         def work():
             statuses = {}
             try:
-                data_hash = training_data_hash(materialized)
+                data_hash = stable_hash({
+                    "target": training_data_hash(materialized),
+                    "panel": training_data_hash(panel_materialized) if panel_materialized else None,
+                })
                 for horizon in (1, 3, 5, 10):
+                    prior_registered = self.registry.champion(
+                        market=instrument.market, scope=ForecastScope.STOCK,
+                        scope_key=instrument.stable_key, horizon=horizon,
+                    )
                     outcome = self.trainer.evaluate(
                         materialized, scope=ForecastScope.STOCK,
                         scope_key=instrument.stable_key, horizon=horizon,
+                        panel_samples=panel_materialized,
                     )
                     statuses[horizon] = outcome.status.value
                     record_validation = getattr(self.registry, "record_validation", None)
@@ -217,6 +227,24 @@ class BackgroundForecastTrainingService:
                     if outcome.champion is not None and outcome.champion_model is not None:
                         self.repository.promote_forecast_model(outcome.champion)
                         self.registry.promote(outcome.champion, outcome.champion_model)
+                    elif outcome.status in {
+                        ValidationStatus.EVALUATED_NOT_BETTER,
+                        ValidationStatus.CALIBRATION_FAILED,
+                        ValidationStatus.DRIFTED,
+                    }:
+                        retire = getattr(self.repository, "retire_forecast_champion", None)
+                        if retire is not None and prior_registered is not None:
+                            retired_version = retire(
+                                market=instrument.market, scope=ForecastScope.STOCK,
+                                scope_key=instrument.stable_key, horizon=horizon,
+                                expected_version=prior_registered.version.version,
+                            )
+                            if retired_version is not None:
+                                self.registry.retire(
+                                    market=instrument.market, scope=ForecastScope.STOCK,
+                                    scope_key=instrument.stable_key, horizon=horizon,
+                                    expected_version=retired_version,
+                                )
                 logger.info(
                     "Background forecast OOF completed task_id=%s instrument=%s statuses=%s",
                     task_id, instrument.stable_key, statuses,

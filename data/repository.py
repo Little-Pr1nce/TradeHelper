@@ -601,6 +601,28 @@ class SQLiteRepository:
             connection.execute("UPDATE forecast_model_versions SET lifecycle='champion', validation_status=?, promoted_at=? WHERE version=?", (version.validation_status.value, utc_iso(version.promoted_at or datetime.now(timezone.utc)), version.version))
             connection.execute("INSERT OR IGNORE INTO forecast_promotion_events(market, scope, scope_key, horizon, previous_version, promoted_version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (version.market.value, version.scope.value, version.scope_key, version.horizon, prior["version"] if prior else None, version.version, utc_iso(datetime.now(timezone.utc))))
 
+    def retire_forecast_champion(
+        self, *, market: Market, scope: ForecastScope, scope_key: str, horizon: int,
+        expected_version: str | None = None,
+    ) -> str | None:
+        """Atomically retire the current Champion when fresh OOF evidence fails.
+
+        ``expected_version`` prevents a late background task from retiring a
+        newer Champion promoted by another completed task.
+        """
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT version FROM forecast_model_versions WHERE market=? AND scope=? AND scope_key=? AND horizon=? AND lifecycle='champion'",
+                (market.value, scope.value, scope_key, horizon),
+            ).fetchone()
+            if row is None or (expected_version is not None and row["version"] != expected_version):
+                return None
+            connection.execute(
+                "UPDATE forecast_model_versions SET lifecycle='retired' WHERE version=? AND lifecycle='champion'",
+                (row["version"],),
+            )
+            return str(row["version"])
+
     @staticmethod
     def _forecast_model_from_row(row: sqlite3.Row) -> ForecastModelVersion:
         spec_payload = json.loads(row["spec_json"])
@@ -1466,8 +1488,30 @@ class SQLiteRepository:
         if query.minimum_rating is not None: where.append(f"COALESCE({rating},0)>=?");params.append(query.minimum_rating)
         clause=" AND ".join(where)
         total=int(self._fetchone(f"SELECT COUNT(*) AS count FROM report_snapshots r WHERE {clause}",tuple(params))["count"])
-        rows=self._fetchall(f"SELECT r.report_id FROM report_snapshots r WHERE {clause} ORDER BY r.as_of DESC,r.report_id DESC LIMIT ? OFFSET ?",tuple(params+[query.page_size,(query.page-1)*query.page_size]))
-        items=tuple(self.get_report_snapshot(row["report_id"]) for row in rows)
+        rows=self._fetchall(
+            f"""SELECT r.report_id,r.payload_json,r.document_hash,r.report_kind,r.market,
+                       r.instrument_key,r.analysis_mode,r.as_of,r.source_refs_json,
+                       r.renderer_version,r.archived,r.created_at,
+                       json_extract(r.payload_json,'$.subtitle') AS history_period,
+                       {rating} AS latest_rating
+                FROM report_snapshots r WHERE {clause}
+                ORDER BY r.as_of DESC,r.report_id DESC LIMIT ? OFFSET ?""",
+            tuple(params+[query.page_size,(query.page-1)*query.page_size]),
+        )
+        def summary(row):
+            instrument=None
+            if row["instrument_key"]:
+                market,exchange,code=row["instrument_key"].split(":",2)
+                instrument=InstrumentId(code,Market(market),Exchange(exchange))
+            return ReportSnapshot(
+                row["report_id"],row["payload_json"],row["document_hash"],
+                ReportKind(row["report_kind"]),Market(row["market"]),instrument,
+                DecisionMode(row["analysis_mode"]),_parse_datetime(row["as_of"]),
+                tuple(json.loads(row["source_refs_json"])),row["renderer_version"],
+                row["history_period"],bool(row["archived"]),_parse_datetime(row["created_at"]),
+                None if row["latest_rating"] is None else int(row["latest_rating"]),
+            )
+        items=tuple(summary(row) for row in rows)
         return ReportHistoryPage(query,items,total,query.page*query.page_size<total)
 
     def list_report_feedback(self, report_id: str) -> tuple[ReportFeedback,...]:
@@ -1542,6 +1586,27 @@ class SQLiteRepository:
         if origin is not None: sql+=" AND evidence_origin=?"; values.append(origin.value)
         sql+=" ORDER BY generated_at,forecast_outcome_id"
         return tuple(self.get_forecast_outcome(row["forecast_outcome_id"]) for row in self._fetchall(sql,tuple(values)))
+
+    def list_market_forecast_outcomes(
+        self, market: Market, *, horizon: int | None = None,
+        origin: EvidenceOrigin | None = None,
+    ) -> tuple[ForecastOutcome, ...]:
+        """Read scored forecast facts for a market-level live quality gate."""
+        sql = "SELECT forecast_outcome_id FROM forecast_outcomes WHERE instrument_key LIKE ?"
+        values: list[object] = [f"{market.value}:%"]
+        if horizon is not None:
+            if horizon not in {1, 3, 5, 10}:
+                raise ValueError("forecast outcome horizon must be 1, 3, 5 or 10")
+            sql += " AND horizon=?"
+            values.append(horizon)
+        if origin is not None:
+            sql += " AND evidence_origin=?"
+            values.append(origin.value)
+        sql += " ORDER BY generated_at,forecast_outcome_id"
+        return tuple(
+            self.get_forecast_outcome(row["forecast_outcome_id"])
+            for row in self._fetchall(sql, tuple(values))
+        )
 
     def save_scenario_outcome(self, outcome: ScenarioOutcome) -> ForecastWriteResult:
         return self._save_learning_record(table="scenario_outcomes",id_column="scenario_outcome_id",record=outcome,event_key=outcome.scenario_outcome_id,columns=("scenario_outcome_id","event_key","instrument_key","status","payload_hash","payload_json","generated_at","schema_version"),values=(outcome.scenario_outcome_id,outcome.scenario_outcome_id,outcome.instrument.stable_key,outcome.status.value),instrument_key=outcome.instrument.stable_key)
